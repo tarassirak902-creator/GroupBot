@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "groupbot"
 version = "0.1.0"
@@ -17,6 +21,11 @@ dev = [
   "pytest-asyncio>=0.24,<1",
   "ruff>=0.6,<1",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["alembic*", "content*", "tests*"]
 
 [tool.ruff]
 line-length = 100
