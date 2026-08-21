@@ -27,6 +27,14 @@ def upgrade() -> None:
         sa.UniqueConstraint("chat_id", "code", name="uq_rp_actions_chat_code"),
     )
     op.create_table(
+        "rp_templates",
+        sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
+        sa.Column("action_id", sa.BigInteger(), nullable=False),
+        sa.Column("text", sa.String(1000), nullable=False),
+        sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.ForeignKeyConstraint(["action_id"], ["rp_actions.id"], ondelete="CASCADE"),
+    )
+    op.create_table(
         "cooldowns",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
         sa.Column("chat_id", sa.BigInteger(), nullable=False),
@@ -40,4 +48,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("cooldowns")
+    op.drop_table("rp_templates")
     op.drop_table("rp_actions")
