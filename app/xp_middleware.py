@@ -6,7 +6,8 @@ from aiogram.types import Message, TelegramObject
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.content import render_level_up
+from app.achievement_service import award_level_achievements
+from app.content import render_achievement, render_level_up
 from app.models import GroupSettings, GroupUser, XPConfig
 
 
@@ -30,6 +31,7 @@ class XPMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         level_up_to: int | None = None
+        current_level: int | None = None
 
         async with self.session_factory() as session:
             async with session.begin():
@@ -67,12 +69,27 @@ class XPMiddleware(BaseMiddleware):
                 thresholds = sorted(int(value) for value in config.level_thresholds)
                 new_level = 1 + sum(group_user.xp >= threshold for threshold in thresholds)
                 group_user.level = new_level
+                current_level = new_level
                 if new_level > previous_level:
                     level_up_to = new_level
+
+        awarded = []
+        if current_level is not None:
+            awarded = await award_level_achievements(
+                self.session_factory,
+                event.chat.id,
+                event.from_user.id,
+                current_level,
+            )
 
         result = await handler(event, data)
 
         if level_up_to is not None:
             await event.answer(render_level_up(event.from_user.full_name, level_up_to))
+
+        for achievement in awarded:
+            await event.answer(
+                render_achievement(event.from_user.full_name, achievement.name)
+            )
 
         return result
