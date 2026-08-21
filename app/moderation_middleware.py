@@ -70,7 +70,6 @@ class ModerationMiddleware(BaseMiddleware):
                     if not matches:
                         return await handler(event, data)
 
-            # На первом этапе поддерживаем безопасное действие delete.
             effective_set, _ = matches[0]
             telegram_ok: bool | None = None
             telegram_error: str | None = None
@@ -78,26 +77,26 @@ class ModerationMiddleware(BaseMiddleware):
                 try:
                     await event.delete()
                     telegram_ok = True
-                except Exception as exc:  # Telegram API error is logged, processing continues.
+                except Exception as exc:
                     telegram_ok = False
                     telegram_error = str(exc)[:500]
 
-            async with session.begin():
-                for filter_set, item in matches:
-                    session.add(
-                        ModerationAction(
-                            chat_id=event.chat.id,
-                            user_id=event.from_user.id,
-                            message_id=event.message_id,
-                            filter_set_id=filter_set.id,
-                            filter_item_id=item.id,
-                            matched_value=item.value,
-                            action=effective_set.action,
-                            reason=filter_set.reason,
-                            telegram_ok=telegram_ok,
-                            telegram_error=telegram_error,
-                        )
+            for filter_set, item in matches:
+                session.add(
+                    ModerationAction(
+                        chat_id=event.chat.id,
+                        user_id=event.from_user.id,
+                        message_id=event.message_id,
+                        filter_set_id=filter_set.id,
+                        filter_item_id=item.id,
+                        matched_value=item.value,
+                        action=effective_set.action,
+                        reason=filter_set.reason,
+                        telegram_ok=telegram_ok,
+                        telegram_error=telegram_error,
                     )
+                )
+            await session.commit()
 
         if telegram_ok:
             return None
