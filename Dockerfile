@@ -10,6 +10,8 @@ COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install .
 
 COPY app ./app
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 
 RUN useradd --create-home --uid 10001 groupbot && chown -R groupbot:groupbot /app
 USER groupbot
