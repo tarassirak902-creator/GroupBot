@@ -1,0 +1,40 @@
+import asyncio
+import logging
+
+from aiogram import Bot, Dispatcher
+from aiogram.filters import CommandStart
+from aiogram.types import Message
+
+from app.config import get_settings
+from app.db import check_database, create_engine
+
+
+dp = Dispatcher()
+
+
+@dp.message(CommandStart())
+async def start_handler(message: Message) -> None:
+    await message.answer("GroupBot запущен. Базовый каркас v0.1 работает.")
+
+
+async def main() -> None:
+    settings = get_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    engine = create_engine(settings.database_url)
+    await check_database(engine)
+    logging.getLogger(__name__).info("Database connection is ready")
+
+    bot = Bot(token=settings.bot_token.get_secret_value())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+        await engine.dispose()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
