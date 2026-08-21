@@ -18,6 +18,23 @@ class Group(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class GroupSettings(Base):
+    __tablename__ = "group_settings"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("groups.chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    xp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    economy_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    auto_activity_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    moderation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class User(Base):
     __tablename__ = "users"
 
