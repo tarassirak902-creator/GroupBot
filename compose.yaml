@@ -16,13 +16,28 @@ services:
     mem_limit: 192m
 
   bot:
-    build: .
+    build:
+      context: .
+      target: runtime
     restart: unless-stopped
     env_file:
       - .env
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 256m
+
+  test:
+    build:
+      context: .
+      target: test
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["pytest", "-q"]
+    profiles: ["test"]
     mem_limit: 256m
 
 volumes:
