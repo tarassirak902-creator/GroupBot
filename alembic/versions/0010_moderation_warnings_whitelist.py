@@ -1,4 +1,4 @@
-"""add moderation warnings and whitelist
+"""extend moderation actions and exclusions
 
 Revision ID: 0010_moderation_warnings_whitelist
 Revises: 0009_moderation_core
@@ -12,6 +12,8 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
+    op.add_column("filter_sets", sa.Column("mute_seconds", sa.Integer(), nullable=True))
+    op.add_column("filter_sets", sa.Column("exclude_whitelist", sa.Boolean(), server_default=sa.text("true"), nullable=False))
     op.create_table("moderation_warnings",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("chat_id", sa.BigInteger(), nullable=False),
@@ -36,3 +38,5 @@ def downgrade() -> None:
     op.drop_table("moderation_whitelist")
     op.drop_index("ix_moderation_warnings_chat_user", table_name="moderation_warnings")
     op.drop_table("moderation_warnings")
+    op.drop_column("filter_sets", "exclude_whitelist")
+    op.drop_column("filter_sets", "mute_seconds")
