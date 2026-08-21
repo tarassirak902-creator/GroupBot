@@ -8,6 +8,7 @@ from aiogram.types import Message
 from app.activity_middleware import ActivityMiddleware
 from app.config import get_settings
 from app.db import check_database, create_engine, create_session_factory
+from app.settings_router import create_settings_router
 
 
 dp = Dispatcher()
@@ -31,6 +32,7 @@ async def main() -> None:
 
     session_factory = create_session_factory(engine)
     dp.update.outer_middleware(ActivityMiddleware(session_factory))
+    dp.include_router(create_settings_router(session_factory))
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     try:
