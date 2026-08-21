@@ -1,0 +1,5 @@
+{
+  "templates": [
+    "{Username}\n🏅 Получено достижение: {AchievementName}"
+  ]
+}
