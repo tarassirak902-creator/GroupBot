@@ -9,6 +9,8 @@ from app.activity_middleware import ActivityMiddleware
 from app.config import get_settings
 from app.db import check_database, create_engine, create_session_factory
 from app.settings_router import create_settings_router
+from app.xp_middleware import XPMiddleware
+from app.xp_router import create_xp_router
 
 
 dp = Dispatcher()
@@ -32,7 +34,9 @@ async def main() -> None:
 
     session_factory = create_session_factory(engine)
     dp.update.outer_middleware(ActivityMiddleware(session_factory))
+    dp.message.outer_middleware(XPMiddleware(session_factory))
     dp.include_router(create_settings_router(session_factory))
+    dp.include_router(create_xp_router(session_factory))
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     try:
