@@ -5,8 +5,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from app.activity_middleware import ActivityMiddleware
 from app.config import get_settings
-from app.db import check_database, create_engine
+from app.db import check_database, create_engine, create_session_factory
 
 
 dp = Dispatcher()
@@ -27,6 +28,9 @@ async def main() -> None:
     engine = create_engine(settings.database_url)
     await check_database(engine)
     logging.getLogger(__name__).info("Database connection is ready")
+
+    session_factory = create_session_factory(engine)
+    dp.update.outer_middleware(ActivityMiddleware(session_factory))
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     try:
