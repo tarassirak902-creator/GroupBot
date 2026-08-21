@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+from app.achievement_router import create_achievement_router
 from app.activity_middleware import ActivityMiddleware
 from app.config import get_settings
 from app.db import check_database, create_engine, create_session_factory
@@ -37,6 +38,7 @@ async def main() -> None:
     dp.message.outer_middleware(XPMiddleware(session_factory))
     dp.include_router(create_settings_router(session_factory))
     dp.include_router(create_xp_router(session_factory))
+    dp.include_router(create_achievement_router(session_factory))
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     try:
