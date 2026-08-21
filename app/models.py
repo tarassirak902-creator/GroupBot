@@ -21,11 +21,7 @@ class Group(Base):
 class GroupSettings(Base):
     __tablename__ = "group_settings"
 
-    chat_id: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("groups.chat_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), primary_key=True)
     rp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     xp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     economy_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
@@ -38,11 +34,7 @@ class GroupSettings(Base):
 class XPConfig(Base):
     __tablename__ = "xp_configs"
 
-    chat_id: Mapped[int] = mapped_column(
-        BigInteger,
-        ForeignKey("groups.chat_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), primary_key=True)
     xp_per_message: Mapped[int | None] = mapped_column(Integer, nullable=True)
     level_thresholds: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -101,6 +93,19 @@ class UserAchievement(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
     achievement_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("achievements.id", ondelete="CASCADE"), nullable=False, index=True)
     awarded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False, index=True)
+    from_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    to_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
 
 
 class ProcessedUpdate(Base):
