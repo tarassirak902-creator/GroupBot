@@ -6,6 +6,7 @@ from aiogram.types import Message, TelegramObject
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.content import render_level_up
 from app.models import GroupSettings, GroupUser, XPConfig
 
 
@@ -27,6 +28,8 @@ class XPMiddleware(BaseMiddleware):
             return await handler(event, data)
         if event.text and event.text.startswith("/"):
             return await handler(event, data)
+
+        level_up_to: int | None = None
 
         async with self.session_factory() as session:
             async with session.begin():
@@ -59,8 +62,17 @@ class XPMiddleware(BaseMiddleware):
                 if group_user is None:
                     return await handler(event, data)
 
+                previous_level = group_user.level
                 group_user.xp += config.xp_per_message
                 thresholds = sorted(int(value) for value in config.level_thresholds)
-                group_user.level = 1 + sum(group_user.xp >= threshold for threshold in thresholds)
+                new_level = 1 + sum(group_user.xp >= threshold for threshold in thresholds)
+                group_user.level = new_level
+                if new_level > previous_level:
+                    level_up_to = new_level
 
-        return await handler(event, data)
+        result = await handler(event, data)
+
+        if level_up_to is not None:
+            await event.answer(render_level_up(event.from_user.full_name, level_up_to))
+
+        return result
