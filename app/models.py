@@ -113,6 +113,48 @@ class Relationship(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class FilterSet(Base):
+    __tablename__ = "filter_sets"
+    __table_args__ = (UniqueConstraint("chat_id", "name", name="uq_filter_sets_chat_name"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    match_type: Mapped[str] = mapped_column(String(16), nullable=False, default="whole", server_default="whole")
+    case_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    delete_message: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    action: Mapped[str] = mapped_column(String(32), nullable=False, default="delete", server_default="delete")
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    exclude_admins: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FilterItem(Base):
+    __tablename__ = "filter_items"
+    __table_args__ = (UniqueConstraint("filter_set_id", "value", name="uq_filter_item_value"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    filter_set_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("filter_sets.id", ondelete="CASCADE"), nullable=False, index=True)
+    value: Mapped[str] = mapped_column(String(500), nullable=False)
+
+
+class ModerationAction(Base):
+    __tablename__ = "moderation_actions"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    filter_set_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("filter_sets.id", ondelete="CASCADE"), nullable=False)
+    filter_item_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("filter_items.id", ondelete="CASCADE"), nullable=False)
+    matched_value: Mapped[str] = mapped_column(String(500), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    telegram_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    telegram_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+
 class ProcessedUpdate(Base):
     __tablename__ = "processed_updates"
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
