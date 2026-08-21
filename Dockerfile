@@ -6,16 +6,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
 RUN pip install --upgrade pip
 
-FROM base AS runtime
-RUN pip install .
-
+COPY pyproject.toml ./
 COPY app ./app
 COPY content ./content
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
+
+FROM base AS runtime
+RUN pip install .
 
 RUN useradd --create-home --uid 10001 groupbot && chown -R groupbot:groupbot /app
 USER groupbot
@@ -23,13 +23,8 @@ USER groupbot
 CMD ["python", "-m", "app.main"]
 
 FROM base AS test
-RUN pip install ".[dev]"
-
-COPY app ./app
-COPY content ./content
-COPY alembic.ini ./alembic.ini
-COPY alembic ./alembic
 COPY tests ./tests
+RUN pip install ".[dev]"
 
 RUN useradd --create-home --uid 10001 groupbot && chown -R groupbot:groupbot /app
 USER groupbot
