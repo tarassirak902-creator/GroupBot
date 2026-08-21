@@ -7,6 +7,7 @@ from aiogram.types import Message
 
 from app.achievement_router import create_achievement_router
 from app.activity_middleware import ActivityMiddleware
+from app.auto_activity import auto_activity_worker, create_auto_activity_router
 from app.config import get_settings
 from app.db import check_database, create_engine, create_session_factory
 from app.economy_router import create_economy_router
@@ -40,10 +41,18 @@ async def main() -> None:
     dp.include_router(create_economy_router(session_factory))
     dp.include_router(create_rp_router(session_factory))
     dp.include_router(create_relationship_router(session_factory))
+    dp.include_router(create_auto_activity_router(session_factory))
+
     bot = Bot(token=settings.bot_token.get_secret_value())
+    worker = asyncio.create_task(auto_activity_worker(bot, session_factory))
     try:
         await dp.start_polling(bot)
     finally:
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
         await bot.session.close()
         await engine.dispose()
 
