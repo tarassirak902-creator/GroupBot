@@ -124,8 +124,10 @@ class FilterSet(Base):
     case_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     delete_message: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     action: Mapped[str] = mapped_column(String(32), nullable=False, default="delete", server_default="delete")
+    mute_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
     exclude_admins: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    exclude_whitelist: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -153,6 +155,25 @@ class ModerationAction(Base):
     telegram_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     telegram_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+
+class ModerationWarning(Base):
+    __tablename__ = "moderation_warnings"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    filter_set_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("filter_sets.id", ondelete="SET NULL"), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ModerationWhitelist(Base):
+    __tablename__ = "moderation_whitelist"
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_moderation_whitelist_chat_user"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class ProcessedUpdate(Base):
