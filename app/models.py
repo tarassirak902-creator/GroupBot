@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, JSON, String, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -31,6 +31,20 @@ class GroupSettings(Base):
     economy_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     auto_activity_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     moderation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class XPConfig(Base):
+    __tablename__ = "xp_configs"
+
+    chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("groups.chat_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    xp_per_message: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    level_thresholds: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
