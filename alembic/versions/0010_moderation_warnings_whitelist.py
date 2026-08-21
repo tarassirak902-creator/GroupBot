@@ -1,12 +1,12 @@
 """extend moderation actions and exclusions
 
-Revision ID: 0010_moderation_warnings_whitelist
+Revision ID: 0010_mod_warn_white
 Revises: 0009_moderation_core
 """
 from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
-revision: str = "0010_moderation_warnings_whitelist"
+revision: str = "0010_mod_warn_white"
 down_revision: str | None = "0009_moderation_core"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
