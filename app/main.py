@@ -10,6 +10,7 @@ from app.activity_middleware import ActivityMiddleware
 from app.config import get_settings
 from app.db import check_database, create_engine, create_session_factory
 from app.economy_router import create_economy_router
+from app.relationship_router import create_relationship_router
 from app.rp_router import create_rp_router
 from app.settings_router import create_settings_router
 from app.xp_middleware import XPMiddleware
@@ -38,6 +39,7 @@ async def main() -> None:
     dp.include_router(create_achievement_router(session_factory))
     dp.include_router(create_economy_router(session_factory))
     dp.include_router(create_rp_router(session_factory))
+    dp.include_router(create_relationship_router(session_factory))
     bot = Bot(token=settings.bot_token.get_secret_value())
     try:
         await dp.start_polling(bot)
