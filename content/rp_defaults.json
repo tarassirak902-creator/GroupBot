@@ -1,0 +1,13 @@
+{
+  "love": {"emoji": "❤️", "label": "Признаться в любви", "templates": ["{Username1} признался(ась) в любви {Username2} ❤️"]},
+  "argue": {"emoji": "😡", "label": "Поругаться", "templates": ["{Username1} поругался(ась) с {Username2} 😡"]},
+  "hug": {"emoji": "🤗", "label": "Обнять", "templates": ["{Username1} обнял(а) {Username2} 🤗"]},
+  "kiss": {"emoji": "💋", "label": "Поцеловать", "templates": ["{Username1} поцеловал(а) {Username2} 💋"]},
+  "party": {"emoji": "🎉", "label": "Позвать тусоваться", "templates": ["{Username1} позвал(а) {Username2} тусоваться 🎉"]},
+  "walk": {"emoji": "🚶", "label": "Позвать гулять", "templates": ["{Username1} позвал(а) {Username2} гулять 🚶"]},
+  "sleep_near": {"emoji": "😴", "label": "Уснуть рядом", "templates": ["{Username1} уснул(а) рядом с {Username2} 😴"]},
+  "wink": {"emoji": "😉", "label": "Подмигнуть", "templates": ["{Username1} подмигнул(а) {Username2} 😉"]},
+  "cuddle": {"emoji": "🫶", "label": "Прижаться", "templates": ["{Username1} прижался(ась) к {Username2} 🫶"]},
+  "handshake": {"emoji": "🤝", "label": "Пожать руку", "templates": ["{Username1} пожал(а) руку {Username2} 🤝"]},
+  "gift": {"emoji": "🎁", "label": "Подарить подарок", "templates": ["{Username1} подарил(а) подарок {Username2} 🎁"]}
+}
