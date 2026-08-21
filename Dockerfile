@@ -10,6 +10,7 @@ COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install .
 
 COPY app ./app
+COPY content ./content
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
 
