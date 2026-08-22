@@ -1,29 +1,20 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from html import escape
 
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.config import Settings
-from groupbot.models import AdminAssignment, AdminRole, GroupSettings, User
-from groupbot.routers.admin_hierarchy import (
-    HierarchyState,
-    RANK_META,
-    SPECIAL_STATUSES,
-    STANDARD_NAMES,
-    _assignment_count,
-)
+from groupbot.models import AdminAssignment, AdminRole, GroupMember, User
+from groupbot.routers.admin_hierarchy import RANK_META, SPECIAL_STATUSES, STANDARD_NAMES, _assignment_count
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.audit import write_audit
 from groupbot.services.subscriptions import active_subscription_for_group, active_subscription_for_owner
-from groupbot.services.users import upsert_user
 from groupbot.ui import private_main_menu
 
 
@@ -35,10 +26,29 @@ def _plain_label(user: User) -> str:
     return full_name or username or "Пользователь"
 
 
-def _special_back(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Особые статусы", callback_data=f"hier:special:{chat_id}")],
-    ])
+async def _known_group_users(session: AsyncSession, chat_id: int, *, limit: int = 50) -> list[User]:
+    return list((
+        await session.execute(
+            select(User)
+            .join(GroupMember, GroupMember.user_id == User.telegram_user_id)
+            .where(GroupMember.chat_id == chat_id, GroupMember.status == "member", User.is_bot.is_(False))
+            .order_by(GroupMember.last_activity_at.desc().nullslast(), User.updated_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all())
+
+
+def _user_picker_keyboard(users: list[User], callback_prefix: str, back_data: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for user in users:
+        rows.append([
+            InlineKeyboardButton(
+                text=_plain_label(user)[:64],
+                callback_data=f"{callback_prefix}:{user.telegram_user_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=back_data)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def create_identity_privacy_router(
@@ -97,9 +107,9 @@ def create_identity_privacy_router(
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
         async with session_factory() as session:
-            users = (
+            users = list((
                 await session.execute(select(User).order_by(User.updated_at.desc()).limit(30))
-            ).scalars().all()
+            ).scalars().all())
         if callback.message is None:
             return
         lines = ["👤 <b>Пользователи</b>", ""]
@@ -117,15 +127,11 @@ def create_identity_privacy_router(
                 ])
         rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="creator:users")])
         rows.append([InlineKeyboardButton(text="◀️ Панель создателя", callback_data="creator:home")])
-        await callback.message.edit_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
+        await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await callback.answer()
 
-    @router.callback_query(F.data.startswith("hier:assigned:"))
-    async def assigned(callback: CallbackQuery) -> None:
+    @router.callback_query(F.data.startswith("hier:assign:"))
+    async def rank_user_picker(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 3)
         try:
             chat_id = int(parts[2])
@@ -136,93 +142,55 @@ def create_identity_privacy_router(
             if not await _owner_access(session, chat_id, callback.from_user.id):
                 await callback.answer("Недостаточно прав.", show_alert=True)
                 return
-            role = (
-                await session.execute(
-                    select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
-                )
-            ).scalar_one_or_none()
-            rows_db = (
-                await session.execute(
-                    select(AdminAssignment, User)
-                    .join(User, User.telegram_user_id == AdminAssignment.user_id)
-                    .where(AdminAssignment.chat_id == chat_id, AdminAssignment.role_id == role_id)
-                    .order_by(AdminAssignment.id)
-                )
-            ).all()
-        if role is None:
-            await callback.answer("Ранг не найден.", show_alert=True)
-            return
-        lines = [f"📋 <b>{escape(role.name)} — назначенные</b>", ""]
-        keyboard: list[list[InlineKeyboardButton]] = []
-        if not rows_db:
-            lines.append("Назначений пока нет.")
-        else:
-            for assignment, user in rows_db:
-                lines.append(f"• {clickable_user_display(user)}")
-                keyboard.append([
-                    InlineKeyboardButton(
-                        text=f"❌ Снять: {_plain_label(user)}"[:64],
-                        callback_data=f"hier:remove:{chat_id}:{assignment.id}:{role_id}",
-                    )
-                ])
-        keyboard.append([InlineKeyboardButton(text="◀️ К рангу", callback_data=f"hier:role:{chat_id}:{role_id}")])
+            role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))).scalar_one_or_none()
+            if role is None or role.name not in STANDARD_NAMES:
+                await callback.answer("Ранг не найден.", show_alert=True)
+                return
+            _, limit, _ = RANK_META[role.name]
+            if limit is not None and await _assignment_count(session, role_id) >= limit:
+                await callback.answer(f"Для ранга «{role.name}» достигнут лимит назначений: {limit}.", show_alert=True)
+                return
+            users = await _known_group_users(session, chat_id)
         if callback.message is not None:
+            text = (
+                f"➕ <b>Назначить ранг «{escape(role.name)}»</b>\n\n"
+                "Выберите участника. Имя и username отображаются без числового Telegram ID."
+            )
+            if not users:
+                text += "\n\nПока нет известных активных участников. Mimorus добавляет участников в список по мере их активности в группе."
             await callback.message.edit_text(
-                "\n".join(lines),
+                text,
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+                reply_markup=_user_picker_keyboard(users, f"priv:rank_pick:{chat_id}:{role_id}", f"hier:role:{chat_id}:{role_id}"),
             )
         await callback.answer()
 
-    @router.message(HierarchyState.waiting_rank_user_id, F.chat.type == "private")
-    async def assign_rank_user(message: Message, state: FSMContext, bot: Bot) -> None:
-        if message.from_user is None:
-            await state.clear()
-            return
+    @router.callback_query(F.data.startswith("priv:rank_pick:"))
+    async def rank_pick(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 4)
         try:
-            target_id = int((message.text or "").strip())
-        except ValueError:
-            await message.answer("Нужен числовой Telegram ID для внутреннего поиска пользователя.")
-            return
-        data = await state.get_data()
-        chat_id = int(data["rank_chat_id"])
-        role_id = int(data["rank_role_id"])
-        try:
-            member = await bot.get_chat_member(chat_id, target_id)
-            if member.status in {"left", "kicked"}:
-                await message.answer("Этот пользователь сейчас не состоит в группе.")
-                return
-        except Exception:
-            await message.answer("Не удалось подтвердить участника группы. Проверьте введённый идентификатор.")
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+            target_id = int(parts[4])
+        except (ValueError, IndexError):
             return
         async with session_factory() as session:
             async with session.begin():
-                if not await _owner_access(session, chat_id, message.from_user.id):
-                    await state.clear()
-                    await message.answer("Недостаточно прав.")
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
                     return
-                role = (
-                    await session.execute(
-                        select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
-                    )
-                ).scalar_one_or_none()
-                if role is None or role.name not in STANDARD_NAMES:
-                    await state.clear()
-                    await message.answer("Ранг не найден.")
+                role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))).scalar_one_or_none()
+                user = (await session.execute(select(User).where(User.telegram_user_id == target_id))).scalar_one_or_none()
+                member = (await session.execute(select(GroupMember).where(GroupMember.chat_id == chat_id, GroupMember.user_id == target_id, GroupMember.status == "member"))).scalar_one_or_none()
+                if role is None or role.name not in STANDARD_NAMES or user is None or member is None:
+                    await callback.answer("Пользователь или ранг больше недоступен.", show_alert=True)
                     return
                 _, limit, _ = RANK_META[role.name]
-                existing = (
-                    await session.execute(
-                        select(AdminAssignment)
-                        .where(AdminAssignment.chat_id == chat_id, AdminAssignment.user_id == target_id)
-                        .with_for_update()
-                    )
-                ).scalar_one_or_none()
+                existing = (await session.execute(select(AdminAssignment).where(AdminAssignment.chat_id == chat_id, AdminAssignment.user_id == target_id).with_for_update())).scalar_one_or_none()
                 current_count = await _assignment_count(session, role_id)
                 if limit is not None and current_count >= limit and (existing is None or existing.role_id != role_id):
-                    await message.answer(f"Лимит назначений для «{role.name}» уже достигнут: {limit}.")
+                    await callback.answer(f"Лимит назначений для «{role.name}» уже достигнут: {limit}.", show_alert=True)
                     return
-                await upsert_user(session, member.user)
                 if existing is None:
                     session.add(AdminAssignment(chat_id=chat_id, user_id=target_id, role_id=role_id, is_reserve=False))
                 else:
@@ -232,45 +200,70 @@ def create_identity_privacy_router(
                     session,
                     "group.admin_rank_assigned",
                     chat_id=chat_id,
-                    actor_user_id=message.from_user.id,
+                    actor_user_id=callback.from_user.id,
                     target_type="user",
                     target_id=str(target_id),
                     payload={"role_id": role_id, "role_name": role.name},
                 )
-        await state.clear()
-        identity = clickable_identity(
-            telegram_user_id=member.user.id,
-            first_name=member.user.first_name,
-            last_name=member.user.last_name,
-            username=member.user.username,
-        )
-        await message.answer(
-            f"✅ Пользователю {identity} назначен ранг «<b>{escape(role.name)}</b>».",
-            parse_mode="HTML",
-        )
+        if callback.message is not None:
+            await callback.message.edit_text(
+                f"✅ Пользователю {clickable_user_display(user)} назначен ранг «<b>{escape(role.name)}</b>».",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Назначенные", callback_data=f"hier:assigned:{chat_id}:{role_id}")],
+                    [InlineKeyboardButton(text="◀️ К рангу", callback_data=f"hier:role:{chat_id}:{role_id}")],
+                ]),
+            )
+        await callback.answer("Назначено")
+
+    @router.callback_query(F.data.startswith("hier:assigned:"))
+    async def assigned(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2]); role_id = int(parts[3])
+        except (ValueError, IndexError):
+            return
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True); return
+            role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))).scalar_one_or_none()
+            rows_db = (await session.execute(
+                select(AdminAssignment, User)
+                .join(User, User.telegram_user_id == AdminAssignment.user_id)
+                .where(AdminAssignment.chat_id == chat_id, AdminAssignment.role_id == role_id)
+                .order_by(AdminAssignment.id)
+            )).all()
+        if role is None:
+            await callback.answer("Ранг не найден.", show_alert=True); return
+        lines = [f"📋 <b>{escape(role.name)} — назначенные</b>", ""]
+        keyboard: list[list[InlineKeyboardButton]] = []
+        if not rows_db:
+            lines.append("Назначений пока нет.")
+        else:
+            for assignment, user in rows_db:
+                lines.append(f"• {clickable_user_display(user)}")
+                keyboard.append([InlineKeyboardButton(text=f"❌ Снять: {_plain_label(user)}"[:64], callback_data=f"hier:remove:{chat_id}:{assignment.id}:{role_id}")])
+        keyboard.append([InlineKeyboardButton(text="◀️ К рангу", callback_data=f"hier:role:{chat_id}:{role_id}")])
+        if callback.message is not None:
+            await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        await callback.answer()
 
     @router.callback_query(F.data.startswith("hier:special_list:"))
     async def special_list(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 3)
         try:
-            chat_id = int(parts[2])
-            status = parts[3]
+            chat_id = int(parts[2]); status = parts[3]
         except (ValueError, IndexError):
             return
         if status not in SPECIAL_STATUSES:
             return
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True)
-                return
+                await callback.answer("Недостаточно прав.", show_alert=True); return
             settings_row = await _ensure_group_settings(session, chat_id)
             cfg = dict(settings_row.moderation_config or {})
             ids = [int(value) for value in list((cfg.get("special_statuses") or {}).get(status) or [])]
-            users: list[User] = []
-            if ids:
-                users = (
-                    await session.execute(select(User).where(User.telegram_user_id.in_(ids)))
-                ).scalars().all()
+            users = list((await session.execute(select(User).where(User.telegram_user_id.in_(ids)))).scalars().all()) if ids else []
             by_id = {user.telegram_user_id: user for user in users}
         lines = [f"{SPECIAL_STATUSES[status]} — <b>назначенные</b>", ""]
         rows: list[list[InlineKeyboardButton]] = []
@@ -279,56 +272,55 @@ def create_identity_privacy_router(
         else:
             for uid in ids:
                 user = by_id.get(uid)
-                if user is None:
-                    lines.append("• Пользователь")
-                    button_label = "Пользователь"
-                else:
-                    lines.append(f"• {clickable_user_display(user)}")
-                    button_label = _plain_label(user)
-                rows.append([
-                    InlineKeyboardButton(
-                        text=f"❌ Снять: {button_label}"[:64],
-                        callback_data=f"hier:special_remove:{chat_id}:{status}:{uid}",
-                    )
-                ])
+                lines.append(f"• {clickable_user_display(user) if user else 'Пользователь'}")
+                rows.append([InlineKeyboardButton(text=f"❌ Снять: {_plain_label(user) if user else 'Пользователь'}"[:64], callback_data=f"hier:special_remove:{chat_id}:{status}:{uid}")])
         rows.append([InlineKeyboardButton(text="➕ Назначить", callback_data=f"hier:special_add:{chat_id}:{status}")])
         rows.append([InlineKeyboardButton(text="◀️ Особые статусы", callback_data=f"hier:special:{chat_id}")])
         if callback.message is not None:
+            await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("hier:special_add:"))
+    async def special_user_picker(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2]); status = parts[3]
+        except (ValueError, IndexError):
+            return
+        if status not in SPECIAL_STATUSES:
+            return
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True); return
+            users = await _known_group_users(session, chat_id)
+        if callback.message is not None:
+            text = f"➕ <b>{SPECIAL_STATUSES[status]}</b>\n\nВыберите участника по имени или username."
+            if not users:
+                text += "\n\nПока нет известных активных участников."
             await callback.message.edit_text(
-                "\n".join(lines),
+                text,
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                reply_markup=_user_picker_keyboard(users, f"priv:special_pick:{chat_id}:{status}", f"hier:special_list:{chat_id}:{status}"),
             )
         await callback.answer()
 
-    @router.message(HierarchyState.waiting_special_user_id, F.chat.type == "private")
-    async def special_add_user(message: Message, state: FSMContext, bot: Bot) -> None:
-        if message.from_user is None:
-            await state.clear()
-            return
+    @router.callback_query(F.data.startswith("priv:special_pick:"))
+    async def special_pick(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 4)
         try:
-            target_id = int((message.text or "").strip())
-        except ValueError:
-            await message.answer("Нужен числовой Telegram ID для внутреннего поиска пользователя.")
+            chat_id = int(parts[2]); status = parts[3]; target_id = int(parts[4])
+        except (ValueError, IndexError):
             return
-        data = await state.get_data()
-        chat_id = int(data["special_chat_id"])
-        status = str(data["special_status"])
-        try:
-            member = await bot.get_chat_member(chat_id, target_id)
-            if member.status in {"left", "kicked"}:
-                await message.answer("Этот пользователь сейчас не состоит в группе.")
-                return
-        except Exception:
-            await message.answer("Не удалось подтвердить участника группы. Проверьте введённый идентификатор.")
+        if status not in SPECIAL_STATUSES:
             return
         async with session_factory() as session:
             async with session.begin():
-                if not await _owner_access(session, chat_id, message.from_user.id):
-                    await state.clear()
-                    await message.answer("Недостаточно прав.")
-                    return
-                await upsert_user(session, member.user)
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True); return
+                user = (await session.execute(select(User).where(User.telegram_user_id == target_id))).scalar_one_or_none()
+                member = (await session.execute(select(GroupMember).where(GroupMember.chat_id == chat_id, GroupMember.user_id == target_id, GroupMember.status == "member"))).scalar_one_or_none()
+                if user is None or member is None:
+                    await callback.answer("Пользователь больше недоступен.", show_alert=True); return
                 settings_row = await _ensure_group_settings(session, chat_id)
                 cfg = dict(settings_row.moderation_config or {})
                 statuses = dict(cfg.get("special_statuses") or {})
@@ -342,21 +334,19 @@ def create_identity_privacy_router(
                     session,
                     "group.special_status_added",
                     chat_id=chat_id,
-                    actor_user_id=message.from_user.id,
+                    actor_user_id=callback.from_user.id,
                     target_type="user",
                     target_id=str(target_id),
                     payload={"status": status},
                 )
-        await state.clear()
-        identity = clickable_identity(
-            telegram_user_id=member.user.id,
-            first_name=member.user.first_name,
-            last_name=member.user.last_name,
-            username=member.user.username,
-        )
-        await message.answer(
-            f"✅ Статус {SPECIAL_STATUSES[status]} назначен пользователю {identity}.",
-            parse_mode="HTML",
-        )
+        if callback.message is not None:
+            await callback.message.edit_text(
+                f"✅ Статус {SPECIAL_STATUSES[status]} назначен пользователю {clickable_user_display(user)}.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Назначенные", callback_data=f"hier:special_list:{chat_id}:{status}")],
+                ]),
+            )
+        await callback.answer("Назначено")
 
     return router
