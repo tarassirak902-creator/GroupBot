@@ -11,7 +11,9 @@ COPY src ./src
 COPY alembic.ini ./alembic.ini
 COPY migrations ./migrations
 
-RUN pip install --upgrade pip && pip install .
+RUN python -m compileall -q src migrations \
+    && pip install --upgrade pip \
+    && pip install .
 
 RUN useradd --create-home --uid 10001 groupbot && chown -R groupbot:groupbot /app
 USER groupbot
