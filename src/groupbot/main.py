@@ -12,6 +12,7 @@ from groupbot.routers import creator_user_profile_links as creator_user_profile_
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.creator import create_creator_router
 from groupbot.routers.creator_group_profile_links import create_creator_group_profile_links_router
+from groupbot.routers.creator_identity_privacy import create_creator_identity_privacy_router
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
 from groupbot.routers.group_commands import create_group_commands_router
@@ -49,7 +50,8 @@ async def main() -> None:
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.include_router(create_group_router(session_factory))
     # Privacy router is intentionally first among user-facing feature routers:
-    # it prevents numeric Telegram ids from leaking into current UI screens.
+    # it prevents numeric Telegram ids from leaking into current UI screens and
+    # lets owner-side assignments select people by human-readable identity.
     dp.include_router(create_identity_privacy_router(session_factory, settings))
     dp.include_router(create_group_commands_router(session_factory))
     # Fixed standard hierarchy and assignment limits go before the generic
@@ -66,6 +68,9 @@ async def main() -> None:
     # Duration presets intercept creator subscription assignment before the
     # generic creator handler, so paid tariffs offer fast 7/15/30-day choices.
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
+    # Creator subscription fallback screens also use the same private identity
+    # policy (tariff choice and cancel confirmation/results).
+    dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
     # Human-friendly creator user screens are also registered before the
     # generic creator router. They keep telegram_user_id internally while
     # rendering clickable tg://user links in the interface.
