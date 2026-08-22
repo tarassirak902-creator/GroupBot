@@ -22,7 +22,7 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
                 await upsert_user(session, message.from_user)
         await message.answer(
             "🏠 Главное меню",
-            reply_markup=private_main_menu(is_creator=message.from_user.id in settings.creator_ids),
+            reply_markup=private_main_menu(is_creator=message.from_user.id in settings.creator_id_set),
         )
 
     @router.message(F.chat.type == "private", F.text == "👥 Мои группы")
