@@ -53,19 +53,35 @@ def _duration_keyboard(user_id: int, tariff_code: str) -> InlineKeyboardMarkup:
     )
 
 
-def _subscription_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Сменить тариф", callback_data=f"creator:user_sub_choose:{user_id}")],
-            [InlineKeyboardButton(text="⛔ Отключить подписку", callback_data=f"creator:user_sub_cancel:{user_id}")],
+def _subscription_keyboard(user_id: int, *, has_active: bool = True) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_active:
+        rows.extend(
+            [
+                [InlineKeyboardButton(text="🔄 Сменить тариф", callback_data=f"creator:user_sub_choose:{user_id}")],
+                [InlineKeyboardButton(text="⛔ Отключить подписку", callback_data=f"creator:user_sub_cancel:{user_id}")],
+            ]
+        )
+    else:
+        rows.append([InlineKeyboardButton(text="🎁 Назначить тариф", callback_data=f"creator:user_sub_choose:{user_id}")])
+    rows.extend(
+        [
             [InlineKeyboardButton(text="📋 История подписок", callback_data=f"creator:user_history:{user_id}")],
             [InlineKeyboardButton(text="◀️ Карточка пользователя", callback_data=f"creator:usercard:{user_id}")],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _fmt_dt(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+
+
+def _user_display(user: User) -> str:
+    if user.username:
+        return f"@{user.username}"
+    full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
+    return full_name or "Пользователь"
 
 
 def create_creator_subscription_duration_router(
@@ -77,13 +93,36 @@ def create_creator_subscription_duration_router(
     def is_creator(user_id: int) -> bool:
         return user_id in settings.creator_id_set
 
+    async def get_user(user_id: int) -> User | None:
+        async with session_factory() as session:
+            return (
+                await session.execute(select(User).where(User.telegram_user_id == user_id))
+            ).scalar_one_or_none()
+
+    async def get_active_subscription(user_id: int) -> tuple[Subscription, Tariff] | None:
+        now = datetime.now(timezone.utc)
+        async with session_factory() as session:
+            return (
+                await session.execute(
+                    select(Subscription, Tariff)
+                    .join(Tariff, Tariff.id == Subscription.tariff_id)
+                    .where(
+                        Subscription.owner_user_id == user_id,
+                        Subscription.status == SubscriptionStatus.active.value,
+                        Subscription.ends_at > now,
+                    )
+                    .order_by(Subscription.ends_at.desc())
+                    .limit(1)
+                )
+            ).first()
+
     async def assign_subscription(
         *,
         creator_id: int,
         user_id: int,
         tariff_code: str,
         duration_days: int,
-    ) -> tuple[Subscription, Tariff] | None:
+    ) -> tuple[Subscription, Tariff, User] | None:
         now = datetime.now(timezone.utc)
         async with session_factory() as session:
             async with session.begin():
@@ -141,13 +180,15 @@ def create_creator_subscription_duration_router(
                         "duration_days": duration_days,
                         "replaced_subscription_ids": replaced,
                         "duration_source": "preset_or_creator_input",
+                        "access_activated": True,
                     },
                 )
-                return subscription, tariff
+                return subscription, tariff, user
 
     async def show_success(
         callback_or_message,
         *,
+        user: User,
         user_id: int,
         tariff_code: str,
         days: int,
@@ -156,10 +197,11 @@ def create_creator_subscription_duration_router(
     ) -> None:
         text = (
             "✅ <b>Подписка назначена</b>\n\n"
-            f"Пользователь: <code>{user_id}</code>\n"
+            f"Пользователь: <b>{_user_display(user)}</b>\n"
             f"Тариф: <b>{tariff_code}</b>\n"
             f"Срок: <b>{days} дн.</b>\n"
-            f"Действует до: <b>{_fmt_dt(subscription.ends_at)}</b>"
+            f"Действует до: <b>{_fmt_dt(subscription.ends_at)}</b>\n"
+            "Доступ к функциям: <b>✅ активирован</b>"
         )
         if edit:
             await callback_or_message.edit_text(
@@ -173,6 +215,60 @@ def create_creator_subscription_duration_router(
                 parse_mode="HTML",
                 reply_markup=_subscription_keyboard(user_id),
             )
+
+    # This router is registered before creator.py and therefore owns the
+    # subscription screen. Internally callbacks still use telegram_user_id,
+    # while the creator sees the human-friendly username/name.
+    @router.callback_query(F.data.startswith("creator:user_sub:"))
+    async def subscription_screen(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+
+        user = await get_user(user_id)
+        if user is None:
+            await callback.answer("Пользователь не найден.", show_alert=True)
+            return
+        active = await get_active_subscription(user_id)
+
+        if active is None:
+            text = (
+                "💳 <b>Управление подпиской</b>\n\n"
+                f"Пользователь: <b>{_user_display(user)}</b>\n"
+                "Активная подписка: <b>нет</b>\n"
+                "Доступ к функциям: <b>❌ не активирован</b>"
+            )
+        else:
+            subscription, tariff = active
+            if tariff.code == "TEST":
+                access_line = "Пробный TEST: <b>✅ активирован</b>"
+            else:
+                # A paid/creator-granted tariff already unlocks the same access
+                # gate; a separate TEST subscription is neither required nor
+                # created, so paid subscriptions remain correctly non-trial in DB.
+                access_line = f"TEST-доступ: <b>✅ активирован тарифом {tariff.code}</b>"
+            text = (
+                "💳 <b>Управление подпиской</b>\n\n"
+                f"Пользователь: <b>{_user_display(user)}</b>\n"
+                f"Тариф: <b>{tariff.name}</b>\n"
+                f"Начало: <b>{_fmt_dt(subscription.started_at)}</b>\n"
+                f"Окончание: <b>{_fmt_dt(subscription.ends_at)}</b>\n"
+                f"{access_line}\n"
+                "Доступ к функциям: <b>✅ активирован</b>"
+            )
+
+        if callback.message is not None:
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=_subscription_keyboard(user_id, has_active=active is not None),
+            )
+        await callback.answer()
 
     @router.callback_query(F.data.startswith("creator:user_assign:"))
     async def choose_tariff(callback: CallbackQuery) -> None:
@@ -197,9 +293,12 @@ def create_creator_subscription_duration_router(
                     select(Tariff).where(Tariff.code == tariff_code)
                 )
             ).scalar_one_or_none()
+            user = (
+                await session.execute(select(User).where(User.telegram_user_id == user_id))
+            ).scalar_one_or_none()
 
-        if tariff is None or not tariff.is_active:
-            await callback.answer("Тариф недоступен.", show_alert=True)
+        if tariff is None or not tariff.is_active or user is None:
+            await callback.answer("Тариф или пользователь недоступен.", show_alert=True)
             return
 
         if tariff.code == "TEST":
@@ -213,10 +312,11 @@ def create_creator_subscription_duration_router(
             if result is None:
                 await callback.answer("Не удалось назначить тариф.", show_alert=True)
                 return
-            subscription, _ = result
+            subscription, _, assigned_user = result
             if callback.message is not None:
                 await show_success(
                     callback.message,
+                    user=assigned_user,
                     user_id=user_id,
                     tariff_code=tariff.code,
                     days=days,
@@ -229,7 +329,7 @@ def create_creator_subscription_duration_router(
         if callback.message is not None:
             await callback.message.edit_text(
                 f"⏳ <b>{tariff.code}</b>\n\n"
-                f"Пользователь: <code>{user_id}</code>\n\n"
+                f"Пользователь: <b>{_user_display(user)}</b>\n\n"
                 "Выберите срок доступа:",
                 parse_mode="HTML",
                 reply_markup=_duration_keyboard(user_id, tariff.code),
@@ -266,10 +366,11 @@ def create_creator_subscription_duration_router(
         if result is None:
             await callback.answer("Не удалось назначить тариф.", show_alert=True)
             return
-        subscription, tariff = result
+        subscription, tariff, user = result
         if callback.message is not None:
             await show_success(
                 callback.message,
+                user=user,
                 user_id=user_id,
                 tariff_code=tariff.code,
                 days=days,
@@ -298,11 +399,17 @@ def create_creator_subscription_duration_router(
             await callback.answer("TEST выдаётся только на 3 дня.", show_alert=True)
             return
 
+        user = await get_user(user_id)
+        if user is None:
+            await callback.answer("Пользователь не найден.", show_alert=True)
+            return
+
         await state.set_state(CustomDurationState.waiting_days)
         await state.update_data(user_id=user_id, tariff_code=tariff_code)
         if callback.message is not None:
             await callback.message.answer(
                 f"✏️ <b>{tariff_code}: другой срок</b>\n\n"
+                f"Пользователь: <b>{_user_display(user)}</b>\n"
                 "Отправьте количество дней целым числом.",
                 parse_mode="HTML",
             )
@@ -335,9 +442,10 @@ def create_creator_subscription_duration_router(
         if result is None:
             await message.answer("Не удалось назначить подписку.")
             return
-        subscription, tariff = result
+        subscription, tariff, user = result
         await show_success(
             message,
+            user=user,
             user_id=user_id,
             tariff_code=tariff.code,
             days=days,
