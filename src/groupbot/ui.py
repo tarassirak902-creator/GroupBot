@@ -12,6 +12,15 @@ def private_main_menu(*, is_creator: bool) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
+def tariff_activation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 Активировать TEST на 3 дня", callback_data="tariff:activate_test")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
+
+
 def owned_groups_keyboard(groups: list[tuple[int, str | None, str]]) -> InlineKeyboardMarkup:
     icons = {"active": "✅", "pending": "⏳", "disabled": "⚠️", "left": "❌"}
     rows = []
@@ -20,6 +29,17 @@ def owned_groups_keyboard(groups: list[tuple[int, str | None, str]]) -> InlineKe
         rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"group:open:{chat_id}")])
     rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def group_locked_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 Активировать TEST", callback_data="tariff:activate_test")],
+            [InlineKeyboardButton(text="💳 Тариф и подписка", callback_data="tariff:show")],
+            [InlineKeyboardButton(text="🔎 Диагностика", callback_data=f"group:diagnostic:{chat_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="group:list"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
 
 
 def group_management_keyboard(chat_id: int, *, active: bool) -> InlineKeyboardMarkup:
