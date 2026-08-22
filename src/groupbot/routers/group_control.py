@@ -1,0 +1,650 @@
+from __future__ import annotations
+
+from aiogram import Bot, F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from groupbot.models import (
+    AdminAssignment,
+    AdminPermission,
+    AdminRole,
+    Group,
+    GroupSettings,
+    Subscription,
+    SubscriptionStatus,
+    Tariff,
+)
+from groupbot.services.audit import write_audit
+from groupbot.services.permissions import is_group_owner
+from groupbot.services.subscriptions import active_subscription_for_owner
+from groupbot.services.users import upsert_user
+
+
+KNOWN_PERMISSIONS = [
+    ("warning", "⚠️ Предупреждение"),
+    ("mute", "🔇 Мут"),
+    ("ban", "⛔ Бан"),
+    ("unmute", "🔊 Размут"),
+    ("unban", "✅ Разбан"),
+    ("delete", "🗑 Удаление сообщений"),
+    ("pin", "📌 Закрепление сообщений"),
+    ("stats", "📊 Полная статистика"),
+]
+
+
+class AdminRoleState(StatesGroup):
+    waiting_name = State()
+
+
+def _back_group(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Управление группой", callback_data=f"group:open:{chat_id}")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
+
+
+def _moderation_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ Бан / Мут / Пред", callback_data=f"gctl:mod_help:{chat_id}")],
+            [InlineKeyboardButton(text="📋 Банлист / Мутлист / Преды", callback_data=f"gctl:punish_lists:{chat_id}")],
+            [InlineKeyboardButton(text="⚖️ Причины наказаний", callback_data=f"gctl:reasons:{chat_id}")],
+            [InlineKeyboardButton(text="🎚 Режим админ-команд", callback_data=f"gctl:mode:{chat_id}")],
+            [InlineKeyboardButton(text="📈 Шкала предупреждений", callback_data=f"gctl:warnings:{chat_id}")],
+            [
+                InlineKeyboardButton(text="🚫 Запрещённые слова", callback_data=f"gctl:feature:{chat_id}:words"),
+                InlineKeyboardButton(text="📝 Запрещённые фразы", callback_data=f"gctl:feature:{chat_id}:phrases"),
+            ],
+            [
+                InlineKeyboardButton(text="💬 Антифлуд", callback_data=f"gctl:feature:{chat_id}:antiflood"),
+                InlineKeyboardButton(text="🔁 Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam"),
+            ],
+            [
+                InlineKeyboardButton(text="🔗 Антиссылки", callback_data=f"gctl:feature:{chat_id}:antilinks"),
+                InlineKeyboardButton(text="✅ Белый список", callback_data=f"gctl:feature:{chat_id}:whitelist"),
+            ],
+            [
+                InlineKeyboardButton(text="🧩 Капча", callback_data=f"gctl:feature:{chat_id}:captcha"),
+                InlineKeyboardButton(text="🚨 Антирейд", callback_data=f"gctl:feature:{chat_id}:antiraid"),
+            ],
+            [InlineKeyboardButton(text="🕐 Расписание защиты", callback_data=f"gctl:feature:{chat_id}:protection_schedule")],
+            [InlineKeyboardButton(text="◀️ Управление группой", callback_data=f"group:open:{chat_id}")],
+        ]
+    )
+
+
+def _administration_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👑 Ранги администрации", callback_data=f"gctl:roles:{chat_id}")],
+            [InlineKeyboardButton(text="👮 Администраторы", callback_data=f"gctl:admins:{chat_id}")],
+            [InlineKeyboardButton(text="🛡 Права рангов", callback_data=f"gctl:roles:{chat_id}")],
+            [InlineKeyboardButton(text="🧯 Резервный администратор", callback_data=f"gctl:reserve:{chat_id}")],
+            [InlineKeyboardButton(text="🌐 Сетевые администраторы", callback_data=f"gctl:network_admins:{chat_id}")],
+            [InlineKeyboardButton(text="◀️ Управление группой", callback_data=f"group:open:{chat_id}")],
+        ]
+    )
+
+
+def _mode_keyboard(chat_id: int, current: str) -> InlineKeyboardMarkup:
+    def label(value: str, text: str) -> str:
+        return ("✅ " if current == value else "▫️ ") + text
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=label("text", "Текстовый"), callback_data=f"gctl:setmode:{chat_id}:text")],
+            [InlineKeyboardButton(text=label("buttons", "Кнопки"), callback_data=f"gctl:setmode:{chat_id}:buttons")],
+            [InlineKeyboardButton(text=label("both", "Оба режима"), callback_data=f"gctl:setmode:{chat_id}:both")],
+            [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")],
+        ]
+    )
+
+
+def _roles_keyboard(chat_id: int, roles: list[AdminRole]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for role in roles:
+        icon = "✅" if role.is_active else "⛔"
+        rows.append([InlineKeyboardButton(text=f"{icon} {role.name}"[:64], callback_data=f"gctl:role:{chat_id}:{role.id}")])
+    rows.append([InlineKeyboardButton(text="➕ Создать ранг", callback_data=f"gctl:role_create:{chat_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _role_keyboard(chat_id: int, role: AdminRole, permissions: dict[str, bool]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, title in KNOWN_PERMISSIONS:
+        icon = "✅" if permissions.get(key, False) else "❌"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{icon} {title}",
+                callback_data=f"gctl:perm:{chat_id}:{role.id}:{key}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            text="⛔ Выключить ранг" if role.is_active else "✅ Включить ранг",
+            callback_data=f"gctl:role_toggle:{chat_id}:{role.id}",
+        )
+    ])
+    rows.append([InlineKeyboardButton(text="◀️ Все ранги", callback_data=f"gctl:roles:{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ensure_group_settings(session: AsyncSession, chat_id: int) -> GroupSettings:
+    row = (
+        await session.execute(select(GroupSettings).where(GroupSettings.chat_id == chat_id).with_for_update())
+    ).scalar_one_or_none()
+    if row is None:
+        row = GroupSettings(chat_id=chat_id, moderation_config={})
+        session.add(row)
+        await session.flush()
+    return row
+
+
+async def _owner_access(session: AsyncSession, chat_id: int, user_id: int) -> bool:
+    if not await is_group_owner(session, chat_id, user_id):
+        return False
+    return await active_subscription_for_owner(session, user_id) is not None
+
+
+async def _trial_rank_limit(session: AsyncSession, owner_id: int) -> int | None:
+    row = await active_subscription_for_owner(session, owner_id)
+    if row is None:
+        return None
+    if isinstance(row, tuple):
+        subscription, tariff = row
+    else:
+        subscription = row
+        tariff = (
+            await session.execute(select(Tariff).where(Tariff.id == subscription.tariff_id))
+        ).scalar_one_or_none()
+    if tariff is not None and tariff.code == "TEST":
+        return 3
+    return None
+
+
+def create_group_control_router(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> Router:
+    router = Router(name="group_control")
+
+    @router.callback_query(F.data.startswith("group:section:"))
+    async def section(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        if len(parts) != 4:
+            return
+        try:
+            chat_id = int(parts[2])
+        except ValueError:
+            return
+        section_key = parts[3]
+        if section_key not in {"moderation", "administration"}:
+            return
+
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
+                return
+            group = (
+                await session.execute(select(Group).where(Group.chat_id == chat_id))
+            ).scalar_one_or_none()
+            settings = await _ensure_group_settings(session, chat_id)
+            moderation_config = settings.moderation_config or {}
+            roles_count = (
+                await session.execute(select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id))
+            ).scalar_one()
+            assignments_count = (
+                await session.execute(select(func.count()).select_from(AdminAssignment).where(AdminAssignment.chat_id == chat_id))
+            ).scalar_one()
+
+        if callback.message is None:
+            return
+        title = group.title if group and group.title else str(chat_id)
+        if section_key == "moderation":
+            mode = moderation_config.get("admin_command_mode", "both")
+            mode_name = {"text": "Текстовый", "buttons": "Кнопки", "both": "Оба режима"}.get(mode, "Оба режима")
+            await callback.message.edit_text(
+                "🛡 <b>Модерация</b>\n\n"
+                f"Группа: <b>{title}</b>\n"
+                f"Режим админ-команд: <b>{mode_name}</b>\n\n"
+                "Здесь настраиваются ручные наказания, причины, предупреждения и защитные модули группы.",
+                parse_mode="HTML",
+                reply_markup=_moderation_keyboard(chat_id),
+            )
+        else:
+            await callback.message.edit_text(
+                "👮 <b>Администрация</b>\n\n"
+                f"Группа: <b>{title}</b>\n"
+                f"Собственных рангов: <b>{roles_count}</b>\n"
+                f"Назначений в Mimorus: <b>{assignments_count}</b>\n\n"
+                "Владелец может создавать собственные ранги и отдельно задавать доступные действия.",
+                parse_mode="HTML",
+                reply_markup=_administration_keyboard(chat_id),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:mode:"))
+    async def mode_screen(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            settings = await _ensure_group_settings(session, chat_id)
+            current = (settings.moderation_config or {}).get("admin_command_mode", "both")
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "🎚 <b>Режим админ-команд</b>\n\n"
+                "Текстовый — действие и причина пишутся ответом на сообщение.\n"
+                "Кнопки — после команды бот предлагает срок/причину.\n"
+                "Оба режима — работают оба варианта.",
+                parse_mode="HTML",
+                reply_markup=_mode_keyboard(chat_id, current),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:setmode:"))
+    async def set_mode(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        chat_id = int(parts[2])
+        mode = parts[3]
+        if mode not in {"text", "buttons", "both"}:
+            await callback.answer("Некорректный режим.", show_alert=True)
+            return
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                settings = await _ensure_group_settings(session, chat_id)
+                config = dict(settings.moderation_config or {})
+                config["admin_command_mode"] = mode
+                settings.moderation_config = config
+                await write_audit(
+                    session,
+                    "group.moderation_mode_changed",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="group",
+                    target_id=str(chat_id),
+                    payload={"mode": mode},
+                )
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "✅ Режим админ-команд обновлён.",
+                reply_markup=_mode_keyboard(chat_id, mode),
+            )
+        await callback.answer("Сохранено")
+
+    @router.callback_query(F.data.startswith("gctl:warnings:"))
+    async def warning_scale(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "📈 <b>Шкала предупреждений</b>\n\n"
+                "1/5 — Предупреждение\n"
+                "2/5 — Предупреждение\n"
+                "3/5 — Мут 15 минут\n"
+                "4/5 — Мут 1 час\n"
+                "5/5 — Бан\n\n"
+                "Это стартовая шкала, закреплённая MASTER-ТЗ. Настройку шкалы в допустимых глобальных рамках добавим отдельным экраном.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:mod_help:"))
+    async def mod_help(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "⚠️ <b>Бан / Мут / Пред</b>\n\n"
+                "Подтверждённые команды ответом на сообщение пользователя:\n"
+                "<code>пред</code>\n"
+                "<code>мут</code>\n"
+                "<code>бан</code>\n"
+                "<code>разбан</code>\n"
+                "<code>размут</code>\n\n"
+                "В текстовом режиме после действия можно указать причину. В режиме кнопок Mimorus должен предложить срок/причину.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:punish_lists:"))
+    async def punish_lists(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "📋 <b>Списки наказаний</b>\n\n"
+                "Подтверждённые команды:\n"
+                "• <code>мои баны</code> — выданные этим администратором;\n"
+                "• <code>мои муты</code>;\n"
+                "• <code>выдал пред</code>;\n"
+                "• <code>банлист</code> — все баны группы + кто выдал;\n"
+                "• <code>мутлист</code>;\n"
+                "• <code>преды</code>.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:reasons:"))
+    async def reasons(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "⚖️ <b>Причины наказаний</b>\n\n"
+                "По MASTER-ТЗ причины создаются отдельно для каждой группы и могут быть связаны с действием и фиксированным сроком.\n\n"
+                "Примеры из ТЗ:\n"
+                "• Флуд → мут 30 минут\n"
+                "• Оскорбление → мут 2 часа\n"
+                "• Спам → бан\n\n"
+                "Редактор причин будет следующим подблоком модерации.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:feature:"))
+    async def protection_feature(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        chat_id = int(parts[2])
+        key = parts[3]
+        titles = {
+            "words": "🚫 Запрещённые слова",
+            "phrases": "📝 Запрещённые фразы",
+            "antiflood": "💬 Антифлуд",
+            "antispam": "🔁 Антиспам",
+            "antilinks": "🔗 Антиссылки",
+            "whitelist": "✅ Белый список",
+            "captcha": "🧩 Капча",
+            "antiraid": "🚨 Антирейд",
+            "protection_schedule": "🕐 Расписание защиты",
+        }
+        if callback.message is not None:
+            await callback.message.edit_text(
+                f"{titles.get(key, '🛡 Защита')}\n\n"
+                "Раздел включён в структуру модерации по MASTER-ТЗ. Его рабочие параметры будут подключаться без добавления неутверждённых значений.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:roles:"))
+    async def roles(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            rows = (
+                await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))
+            ).scalars().all()
+            limit = await _trial_rank_limit(session, callback.from_user.id)
+        suffix = f"\nЛимит TEST: <b>{limit}</b> ранга." if limit is not None else ""
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "👑 <b>Ранги администрации</b>\n\n"
+                f"Создано: <b>{len(rows)}</b>.{suffix}\n"
+                "Новые ранги создаются без автоматически выданных прав: владелец включает каждое действие сам.",
+                parse_mode="HTML",
+                reply_markup=_roles_keyboard(chat_id, list(rows)),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:role_create:"))
+    async def role_create(callback: CallbackQuery, state: FSMContext) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            limit = await _trial_rank_limit(session, callback.from_user.id)
+            count = (
+                await session.execute(select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id))
+            ).scalar_one()
+        if limit is not None and count >= limit:
+            await callback.answer(f"На TEST доступно до {limit} админ-рангов.", show_alert=True)
+            return
+        await state.set_state(AdminRoleState.waiting_name)
+        await state.update_data(chat_id=chat_id)
+        if callback.message is not None:
+            await callback.message.answer("Отправьте название нового административного ранга (1–128 символов).")
+        await callback.answer()
+
+    @router.message(AdminRoleState.waiting_name, F.chat.type == "private")
+    async def role_name(message: Message, state: FSMContext) -> None:
+        if message.from_user is None:
+            await state.clear()
+            return
+        name = (message.text or "").strip()
+        if not 1 <= len(name) <= 128:
+            await message.answer("Название должно быть длиной 1–128 символов.")
+            return
+        data = await state.get_data()
+        chat_id = int(data["chat_id"])
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, message.from_user.id):
+                    await state.clear()
+                    await message.answer("Недостаточно прав.")
+                    return
+                exists = (
+                    await session.execute(select(AdminRole.id).where(AdminRole.chat_id == chat_id, AdminRole.name == name))
+                ).scalar_one_or_none()
+                if exists is not None:
+                    await message.answer("Ранг с таким названием уже существует.")
+                    return
+                role = AdminRole(chat_id=chat_id, name=name, is_active=True)
+                session.add(role)
+                await session.flush()
+                for key, _ in KNOWN_PERMISSIONS:
+                    session.add(AdminPermission(role_id=role.id, permission=key, allowed=False))
+                await write_audit(
+                    session,
+                    "group.admin_role_created",
+                    chat_id=chat_id,
+                    actor_user_id=message.from_user.id,
+                    target_type="admin_role",
+                    target_id=str(role.id),
+                    payload={"name": name},
+                )
+        await state.clear()
+        await message.answer(
+            f"✅ Ранг «{name}» создан. По умолчанию все права выключены.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="👑 Открыть ранги", callback_data=f"gctl:roles:{chat_id}")]
+            ]),
+        )
+
+    @router.callback_query(F.data.startswith("gctl:role:"))
+    async def role_card(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        chat_id = int(parts[2])
+        role_id = int(parts[3])
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            role = (
+                await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))
+            ).scalar_one_or_none()
+            perm_rows = (
+                await session.execute(select(AdminPermission).where(AdminPermission.role_id == role_id))
+            ).scalars().all()
+            assignments = (
+                await session.execute(select(func.count()).select_from(AdminAssignment).where(AdminAssignment.role_id == role_id))
+            ).scalar_one()
+        if role is None:
+            await callback.answer("Ранг не найден.", show_alert=True)
+            return
+        permissions = {row.permission: row.allowed for row in perm_rows}
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "👑 <b>Админ-ранг</b>\n\n"
+                f"Название: <b>{role.name}</b>\n"
+                f"Статус: {'✅ включён' if role.is_active else '⛔ выключен'}\n"
+                f"Назначено пользователей: <b>{assignments}</b>\n\n"
+                "Права включаются владельцем индивидуально:",
+                parse_mode="HTML",
+                reply_markup=_role_keyboard(chat_id, role, permissions),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:perm:"))
+    async def toggle_permission(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 4)
+        chat_id = int(parts[2])
+        role_id = int(parts[3])
+        permission = parts[4]
+        if permission not in {key for key, _ in KNOWN_PERMISSIONS}:
+            await callback.answer("Неизвестное право.", show_alert=True)
+            return
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                role = (
+                    await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))
+                ).scalar_one_or_none()
+                if role is None:
+                    await callback.answer("Ранг не найден.", show_alert=True)
+                    return
+                row = (
+                    await session.execute(
+                        select(AdminPermission).where(
+                            AdminPermission.role_id == role_id,
+                            AdminPermission.permission == permission,
+                        ).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    row = AdminPermission(role_id=role_id, permission=permission, allowed=True)
+                    session.add(row)
+                else:
+                    row.allowed = not row.allowed
+                new_value = row.allowed
+                await write_audit(
+                    session,
+                    "group.admin_permission_changed",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="admin_role",
+                    target_id=str(role_id),
+                    payload={"permission": permission, "allowed": new_value},
+                )
+        callback.data = f"gctl:role:{chat_id}:{role_id}"
+        await role_card(callback)
+
+    @router.callback_query(F.data.startswith("gctl:role_toggle:"))
+    async def role_toggle(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        chat_id = int(parts[2])
+        role_id = int(parts[3])
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                role = (
+                    await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update())
+                ).scalar_one_or_none()
+                if role is None:
+                    await callback.answer("Ранг не найден.", show_alert=True)
+                    return
+                role.is_active = not role.is_active
+                await write_audit(
+                    session,
+                    "group.admin_role_toggled",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="admin_role",
+                    target_id=str(role_id),
+                    payload={"is_active": role.is_active},
+                )
+        callback.data = f"gctl:role:{chat_id}:{role_id}"
+        await role_card(callback)
+
+    @router.callback_query(F.data.startswith("gctl:admins:"))
+    async def admins(callback: CallbackQuery, bot: Bot) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+        try:
+            telegram_admins = await bot.get_chat_administrators(chat_id)
+        except Exception:
+            await callback.answer("Не удалось получить список администраторов Telegram.", show_alert=True)
+            return
+        lines = ["👮 <b>Администраторы</b>", "", f"Telegram-администраторов: <b>{len(telegram_admins)}</b>", ""]
+        for member in telegram_admins[:30]:
+            user = member.user
+            name = user.full_name or (f"@{user.username}" if user.username else str(user.id))
+            role_name = "владелец" if member.status == "creator" else "администратор"
+            lines.append(f"• {name} — {role_name}")
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")]
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:reserve:"))
+    async def reserve(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        async with session_factory() as session:
+            count = (
+                await session.execute(
+                    select(func.count()).select_from(AdminAssignment).where(
+                        AdminAssignment.chat_id == chat_id,
+                        AdminAssignment.is_reserve.is_(True),
+                    )
+                )
+            ).scalar_one()
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "🧯 <b>Резервный администратор</b>\n\n"
+                f"Назначено в Mimorus: <b>{count}</b>\n\n"
+                "MASTER-ТЗ предусматривает резервного администратора. Назначение конкретного пользователя подключим вместе с общим экраном назначения рангов.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")]
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:network_admins:"))
+    async def network_admins(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "🌐 <b>Сетевые администраторы</b>\n\n"
+                "Сетевые администраторы относятся только к группам одной сетки того же владельца. Глобальные права на чужие группы не выдаются.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")]
+                ]),
+            )
+        await callback.answer()
+
+    return router
