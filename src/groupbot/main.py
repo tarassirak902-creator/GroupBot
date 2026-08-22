@@ -19,6 +19,7 @@ from groupbot.routers.group_control import create_group_control_router
 from groupbot.routers.group_control_role_actions import create_group_control_role_actions_router
 from groupbot.routers.group_control_ux import create_group_control_ux_router
 from groupbot.routers.groups import create_group_router
+from groupbot.routers.identity_privacy import create_identity_privacy_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
@@ -37,8 +38,8 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    # Keep a single presentation rule for creator-side user identities:
-    # name and username are clickable separately, while ` | ` is plain text.
+    # Single public identity format: clickable name | clickable @username.
+    # Numeric Telegram ids remain internal keys only.
     creator_subscription_duration_module._user_link = clickable_user_display
     creator_user_profile_links_module._user_link = clickable_user_display
 
@@ -47,6 +48,9 @@ async def main() -> None:
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.include_router(create_group_router(session_factory))
+    # Privacy router is intentionally first among user-facing feature routers:
+    # it prevents numeric Telegram ids from leaking into current UI screens.
+    dp.include_router(create_identity_privacy_router(session_factory, settings))
     dp.include_router(create_group_commands_router(session_factory))
     # Fixed standard hierarchy and assignment limits go before the generic
     # role UX so standard rank screens/assignments are handled deterministically.
