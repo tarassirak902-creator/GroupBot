@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=75", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "groupbot"
-version = "0.1.0"
-description = "Telegram group bot based on MASTER-TZ v1.0"
+version = "0.2.0"
+description = "Telegram group management platform based on the current MASTER specification"
 requires-python = ">=3.12"
 dependencies = [
   "aiogram>=3.13,<4",
@@ -23,12 +23,11 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["app*"]
-exclude = ["alembic*", "content*", "tests*"]
+where = ["src"]
 
 [tool.ruff]
 line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["src"]
