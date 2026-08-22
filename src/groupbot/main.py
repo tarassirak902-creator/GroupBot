@@ -9,6 +9,7 @@ from groupbot.db import create_session_factory
 from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
+from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.creator import create_creator_router
 from groupbot.routers.creator_group_profile_links import create_creator_group_profile_links_router
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
@@ -47,7 +48,10 @@ async def main() -> None:
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.include_router(create_group_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
-    # UX overrides go first: mode descriptions stay visible and role permissions
+    # Fixed standard hierarchy and assignment limits go before the generic
+    # role UX so standard rank screens/assignments are handled deterministically.
+    dp.include_router(create_admin_hierarchy_router(session_factory))
+    # UX overrides: mode descriptions stay visible and custom-role permissions
     # are edited as a draft, then applied only by the explicit Save button.
     dp.include_router(create_group_control_ux_router(session_factory))
     # Remaining role actions (for example role enable/disable) keep working.
