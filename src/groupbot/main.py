@@ -14,6 +14,7 @@ from groupbot.routers.creator_group_profile_links import create_creator_group_pr
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
 from groupbot.routers.group_commands import create_group_commands_router
+from groupbot.routers.group_control import create_group_control_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.user_display import clickable_user_display
@@ -44,6 +45,9 @@ async def main() -> None:
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.include_router(create_group_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
+    # Real owner-side moderation/administration screens intercept the generic
+    # group section callbacks before private.py's fallback placeholder.
+    dp.include_router(create_group_control_router(session_factory))
     # Duration presets intercept creator subscription assignment before the
     # generic creator handler, so paid tariffs offer fast 7/15/30-day choices.
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
