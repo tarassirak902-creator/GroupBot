@@ -1,5 +1,11 @@
 from aiogram import Bot, F, Router
-from aiogram.types import ChatMemberUpdated, Message, User as TelegramUser
+from aiogram.types import (
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    User as TelegramUser,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,7 +60,11 @@ async def _register_added_group(
     if should_announce:
         await bot.send_message(
             chat.id,
-            "⏳ Группа ещё не подключена. Фактический владелец группы должен написать «подключить» в течение 1 минуты.",
+            "⏳ <b>Группа ещё не подключена.</b>\n\n"
+            "Фактический владелец группы должен отправить команду:\n"
+            "<code>подключить</code>\n\n"
+            "На подключение даётся 1 минута.",
+            parse_mode="HTML",
         )
     return should_announce
 
@@ -137,6 +147,29 @@ def create_group_router(session_factory: async_sessionmaker[AsyncSession]) -> Ro
             if critical_ok
             else "\n\n⚠️ Не хватает критических прав: часть функций будет недоступна."
         )
-        await message.answer("✅ Группа подключена.\n\n" + diagnostic + suffix)
+
+        me = await bot.get_me()
+        keyboard = None
+        if me.username:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🤖 Перейти в Mimorus",
+                            url=f"https://t.me/{me.username}?start=group_connected",
+                        )
+                    ]
+                ]
+            )
+
+        await message.answer(
+            "✅ <b>Группа успешно подключена!</b>\n\n"
+            "Для настройки Mimorus перейдите в личные сообщения с ботом "
+            "или воспользуйтесь командой /help.\n\n"
+            + diagnostic
+            + suffix,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
 
     return router
