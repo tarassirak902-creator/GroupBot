@@ -1,6 +1,5 @@
 from functools import lru_cache
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,16 +9,11 @@ class Settings(BaseSettings):
     bot_token: str
     database_url: str
     log_level: str = "INFO"
-    creator_ids: tuple[int, ...] = ()
+    creator_ids: str = ""
 
-    @field_validator("creator_ids", mode="before")
-    @classmethod
-    def parse_creator_ids(cls, value):
-        if value in (None, ""):
-            return ()
-        if isinstance(value, str):
-            return tuple(int(item.strip()) for item in value.split(",") if item.strip())
-        return value
+    @property
+    def creator_id_set(self) -> set[int]:
+        return {int(item.strip()) for item in self.creator_ids.split(",") if item.strip()}
 
 
 @lru_cache
