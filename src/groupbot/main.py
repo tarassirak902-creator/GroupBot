@@ -7,6 +7,7 @@ from aiogram.types import BotCommandScopeAllGroupChats
 from groupbot.config import get_settings
 from groupbot.db import create_session_factory
 from groupbot.middleware.idempotency import IdempotencyMiddleware
+from groupbot.routers.creator import create_creator_router
 from groupbot.routers.group_commands import create_group_commands_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.private import create_private_router
@@ -32,6 +33,9 @@ async def main() -> None:
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.include_router(create_group_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
+    # Creator router goes before the generic private router so the creator-only
+    # menu button is handled by the real global panel rather than a placeholder.
+    dp.include_router(create_creator_router(session_factory, settings))
     dp.include_router(create_private_router(session_factory, settings))
 
     await clear_global_group_commands(bot)
