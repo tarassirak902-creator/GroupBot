@@ -7,14 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml ./
-COPY app ./app
-COPY content ./content
+COPY src ./src
 COPY alembic.ini ./alembic.ini
-COPY alembic ./alembic
+COPY migrations ./migrations
 
 RUN pip install --upgrade pip && pip install .
 
 RUN useradd --create-home --uid 10001 groupbot && chown -R groupbot:groupbot /app
 USER groupbot
 
-CMD ["python", "-m", "app.main"]
+CMD ["python", "-m", "groupbot.main"]
