@@ -2,7 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models import Achievement, GroupUser, Transaction, UserAchievement, XPConfig
+from app.models import Achievement, GroupUser, Transaction, UserAchievement, Wallet, XPConfig
 
 
 async def award_level_achievements(
@@ -11,12 +11,7 @@ async def award_level_achievements(
     user_id: int,
     current_level: int,
 ) -> list[Achievement]:
-    """Award all active level achievements exactly once.
-
-    The claim, XP/currency reward and economy journal entry are committed in the
-    same database transaction. The unique user-achievement constraint makes a
-    repeated update harmless.
-    """
+    """Award active level achievements exactly once and atomically."""
     awarded: list[Achievement] = []
 
     async with session_factory() as session:
@@ -33,24 +28,46 @@ async def award_level_achievements(
                 return []
 
             group_user = (await session.execute(
-                select(GroupUser).where(GroupUser.chat_id == chat_id, GroupUser.user_id == user_id).with_for_update()
+                select(GroupUser).where(
+                    GroupUser.chat_id == chat_id,
+                    GroupUser.user_id == user_id,
+                ).with_for_update()
             )).scalar_one_or_none()
             if group_user is None:
                 return []
 
+            await session.execute(
+                insert(Wallet).values(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    balance=group_user.balance,
+                ).on_conflict_do_nothing(constraint="uq_wallet_chat_user")
+            )
+            wallet = (await session.execute(
+                select(Wallet).where(
+                    Wallet.chat_id == chat_id,
+                    Wallet.user_id == user_id,
+                ).with_for_update()
+            )).scalar_one()
+
             for achievement in eligible:
                 claim = await session.execute(
                     insert(UserAchievement).values(
-                        chat_id=chat_id, user_id=user_id, achievement_id=achievement.id,
-                    ).on_conflict_do_nothing(constraint="uq_user_achievement_once").returning(UserAchievement.id)
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        achievement_id=achievement.id,
+                    ).on_conflict_do_nothing(
+                        constraint="uq_user_achievement_once"
+                    ).returning(UserAchievement.id)
                 )
                 claim_id = claim.scalar_one_or_none()
                 if claim_id is None:
                     continue
 
                 group_user.xp += achievement.reward_xp
-                group_user.balance += achievement.reward_currency
                 if achievement.reward_currency:
+                    wallet.balance += achievement.reward_currency
+                    group_user.balance = wallet.balance  # transitional compatibility mirror
                     session.add(Transaction(
                         chat_id=chat_id,
                         from_user_id=None,
@@ -62,7 +79,9 @@ async def award_level_achievements(
                 awarded.append(achievement)
 
             if awarded:
-                config = (await session.execute(select(XPConfig).where(XPConfig.chat_id == chat_id))).scalar_one_or_none()
+                config = (await session.execute(
+                    select(XPConfig).where(XPConfig.chat_id == chat_id)
+                )).scalar_one_or_none()
                 if config is not None and config.level_thresholds:
                     thresholds = sorted(int(value) for value in config.level_thresholds)
                     group_user.level = 1 + sum(group_user.xp >= threshold for threshold in thresholds)
