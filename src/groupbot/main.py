@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand, BotCommandScopeAllGroupChats
+from aiogram.types import BotCommandScopeAllGroupChats
 
 from groupbot.config import get_settings
 from groupbot.db import create_session_factory
@@ -13,20 +13,10 @@ from groupbot.routers.private import create_private_router
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 
 
-async def configure_group_commands(bot: Bot) -> None:
-    await bot.set_my_commands(
-        [
-            BotCommand(command="help", description="❓ Помощь"),
-            BotCommand(command="guide", description="📖 Как пользоваться ботом"),
-            BotCommand(command="commands", description="📋 Все команды"),
-            BotCommand(command="games", description="🎮 Игры"),
-            BotCommand(command="profile", description="👤 Мой профиль"),
-            BotCommand(command="stats", description="📊 Моя активность"),
-            BotCommand(command="rules", description="📜 Правила группы"),
-            BotCommand(command="support", description="🛠 Помощь и поддержка"),
-        ],
-        scope=BotCommandScopeAllGroupChats(),
-    )
+async def clear_global_group_commands(bot: Bot) -> None:
+    # Commands are registered per chat only after an owner activates a tariff.
+    # This also clears any global group command menu left from an older build.
+    await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
 
 
 async def main() -> None:
@@ -44,7 +34,7 @@ async def main() -> None:
     dp.include_router(create_group_commands_router(session_factory))
     dp.include_router(create_private_router(session_factory, settings))
 
-    await configure_group_commands(bot)
+    await clear_global_group_commands(bot)
     lifecycle_task = asyncio.create_task(group_lifecycle_worker(bot, session_factory))
     try:
         await dp.start_polling(bot)
