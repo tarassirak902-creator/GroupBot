@@ -2,7 +2,7 @@ from datetime import timezone
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,8 +39,8 @@ SECTION_TITLES = {
 
 NO_TARIFF_TEXT = (
     "💳 <b>Тариф не активирован</b>\n\n"
-    "Группа уже подключена к Mimorus, но функции управления и команды в группе "
-    "станут доступны после активации тарифа.\n\n"
+    "Для настройки этой группы и включения команд Mimorus в группе "
+    "сначала активируйте тариф.\n\n"
     "🎁 Для начала доступен пробный тариф <b>TEST на 3 дня</b>."
 )
 
@@ -57,26 +57,14 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
                 .order_by(Group.connected_at.desc().nullslast(), Group.chat_id)
             )).all()
 
-    async def has_owned_group(user_id: int) -> bool:
-        async with session_factory() as session:
-            value = (await session.execute(
-                select(GroupOwner.id).where(
-                    GroupOwner.user_id == user_id,
-                    GroupOwner.is_current.is_(True),
-                ).limit(1)
-            )).scalar_one_or_none()
-            return value is not None
-
-    async def owner_has_tariff(user_id: int) -> bool:
-        async with session_factory() as session:
-            return await active_subscription_for_owner(session, user_id) is not None
-
     async def show_tariff(message: Message, user_id: int) -> None:
         async with session_factory() as session:
             subscription, tariff = await subscription_summary(session, user_id)
         if subscription is None or tariff is None:
             await message.answer(
-                NO_TARIFF_TEXT,
+                "💳 <b>Тариф и подписка</b>\n\n"
+                "Активного тарифа сейчас нет.\n\n"
+                "🎁 Доступен пробный тариф <b>TEST на 3 дня</b>.",
                 parse_mode="HTML",
                 reply_markup=tariff_activation_keyboard(),
             )
@@ -85,7 +73,7 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
         await message.answer(
             "💳 <b>Тариф и подписка</b>\n\n"
             f"Тариф: <b>{tariff.name}</b>\n"
-            f"Статус: ✅ активен\n"
+            "Статус: ✅ активен\n"
             f"Действует до: <b>{ends}</b>",
             parse_mode="HTML",
         )
@@ -102,26 +90,34 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
         if group is None:
             await callback.answer("Группа не найдена.", show_alert=True)
             return
+
         labels = {
             GroupStatus.active.value: "✅ Подключена",
             GroupStatus.pending.value: "⏳ Ожидает подключения",
             GroupStatus.disabled.value: "⚠️ Отключена",
             GroupStatus.left.value: "❌ Бот покинул группу",
         }
+        group_name = group.title or str(group.chat_id)
+
         if subscription is None:
             await callback.message.edit_text(
-                f"⚙️ Управление группой\n\n{group.title or group.chat_id}\n"
-                f"Статус: {labels.get(group.status, group.status)}\n"
+                f"⚙️ <b>{group_name}</b>\n\n"
+                f"Статус группы: {labels.get(group.status, group.status)}\n"
                 "Тариф: ❌ не активирован\n\n"
-                "Сначала активируйте TEST, чтобы открыть управление группой и групповые команды.",
+                "🔒 Для настройки данной группы необходимо сначала активировать тариф.\n\n"
+                "🎁 Вы можете активировать пробный тариф <b>TEST на 3 дня</b>.",
+                parse_mode="HTML",
                 reply_markup=group_locked_keyboard(group.chat_id),
             )
         else:
             await callback.message.edit_text(
-                f"⚙️ Управление группой\n\n{group.title or group.chat_id}\n"
+                f"⚙️ Управление группой\n\n{group_name}\n"
                 f"Статус: {labels.get(group.status, group.status)}\n"
                 "Тариф: ✅ активен",
-                reply_markup=group_management_keyboard(group.chat_id, active=group.status == GroupStatus.active.value),
+                reply_markup=group_management_keyboard(
+                    group.chat_id,
+                    active=group.status == GroupStatus.active.value,
+                ),
             )
         await callback.answer()
 
@@ -132,10 +128,6 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
         async with session_factory() as session:
             async with session.begin():
                 await upsert_user(session, message.from_user)
-        if await has_owned_group(message.from_user.id) and not await owner_has_tariff(message.from_user.id):
-            await message.answer("Подключение группы завершено.", reply_markup=ReplyKeyboardRemove())
-            await show_tariff(message, message.from_user.id)
-            return
         await message.answer(
             "🏠 Главное меню",
             reply_markup=private_main_menu(is_creator=message.from_user.id in settings.creator_id_set),
@@ -155,7 +147,9 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
             subscription, tariff = await subscription_summary(session, callback.from_user.id)
         if subscription is None or tariff is None:
             await callback.message.edit_text(
-                NO_TARIFF_TEXT,
+                "💳 <b>Тариф и подписка</b>\n\n"
+                "Активного тарифа сейчас нет.\n\n"
+                "🎁 Доступен пробный тариф <b>TEST на 3 дня</b>.",
                 parse_mode="HTML",
                 reply_markup=tariff_activation_keyboard(),
             )
@@ -163,7 +157,9 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
             ends = subscription.ends_at.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
             await callback.message.edit_text(
                 "💳 <b>Тариф и подписка</b>\n\n"
-                f"Тариф: <b>{tariff.name}</b>\nСтатус: ✅ активен\nДействует до: <b>{ends}</b>",
+                f"Тариф: <b>{tariff.name}</b>\n"
+                "Статус: ✅ активен\n"
+                f"Действует до: <b>{ends}</b>",
                 parse_mode="HTML",
             )
         await callback.answer()
@@ -190,7 +186,7 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
             "🎉 <b>Пробный тариф TEST активирован!</b>\n\n"
             "⏳ Срок: 3 дня\n"
             f"📅 Действует до: <b>{ends}</b>\n\n"
-            "✅ Управление группой и команды Mimorus в группе теперь доступны.",
+            "✅ Настройки ваших групп и команды Mimorus в группах теперь доступны.",
             parse_mode="HTML",
         )
         await callback.message.answer(
@@ -214,7 +210,10 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
         rows = await owned_groups(callback.from_user.id)
         if callback.message is not None:
             if rows:
-                await callback.message.edit_text("👥 Мои группы\nВыберите группу:", reply_markup=owned_groups_keyboard(rows))
+                await callback.message.edit_text(
+                    "👥 Мои группы\nВыберите группу:",
+                    reply_markup=owned_groups_keyboard(rows),
+                )
             else:
                 await callback.message.edit_text("👥 У вас пока нет подключённых групп.")
         await callback.answer()
@@ -244,9 +243,16 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
         except Exception:
             await callback.answer("Не удалось получить права бота в группе.", show_alert=True)
             return
-        suffix = "\n\n✅ Критические права доступны." if critical_ok else "\n\n⚠️ Не хватает критических прав: часть функций будет недоступна."
+        suffix = (
+            "\n\n✅ Критические права доступны."
+            if critical_ok
+            else "\n\n⚠️ Не хватает критических прав: часть функций будет недоступна."
+        )
         if callback.message is not None:
-            await callback.message.edit_text(text + suffix, reply_markup=group_management_keyboard(chat_id, active=True))
+            await callback.message.edit_text(
+                text + suffix,
+                reply_markup=group_management_keyboard(chat_id, active=True),
+            )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("group:disable:"))
@@ -272,13 +278,18 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
         except Exception:
             pass
         if callback.message is not None:
-            await callback.message.edit_text(text, reply_markup=group_management_keyboard(chat_id, active=False))
+            await callback.message.edit_text(
+                text,
+                reply_markup=group_management_keyboard(chat_id, active=False),
+            )
         await callback.answer("Группа отключена.")
 
     @router.callback_query(F.data.startswith("group:reconnect:"))
     async def reconnect_info(callback: CallbackQuery) -> None:
         if callback.message is not None:
-            await callback.message.answer("Чтобы восстановить группу, её фактический владелец должен написать в группе: подключить")
+            await callback.message.answer(
+                "Чтобы восстановить группу, её фактический владелец должен написать в группе: подключить"
+            )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("group:section:"))
@@ -312,27 +323,28 @@ def create_private_router(session_factory: async_sessionmaker[AsyncSession], set
     async def home_callback(callback: CallbackQuery) -> None:
         if callback.message is not None:
             await callback.message.delete()
-            if await owner_has_tariff(callback.from_user.id) or not await has_owned_group(callback.from_user.id):
-                await callback.message.answer(
-                    "🏠 Главное меню",
-                    reply_markup=private_main_menu(is_creator=callback.from_user.id in settings.creator_id_set),
-                )
-            else:
-                await callback.message.answer(NO_TARIFF_TEXT, parse_mode="HTML", reply_markup=tariff_activation_keyboard())
+            await callback.message.answer(
+                "🏠 Главное меню",
+                reply_markup=private_main_menu(is_creator=callback.from_user.id in settings.creator_id_set),
+            )
         await callback.answer()
 
     @router.message(F.chat.type == "private", F.text == "👤 Мой аккаунт")
     async def my_account(message: Message) -> None:
         if message.from_user is None:
             return
-        await message.answer(f"👤 Мой аккаунт\nTelegram ID: {message.from_user.id}\nИмя: {message.from_user.full_name}")
+        await message.answer(
+            f"👤 Мой аккаунт\nTelegram ID: {message.from_user.id}\nИмя: {message.from_user.full_name}"
+        )
 
-    @router.message(F.chat.type == "private", F.text.in_({"🌐 Сетки групп", "📢 Реклама", "🛠 Поддержка", "👑 Панель создателя"}))
+    @router.message(
+        F.chat.type == "private",
+        F.text.in_({"🌐 Сетки групп", "📢 Реклама", "🛠 Поддержка", "👑 Панель создателя"}),
+    )
     async def future_section(message: Message) -> None:
-        if message.text == "👑 Панель создателя" and (message.from_user is None or message.from_user.id not in settings.creator_id_set):
-            return
-        if message.from_user is not None and await has_owned_group(message.from_user.id) and not await owner_has_tariff(message.from_user.id):
-            await message.answer(NO_TARIFF_TEXT, parse_mode="HTML", reply_markup=tariff_activation_keyboard())
+        if message.text == "👑 Панель создателя" and (
+            message.from_user is None or message.from_user.id not in settings.creator_id_set
+        ):
             return
         await message.answer(f"{message.text}\n\nРаздел появится в следующем крупном этапе разработки.")
 
