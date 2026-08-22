@@ -78,10 +78,15 @@ def _fmt_dt(value: datetime) -> str:
 
 
 def _user_display(user: User) -> str:
-    if user.username:
-        return f"@{user.username}"
     full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
-    return full_name or "Пользователь"
+    username = f"@{user.username}" if user.username else ""
+    if full_name and username:
+        return f"{full_name} | {username}"
+    if full_name:
+        return full_name
+    if username:
+        return username
+    return "Пользователь"
 
 
 def create_creator_subscription_duration_router(
@@ -216,9 +221,6 @@ def create_creator_subscription_duration_router(
                 reply_markup=_subscription_keyboard(user_id),
             )
 
-    # This router is registered before creator.py and therefore owns the
-    # subscription screen. Internally callbacks still use telegram_user_id,
-    # while the creator sees the human-friendly username/name.
     @router.callback_query(F.data.startswith("creator:user_sub:"))
     async def subscription_screen(callback: CallbackQuery) -> None:
         if not is_creator(callback.from_user.id):
@@ -248,9 +250,6 @@ def create_creator_subscription_duration_router(
             if tariff.code == "TEST":
                 access_line = "Пробный TEST: <b>✅ активирован</b>"
             else:
-                # A paid/creator-granted tariff already unlocks the same access
-                # gate; a separate TEST subscription is neither required nor
-                # created, so paid subscriptions remain correctly non-trial in DB.
                 access_line = f"TEST-доступ: <b>✅ активирован тарифом {tariff.code}</b>"
             text = (
                 "💳 <b>Управление подпиской</b>\n\n"
