@@ -1,7 +1,7 @@
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,11 +36,13 @@ def create_economy_router(session_factory: async_sessionmaker[AsyncSession]) -> 
         return (await session.execute(query)).scalar_one()
 
     async def sync_legacy_balance(session: AsyncSession, chat_id: int, user_id: int, balance: int) -> None:
-        group_user = (await session.execute(
-            select(GroupUser).where(GroupUser.chat_id == chat_id, GroupUser.user_id == user_id).with_for_update()
-        )).scalar_one_or_none()
-        if group_user is not None:
-            group_user.balance = balance
+        # group_users.balance remains a compatibility mirror during the v2.4 migration.
+        # The wallet row is the source of truth and is already locked by the caller.
+        await session.execute(
+            update(GroupUser)
+            .where(GroupUser.chat_id == chat_id, GroupUser.user_id == user_id)
+            .values(balance=balance)
+        )
 
     @router.message(Command("balance"), F.chat.type.in_({"group", "supergroup"}))
     async def balance_handler(message: Message) -> None:
@@ -142,8 +144,8 @@ def create_economy_router(session_factory: async_sessionmaker[AsyncSession]) -> 
                     return
                 sender.balance -= amount
                 receiver.balance += amount
-                await sync_legacy_balance(session, message.chat.id, sender.user_id, sender.balance)
-                await sync_legacy_balance(session, message.chat.id, receiver.user_id, receiver.balance)
+                await sync_legacy_balance(session, message.chat.id, first.user_id, first.balance)
+                await sync_legacy_balance(session, message.chat.id, second.user_id, second.balance)
                 session.add(Transaction(
                     chat_id=message.chat.id,
                     from_user_id=message.from_user.id,
