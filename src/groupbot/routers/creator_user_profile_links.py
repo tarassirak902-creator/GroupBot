@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.config import Settings
 from groupbot.models import Group, GroupOwner, Subscription, SubscriptionStatus, Tariff, User
+from groupbot.routers.user_display import clickable_user_display
 
 
 def _fmt_dt(value: datetime | None) -> str:
@@ -18,20 +19,8 @@ def _fmt_dt(value: datetime | None) -> str:
     return value.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
 
 
-def _user_label(user: User) -> str:
-    full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
-    username = f"@{user.username}" if user.username else ""
-    if full_name and username:
-        return f"{full_name} | {username}"
-    if full_name:
-        return full_name
-    if username:
-        return username
-    return "Пользователь"
-
-
 def _user_link(user: User) -> str:
-    return f'<a href="tg://user?id={user.telegram_user_id}">{escape(_user_label(user))}</a>'
+    return clickable_user_display(user)
 
 
 def _user_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -99,7 +88,6 @@ def create_creator_user_profile_links_router(
         except (ValueError, IndexError):
             await callback.answer("Некорректный пользователь.", show_alert=True)
             return
-
         async with session_factory() as session:
             user = await get_user(session, user_id)
             owned_count = (
@@ -111,11 +99,9 @@ def create_creator_user_profile_links_router(
                 )
             ).scalar_one()
             active = await get_active_subscription(session, user_id)
-
         if user is None or callback.message is None:
             await callback.answer("Пользователь не найден.", show_alert=True)
             return
-
         tariff_text = (
             f"{escape(active.Tariff.name)} до {_fmt_dt(active.Subscription.ends_at)}"
             if active
@@ -124,7 +110,6 @@ def create_creator_user_profile_links_router(
         await callback.message.edit_text(
             "👤 <b>Карточка пользователя</b>\n\n"
             f"Пользователь: {_user_link(user)}\n"
-            f"ID: <code>{user.telegram_user_id}</code>\n"
             f"Telegram Premium: {'✅' if user.is_premium else '❌'}\n"
             f"Владеет группами: <b>{owned_count}</b>\n"
             f"Тариф: <b>{tariff_text}</b>\n"
@@ -158,7 +143,6 @@ def create_creator_user_profile_links_router(
         if user is None or callback.message is None:
             await callback.answer("Пользователь не найден.", show_alert=True)
             return
-
         buttons: list[list[InlineKeyboardButton]] = []
         for chat_id, title, status in rows:
             buttons.append([
@@ -168,11 +152,9 @@ def create_creator_user_profile_links_router(
                 )
             ])
         buttons.append([InlineKeyboardButton(text="◀️ Карточка пользователя", callback_data=f"creator:usercard:{user_id}")])
-
         await callback.message.edit_text(
             "👥 <b>Группы пользователя</b>\n\n"
             f"Пользователь: {_user_link(user)}\n"
-            f"ID: <code>{user_id}</code>\n"
             f"Групп: <b>{len(rows)}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -203,14 +185,7 @@ def create_creator_user_profile_links_router(
         if user is None or callback.message is None:
             await callback.answer("Пользователь не найден.", show_alert=True)
             return
-
-        lines = [
-            "📋 <b>История подписок</b>",
-            "",
-            f"Пользователь: {_user_link(user)}",
-            f"ID: <code>{user_id}</code>",
-            "",
-        ]
+        lines = ["📋 <b>История подписок</b>", "", f"Пользователь: {_user_link(user)}", ""]
         if not rows:
             lines.append("История подписок пуста.")
         else:
@@ -256,7 +231,6 @@ def create_creator_user_profile_links_router(
         if user is None or callback.message is None:
             await callback.answer("Пользователь не найден.", show_alert=True)
             return
-
         active_text = (
             f"{escape(active.Tariff.code)} до {_fmt_dt(active.Subscription.ends_at)}"
             if active
@@ -265,7 +239,6 @@ def create_creator_user_profile_links_router(
         await callback.message.edit_text(
             "🔎 <b>Диагностика пользователя</b>\n\n"
             f"Пользователь: {_user_link(user)}\n"
-            f"ID: <code>{user_id}</code>\n"
             f"Удалённый аккаунт: {'⚠️ да' if user.deleted_account else '✅ нет'}\n"
             f"Telegram Premium: {'✅ да' if user.is_premium else '❌ нет'}\n"
             f"Текущих групп владельца: <b>{owned_groups}</b>\n"
