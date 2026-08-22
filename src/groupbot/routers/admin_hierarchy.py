@@ -9,8 +9,14 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, AdminPermission, AdminRole, Group, GroupSettings, User
-from groupbot.routers.group_control import KNOWN_PERMISSIONS, _ensure_group_settings, _owner_access
+from groupbot.models import AdminAssignment, AdminPermission, AdminRole, Group, User
+from groupbot.routers.group_control import (
+    AdminRoleState,
+    KNOWN_PERMISSIONS,
+    _ensure_group_settings,
+    _owner_access,
+    _trial_rank_limit,
+)
 from groupbot.services.audit import write_audit
 from groupbot.services.users import upsert_user
 
@@ -56,7 +62,6 @@ async def _ensure_standard_roles(session: AsyncSession, chat_id: int) -> list[Ad
         await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id))
     ).scalars().all()
     by_name = {role.name: role for role in existing}
-    changed = False
     for _, name, _ in STANDARD_RANKS:
         if name in by_name:
             continue
@@ -66,9 +71,7 @@ async def _ensure_standard_roles(session: AsyncSession, chat_id: int) -> list[Ad
         for key, _ in KNOWN_PERMISSIONS:
             session.add(AdminPermission(role_id=role.id, permission=key, allowed=False))
         by_name[name] = role
-        changed = True
-    if changed:
-        await session.flush()
+    await session.flush()
     return [by_name[name] for _, name, _ in STANDARD_RANKS]
 
 
@@ -93,10 +96,10 @@ def _administration_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 
 async def _render_roles(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession], chat_id: int) -> None:
     async with session_factory() as session:
-        if not await _owner_access(session, chat_id, callback.from_user.id):
-            await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
-            return
         async with session.begin():
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
+                return
             standard = await _ensure_standard_roles(session, chat_id)
         all_roles = (
             await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))
@@ -150,11 +153,11 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         except (ValueError, IndexError):
             return
         async with session_factory() as session:
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
-                return
-            group = (await session.execute(select(Group).where(Group.chat_id == chat_id))).scalar_one_or_none()
             async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
+                    return
+                group = (await session.execute(select(Group).where(Group.chat_id == chat_id))).scalar_one_or_none()
                 await _ensure_standard_roles(session, chat_id)
             assignments = (
                 await session.execute(select(func.count()).select_from(AdminAssignment).where(AdminAssignment.chat_id == chat_id))
@@ -181,6 +184,36 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         await state.clear()
         await _render_roles(callback, session_factory, chat_id)
 
+    # Intercept custom-role creation so the TEST limit counts only custom roles,
+    # not the five mandatory standard hierarchy roles.
+    @router.callback_query(F.data.startswith("gctl:role_create:"))
+    async def custom_role_create(callback: CallbackQuery, state: FSMContext) -> None:
+        try:
+            chat_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            return
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            limit = await _trial_rank_limit(session, callback.from_user.id)
+            custom_count = (
+                await session.execute(
+                    select(func.count()).select_from(AdminRole).where(
+                        AdminRole.chat_id == chat_id,
+                        ~AdminRole.name.in_(STANDARD_NAMES),
+                    )
+                )
+            ).scalar_one()
+        if limit is not None and custom_count >= limit:
+            await callback.answer(f"На TEST доступно до {limit} дополнительных админ-рангов.", show_alert=True)
+            return
+        await state.set_state(AdminRoleState.waiting_name)
+        await state.update_data(chat_id=chat_id)
+        if callback.message is not None:
+            await callback.message.answer("Отправьте название нового дополнительного административного ранга (1–128 символов).")
+        await callback.answer()
+
     @router.callback_query(F.data.startswith("hier:role:"))
     async def role_card(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 3)
@@ -190,10 +223,12 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
             return
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True); return
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
             role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))).scalar_one_or_none()
             if role is None or role.name not in STANDARD_NAMES:
-                await callback.answer("Стандартный ранг не найден.", show_alert=True); return
+                await callback.answer("Стандартный ранг не найден.", show_alert=True)
+                return
             count = await _assignment_count(session, role.id)
             _, limit, position = RANK_META[role.name]
         cap = "∞" if limit is None else str(limit)
@@ -224,13 +259,16 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
             return
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True); return
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
             role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))).scalar_one_or_none()
             if role is None or role.name not in STANDARD_NAMES:
-                await callback.answer("Ранг не найден.", show_alert=True); return
+                await callback.answer("Ранг не найден.", show_alert=True)
+                return
             _, limit, _ = RANK_META[role.name]
             if limit is not None and await _assignment_count(session, role_id) >= limit:
-                await callback.answer(f"Для ранга «{role.name}» достигнут лимит назначений: {limit}.", show_alert=True); return
+                await callback.answer(f"Для ранга «{role.name}» достигнут лимит назначений: {limit}.", show_alert=True)
+                return
         await state.set_state(HierarchyState.waiting_rank_user_id)
         await state.update_data(rank_chat_id=chat_id, rank_role_id=role_id)
         if callback.message is not None:
@@ -240,40 +278,63 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
     @router.message(HierarchyState.waiting_rank_user_id, F.chat.type == "private")
     async def assign_user(message: Message, state: FSMContext, bot: Bot) -> None:
         if message.from_user is None:
-            await state.clear(); return
-        raw = (message.text or "").strip()
+            await state.clear()
+            return
         try:
-            target_id = int(raw)
+            target_id = int((message.text or "").strip())
         except ValueError:
-            await message.answer("Нужен числовой Telegram ID пользователя."); return
+            await message.answer("Нужен числовой Telegram ID пользователя.")
+            return
         data = await state.get_data()
-        chat_id = int(data["rank_chat_id"]); role_id = int(data["rank_role_id"])
+        chat_id = int(data["rank_chat_id"])
+        role_id = int(data["rank_role_id"])
         try:
             member = await bot.get_chat_member(chat_id, target_id)
             if member.status in {"left", "kicked"}:
-                await message.answer("Этот пользователь сейчас не состоит в группе."); return
+                await message.answer("Этот пользователь сейчас не состоит в группе.")
+                return
         except Exception:
-            await message.answer("Не удалось подтвердить, что пользователь состоит в группе. Проверьте ID."); return
+            await message.answer("Не удалось подтвердить, что пользователь состоит в группе. Проверьте ID.")
+            return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, message.from_user.id):
-                    await state.clear(); await message.answer("Недостаточно прав."); return
+                    await state.clear()
+                    await message.answer("Недостаточно прав.")
+                    return
                 role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))).scalar_one_or_none()
                 if role is None or role.name not in STANDARD_NAMES:
-                    await state.clear(); await message.answer("Ранг не найден."); return
+                    await state.clear()
+                    await message.answer("Ранг не найден.")
+                    return
                 _, limit, _ = RANK_META[role.name]
-                existing = (await session.execute(select(AdminAssignment).where(AdminAssignment.chat_id == chat_id, AdminAssignment.user_id == target_id).with_for_update())).scalar_one_or_none()
-                # If the user is already on this role, do not consume the quota twice.
+                existing = (
+                    await session.execute(
+                        select(AdminAssignment).where(
+                            AdminAssignment.chat_id == chat_id,
+                            AdminAssignment.user_id == target_id,
+                        ).with_for_update()
+                    )
+                ).scalar_one_or_none()
                 current_count = await _assignment_count(session, role_id)
                 if limit is not None and current_count >= limit and (existing is None or existing.role_id != role_id):
-                    await message.answer(f"Лимит назначений для «{role.name}» уже достигнут: {limit}."); return
+                    await message.answer(f"Лимит назначений для «{role.name}» уже достигнут: {limit}.")
+                    return
                 await upsert_user(session, member.user)
                 if existing is None:
                     session.add(AdminAssignment(chat_id=chat_id, user_id=target_id, role_id=role_id, is_reserve=False))
                 else:
                     existing.role_id = role_id
                     existing.is_reserve = False
-                await write_audit(session, "group.admin_rank_assigned", chat_id=chat_id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"role_id": role_id, "role_name": role.name})
+                await write_audit(
+                    session,
+                    "group.admin_rank_assigned",
+                    chat_id=chat_id,
+                    actor_user_id=message.from_user.id,
+                    target_type="user",
+                    target_id=str(target_id),
+                    payload={"role_id": role_id, "role_name": role.name},
+                )
         await state.clear()
         await message.answer(f"✅ Пользователю {target_id} назначен ранг «{role.name}».")
 
@@ -282,12 +343,21 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         parts = (callback.data or "").split(":", 3)
         try:
             chat_id = int(parts[2]); role_id = int(parts[3])
-        except (ValueError, IndexError): return
+        except (ValueError, IndexError):
+            return
         async with session_factory() as session:
             role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))).scalar_one_or_none()
-            rows = (await session.execute(select(AdminAssignment, User).join(User, User.telegram_user_id == AdminAssignment.user_id).where(AdminAssignment.chat_id == chat_id, AdminAssignment.role_id == role_id).order_by(AdminAssignment.id))).all()
+            rows = (
+                await session.execute(
+                    select(AdminAssignment, User)
+                    .join(User, User.telegram_user_id == AdminAssignment.user_id)
+                    .where(AdminAssignment.chat_id == chat_id, AdminAssignment.role_id == role_id)
+                    .order_by(AdminAssignment.id)
+                )
+            ).all()
         if role is None:
-            await callback.answer("Ранг не найден.", show_alert=True); return
+            await callback.answer("Ранг не найден.", show_alert=True)
+            return
         lines = [f"📋 <b>{escape(role.name)} — назначенные</b>", ""]
         keyboard: list[list[InlineKeyboardButton]] = []
         if not rows:
@@ -295,10 +365,17 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         else:
             for assignment, user in rows:
                 lines.append(f"• {_user_link(user)}\n  ID: <code>{user.telegram_user_id}</code>")
-                keyboard.append([InlineKeyboardButton(text=f"❌ Снять: {user.username or user.telegram_user_id}"[:64], callback_data=f"hier:remove:{chat_id}:{assignment.id}:{role_id}")])
+                keyboard.append([InlineKeyboardButton(
+                    text=f"❌ Снять: {user.username or user.telegram_user_id}"[:64],
+                    callback_data=f"hier:remove:{chat_id}:{assignment.id}:{role_id}",
+                )])
         keyboard.append([InlineKeyboardButton(text="◀️ К рангу", callback_data=f"hier:role:{chat_id}:{role_id}")])
         if callback.message is not None:
-            await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+            await callback.message.edit_text(
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("hier:remove:"))
@@ -306,26 +383,47 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         parts = (callback.data or "").split(":", 4)
         try:
             chat_id = int(parts[2]); assignment_id = int(parts[3]); role_id = int(parts[4])
-        except (ValueError, IndexError): return
+        except (ValueError, IndexError):
+            return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True); return
-                row = (await session.execute(select(AdminAssignment).where(AdminAssignment.id == assignment_id, AdminAssignment.chat_id == chat_id, AdminAssignment.role_id == role_id).with_for_update())).scalar_one_or_none()
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                row = (
+                    await session.execute(
+                        select(AdminAssignment).where(
+                            AdminAssignment.id == assignment_id,
+                            AdminAssignment.chat_id == chat_id,
+                            AdminAssignment.role_id == role_id,
+                        ).with_for_update()
+                    )
+                ).scalar_one_or_none()
                 if row is not None:
                     target_id = row.user_id
                     await session.delete(row)
-                    await write_audit(session, "group.admin_rank_removed", chat_id=chat_id, actor_user_id=callback.from_user.id, target_type="user", target_id=str(target_id), payload={"role_id": role_id})
+                    await write_audit(
+                        session,
+                        "group.admin_rank_removed",
+                        chat_id=chat_id,
+                        actor_user_id=callback.from_user.id,
+                        target_type="user",
+                        target_id=str(target_id),
+                        payload={"role_id": role_id},
+                    )
         callback.data = f"hier:assigned:{chat_id}:{role_id}"
         await assigned(callback)
 
     @router.callback_query(F.data.startswith("hier:special:"))
     async def special_screen(callback: CallbackQuery) -> None:
-        try: chat_id = int((callback.data or "").split(":", 2)[2])
-        except (ValueError, IndexError): return
+        try:
+            chat_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            return
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True); return
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
             settings = await _ensure_group_settings(session, chat_id)
             cfg = dict(settings.moderation_config or {})
             statuses = dict(cfg.get("special_statuses") or {})
@@ -349,14 +447,16 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
     @router.callback_query(F.data.startswith("hier:special_list:"))
     async def special_list(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 3)
-        try: chat_id = int(parts[2]); status = parts[3]
-        except (ValueError, IndexError): return
+        try:
+            chat_id = int(parts[2]); status = parts[3]
+        except (ValueError, IndexError):
+            return
         if status not in SPECIAL_STATUSES:
             return
         async with session_factory() as session:
             settings = await _ensure_group_settings(session, chat_id)
             cfg = dict(settings.moderation_config or {})
-            ids = list((cfg.get("special_statuses") or {}).get(status) or [])
+            ids = [int(uid) for uid in list((cfg.get("special_statuses") or {}).get(status) or [])]
             users = []
             if ids:
                 users = (await session.execute(select(User).where(User.telegram_user_id.in_(ids)))).scalars().all()
@@ -369,19 +469,29 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
             for uid in ids:
                 user = by_id.get(uid)
                 lines.append(f"• {_user_link(user) if user else uid}\n  ID: <code>{uid}</code>")
-                rows.append([InlineKeyboardButton(text=f"❌ Снять {uid}", callback_data=f"hier:special_remove:{chat_id}:{status}:{uid}")])
+                rows.append([InlineKeyboardButton(
+                    text=f"❌ Снять {uid}",
+                    callback_data=f"hier:special_remove:{chat_id}:{status}:{uid}",
+                )])
         rows.append([InlineKeyboardButton(text="➕ Назначить", callback_data=f"hier:special_add:{chat_id}:{status}")])
         rows.append([InlineKeyboardButton(text="◀️ Особые статусы", callback_data=f"hier:special:{chat_id}")])
         if callback.message is not None:
-            await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            await callback.message.edit_text(
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("hier:special_add:"))
     async def special_add(callback: CallbackQuery, state: FSMContext) -> None:
         parts = (callback.data or "").split(":", 3)
-        try: chat_id = int(parts[2]); status = parts[3]
-        except (ValueError, IndexError): return
-        if status not in SPECIAL_STATUSES: return
+        try:
+            chat_id = int(parts[2]); status = parts[3]
+        except (ValueError, IndexError):
+            return
+        if status not in SPECIAL_STATUSES:
+            return
         await state.set_state(HierarchyState.waiting_special_user_id)
         await state.update_data(special_chat_id=chat_id, special_status=status)
         if callback.message is not None:
@@ -390,44 +500,81 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
 
     @router.message(HierarchyState.waiting_special_user_id, F.chat.type == "private")
     async def special_add_user(message: Message, state: FSMContext, bot: Bot) -> None:
-        try: target_id = int((message.text or "").strip())
+        if message.from_user is None:
+            await state.clear()
+            return
+        try:
+            target_id = int((message.text or "").strip())
         except ValueError:
-            await message.answer("Нужен числовой Telegram ID пользователя."); return
-        data = await state.get_data(); chat_id = int(data["special_chat_id"]); status = str(data["special_status"])
+            await message.answer("Нужен числовой Telegram ID пользователя.")
+            return
+        data = await state.get_data()
+        chat_id = int(data["special_chat_id"])
+        status = str(data["special_status"])
         try:
             member = await bot.get_chat_member(chat_id, target_id)
             if member.status in {"left", "kicked"}:
-                await message.answer("Этот пользователь сейчас не состоит в группе."); return
+                await message.answer("Этот пользователь сейчас не состоит в группе.")
+                return
         except Exception:
-            await message.answer("Не удалось подтвердить участника группы. Проверьте ID."); return
+            await message.answer("Не удалось подтвердить участника группы. Проверьте ID.")
+            return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, message.from_user.id):
-                    await state.clear(); await message.answer("Недостаточно прав."); return
+                    await state.clear()
+                    await message.answer("Недостаточно прав.")
+                    return
                 await upsert_user(session, member.user)
                 settings = await _ensure_group_settings(session, chat_id)
                 cfg = dict(settings.moderation_config or {})
                 statuses = dict(cfg.get("special_statuses") or {})
-                ids = list(statuses.get(status) or [])
-                if target_id not in ids: ids.append(target_id)
-                statuses[status] = ids; cfg["special_statuses"] = statuses; settings.moderation_config = cfg
-                await write_audit(session, "group.special_status_added", chat_id=chat_id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"status": status})
-        await state.clear(); await message.answer(f"✅ Статус {SPECIAL_STATUSES[status]} назначен пользователю {target_id}.")
+                ids = [int(uid) for uid in list(statuses.get(status) or [])]
+                if target_id not in ids:
+                    ids.append(target_id)
+                statuses[status] = ids
+                cfg["special_statuses"] = statuses
+                settings.moderation_config = cfg
+                await write_audit(
+                    session,
+                    "group.special_status_added",
+                    chat_id=chat_id,
+                    actor_user_id=message.from_user.id,
+                    target_type="user",
+                    target_id=str(target_id),
+                    payload={"status": status},
+                )
+        await state.clear()
+        await message.answer(f"✅ Статус {SPECIAL_STATUSES[status]} назначен пользователю {target_id}.")
 
     @router.callback_query(F.data.startswith("hier:special_remove:"))
     async def special_remove(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 4)
-        try: chat_id = int(parts[2]); status = parts[3]; target_id = int(parts[4])
-        except (ValueError, IndexError): return
+        try:
+            chat_id = int(parts[2]); status = parts[3]; target_id = int(parts[4])
+        except (ValueError, IndexError):
+            return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True); return
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
                 settings = await _ensure_group_settings(session, chat_id)
-                cfg = dict(settings.moderation_config or {}); statuses = dict(cfg.get("special_statuses") or {})
-                ids = [uid for uid in list(statuses.get(status) or []) if int(uid) != target_id]
-                statuses[status] = ids; cfg["special_statuses"] = statuses; settings.moderation_config = cfg
-                await write_audit(session, "group.special_status_removed", chat_id=chat_id, actor_user_id=callback.from_user.id, target_type="user", target_id=str(target_id), payload={"status": status})
+                cfg = dict(settings.moderation_config or {})
+                statuses = dict(cfg.get("special_statuses") or {})
+                ids = [int(uid) for uid in list(statuses.get(status) or []) if int(uid) != target_id]
+                statuses[status] = ids
+                cfg["special_statuses"] = statuses
+                settings.moderation_config = cfg
+                await write_audit(
+                    session,
+                    "group.special_status_removed",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="user",
+                    target_id=str(target_id),
+                    payload={"status": status},
+                )
         callback.data = f"hier:special_list:{chat_id}:{status}"
         await special_list(callback)
 
