@@ -16,6 +16,7 @@ from groupbot.routers.creator_user_profile_links import create_creator_user_prof
 from groupbot.routers.group_commands import create_group_commands_router
 from groupbot.routers.group_control import create_group_control_router
 from groupbot.routers.group_control_role_actions import create_group_control_role_actions_router
+from groupbot.routers.group_control_ux import create_group_control_ux_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.user_display import clickable_user_display
@@ -46,7 +47,10 @@ async def main() -> None:
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.include_router(create_group_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
-    # Permission/toggle callbacks are handled before the generic control router.
+    # UX overrides go first: mode descriptions stay visible and role permissions
+    # are edited as a draft, then applied only by the explicit Save button.
+    dp.include_router(create_group_control_ux_router(session_factory))
+    # Remaining role actions (for example role enable/disable) keep working.
     dp.include_router(create_group_control_role_actions_router(session_factory))
     # Real owner-side moderation/administration screens intercept the generic
     # group section callbacks before private.py's fallback placeholder.
