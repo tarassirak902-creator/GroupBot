@@ -12,10 +12,47 @@ def private_main_menu(*, is_creator: bool) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
+def tariff_center_keyboard(*, has_active: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🎁 TEST — 3 дня", callback_data="tariff:card:TEST")],
+        [InlineKeyboardButton(text="🔹 BASIC", callback_data="tariff:card:BASIC")],
+        [InlineKeyboardButton(text="🔷 STANDARD", callback_data="tariff:card:STANDARD")],
+        [InlineKeyboardButton(text="💎 PRO", callback_data="tariff:card:PRO")],
+        [InlineKeyboardButton(text="👑 MAX", callback_data="tariff:card:MAX")],
+        [InlineKeyboardButton(text="🛠 Собрать свой тариф", callback_data="tariff:custom")],
+        [InlineKeyboardButton(text="📦 Дополнительные покупки", callback_data="tariff:addons")],
+    ]
+    if has_active:
+        rows.append([InlineKeyboardButton(text="📜 Моя подписка", callback_data="tariff:subscription")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def tariff_card_keyboard(code: str, *, can_activate_test: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if can_activate_test:
+        rows.append([InlineKeyboardButton(text="🎁 Активировать TEST на 3 дня", callback_data="tariff:activate_test")])
+    elif code != "TEST":
+        rows.append([InlineKeyboardButton(text="💳 Выбрать тариф", callback_data=f"tariff:choose:{code}")])
+    rows.append([InlineKeyboardButton(text="◀️ Все тарифы", callback_data="tariff:show")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def tariff_activation_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🎁 Активировать TEST на 3 дня", callback_data="tariff:activate_test")],
+            [InlineKeyboardButton(text="💳 Все тарифы", callback_data="tariff:show")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
+
+
+def tariff_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Все тарифы", callback_data="tariff:show")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
         ]
     )
@@ -34,7 +71,7 @@ def owned_groups_keyboard(groups: list[tuple[int, str | None, str]]) -> InlineKe
 def group_locked_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🎁 Активировать TEST", callback_data="tariff:activate_test")],
+            [InlineKeyboardButton(text="🎁 Активировать TEST", callback_data="tariff:card:TEST")],
             [InlineKeyboardButton(text="💳 Тариф и подписка", callback_data="tariff:show")],
             [InlineKeyboardButton(text="🔎 Диагностика", callback_data=f"group:diagnostic:{chat_id}")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="group:list"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
