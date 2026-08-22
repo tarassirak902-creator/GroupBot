@@ -10,6 +10,7 @@ from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
 from groupbot.routers.creator import create_creator_router
+from groupbot.routers.creator_group_profile_links import create_creator_group_profile_links_router
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
 from groupbot.routers.group_commands import create_group_commands_router
@@ -50,6 +51,8 @@ async def main() -> None:
     # generic creator router. They keep telegram_user_id internally while
     # rendering clickable tg://user links in the interface.
     dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
+    # Group cards use live Telegram metadata so title/username links stay current.
+    dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
     # Creator router goes before the generic private router so the creator-only
     # menu button is handled by the real global panel rather than a placeholder.
     dp.include_router(create_creator_router(session_factory, settings))
