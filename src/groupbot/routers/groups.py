@@ -1,5 +1,5 @@
 from aiogram import Bot, F, Router
-from aiogram.types import ChatMemberUpdated, Message
+from aiogram.types import ChatMemberUpdated, Message, User as TelegramUser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -7,6 +7,7 @@ from groupbot.models import Group, GroupStatus
 from groupbot.services.audit import write_audit
 from groupbot.services.diagnostics import rights_diagnostic
 from groupbot.services.groups import connect_group, register_pending_group
+from groupbot.services.users import upsert_user
 
 
 def _status_value(status) -> str:
@@ -18,7 +19,7 @@ async def _register_added_group(
     bot: Bot,
     *,
     chat,
-    actor_user_id: int | None,
+    actor_user: TelegramUser | None,
 ) -> bool:
     """Register a newly-added bot once and announce the connection deadline.
 
@@ -29,6 +30,9 @@ async def _register_added_group(
     should_announce = False
     async with session_factory() as session:
         async with session.begin():
+            if actor_user is not None:
+                await upsert_user(session, actor_user)
+
             group = (
                 await session.execute(
                     select(Group).where(Group.chat_id == chat.id).with_for_update()
@@ -41,7 +45,7 @@ async def _register_added_group(
                     session,
                     "group.bot_added",
                     chat_id=chat.id,
-                    actor_user_id=actor_user_id,
+                    actor_user_id=actor_user.id if actor_user else None,
                     target_type="group",
                     target_id=str(chat.id),
                 )
@@ -71,13 +75,15 @@ def create_group_router(session_factory: async_sessionmaker[AsyncSession]) -> Ro
                 session_factory,
                 bot,
                 chat=event.chat,
-                actor_user_id=event.from_user.id if event.from_user else None,
+                actor_user=event.from_user,
             )
             return
 
         if old_status in {"member", "administrator"} and new_status in {"left", "kicked"}:
             async with session_factory() as session:
                 async with session.begin():
+                    if event.from_user is not None:
+                        await upsert_user(session, event.from_user)
                     group = (
                         await session.execute(
                             select(Group).where(Group.chat_id == event.chat.id).with_for_update()
@@ -105,7 +111,7 @@ def create_group_router(session_factory: async_sessionmaker[AsyncSession]) -> Ro
             session_factory,
             bot,
             chat=message.chat,
-            actor_user_id=message.from_user.id if message.from_user else None,
+            actor_user=message.from_user,
         )
 
     @router.message(F.chat.type.in_({"group", "supergroup"}), F.text.casefold() == "подключить")
