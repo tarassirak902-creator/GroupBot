@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -77,7 +78,7 @@ def _fmt_dt(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
 
 
-def _user_display(user: User) -> str:
+def _user_label(user: User) -> str:
     full_name = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
     username = f"@{user.username}" if user.username else ""
     if full_name and username:
@@ -87,6 +88,11 @@ def _user_display(user: User) -> str:
     if username:
         return username
     return "Пользователь"
+
+
+def _user_link(user: User) -> str:
+    label = escape(_user_label(user))
+    return f'<a href="tg://user?id={user.telegram_user_id}">{label}</a>'
 
 
 def create_creator_subscription_duration_router(
@@ -202,8 +208,9 @@ def create_creator_subscription_duration_router(
     ) -> None:
         text = (
             "✅ <b>Подписка назначена</b>\n\n"
-            f"Пользователь: <b>{_user_display(user)}</b>\n"
-            f"Тариф: <b>{tariff_code}</b>\n"
+            f"Пользователь: {_user_link(user)}\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"Тариф: <b>{escape(tariff_code)}</b>\n"
             f"Срок: <b>{days} дн.</b>\n"
             f"Действует до: <b>{_fmt_dt(subscription.ends_at)}</b>\n"
             "Доступ к функциям: <b>✅ активирован</b>"
@@ -241,7 +248,8 @@ def create_creator_subscription_duration_router(
         if active is None:
             text = (
                 "💳 <b>Управление подпиской</b>\n\n"
-                f"Пользователь: <b>{_user_display(user)}</b>\n"
+                f"Пользователь: {_user_link(user)}\n"
+                f"ID: <code>{user_id}</code>\n"
                 "Активная подписка: <b>нет</b>\n"
                 "Доступ к функциям: <b>❌ не активирован</b>"
             )
@@ -250,11 +258,12 @@ def create_creator_subscription_duration_router(
             if tariff.code == "TEST":
                 access_line = "Пробный TEST: <b>✅ активирован</b>"
             else:
-                access_line = f"TEST-доступ: <b>✅ активирован тарифом {tariff.code}</b>"
+                access_line = f"TEST-доступ: <b>✅ активирован тарифом {escape(tariff.code)}</b>"
             text = (
                 "💳 <b>Управление подпиской</b>\n\n"
-                f"Пользователь: <b>{_user_display(user)}</b>\n"
-                f"Тариф: <b>{tariff.name}</b>\n"
+                f"Пользователь: {_user_link(user)}\n"
+                f"ID: <code>{user_id}</code>\n"
+                f"Тариф: <b>{escape(tariff.name)}</b>\n"
                 f"Начало: <b>{_fmt_dt(subscription.started_at)}</b>\n"
                 f"Окончание: <b>{_fmt_dt(subscription.ends_at)}</b>\n"
                 f"{access_line}\n"
@@ -327,8 +336,9 @@ def create_creator_subscription_duration_router(
 
         if callback.message is not None:
             await callback.message.edit_text(
-                f"⏳ <b>{tariff.code}</b>\n\n"
-                f"Пользователь: <b>{_user_display(user)}</b>\n\n"
+                f"⏳ <b>{escape(tariff.code)}</b>\n\n"
+                f"Пользователь: {_user_link(user)}\n"
+                f"ID: <code>{user_id}</code>\n\n"
                 "Выберите срок доступа:",
                 parse_mode="HTML",
                 reply_markup=_duration_keyboard(user_id, tariff.code),
@@ -407,8 +417,9 @@ def create_creator_subscription_duration_router(
         await state.update_data(user_id=user_id, tariff_code=tariff_code)
         if callback.message is not None:
             await callback.message.answer(
-                f"✏️ <b>{tariff_code}: другой срок</b>\n\n"
-                f"Пользователь: <b>{_user_display(user)}</b>\n"
+                f"✏️ <b>{escape(tariff_code)}: другой срок</b>\n\n"
+                f"Пользователь: {_user_link(user)}\n"
+                f"ID: <code>{user_id}</code>\n"
                 "Отправьте количество дней целым числом.",
                 parse_mode="HTML",
             )
