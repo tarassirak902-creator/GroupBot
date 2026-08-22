@@ -7,6 +7,7 @@ from aiogram.types import BotCommand, BotCommandScopeAllGroupChats
 from groupbot.config import get_settings
 from groupbot.db import create_session_factory
 from groupbot.middleware.idempotency import IdempotencyMiddleware
+from groupbot.routers.group_commands import create_group_commands_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.private import create_private_router
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
@@ -40,6 +41,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.include_router(create_group_router(session_factory))
+    dp.include_router(create_group_commands_router(session_factory))
     dp.include_router(create_private_router(session_factory, settings))
 
     await configure_group_commands(bot)
