@@ -7,12 +7,15 @@ from aiogram.types import BotCommandScopeAllGroupChats
 from groupbot.config import get_settings
 from groupbot.db import create_session_factory
 from groupbot.middleware.idempotency import IdempotencyMiddleware
+from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
+from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
 from groupbot.routers.creator import create_creator_router
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
 from groupbot.routers.group_commands import create_group_commands_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.private import create_private_router
+from groupbot.routers.user_display import clickable_user_display
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 
 
@@ -28,6 +31,11 @@ async def main() -> None:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # Keep a single presentation rule for creator-side user identities:
+    # name and username are clickable separately, while ` | ` is plain text.
+    creator_subscription_duration_module._user_link = clickable_user_display
+    creator_user_profile_links_module._user_link = clickable_user_display
 
     bot = Bot(settings.bot_token)
     session_factory = create_session_factory(settings)
