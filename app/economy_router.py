@@ -2,9 +2,10 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy import desc, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models import GroupSettings, GroupUser, Transaction
+from app.models import GroupSettings, GroupUser, Transaction, Wallet
 
 
 def create_economy_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
@@ -19,19 +20,39 @@ def create_economy_router(session_factory: async_sessionmaker[AsyncSession]) -> 
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in {"creator", "administrator"}
 
+    async def ensure_wallet(session: AsyncSession, chat_id: int, user_id: int, *, lock: bool = False) -> Wallet | None:
+        group_user = (await session.execute(
+            select(GroupUser).where(GroupUser.chat_id == chat_id, GroupUser.user_id == user_id)
+        )).scalar_one_or_none()
+        if group_user is None:
+            return None
+        await session.execute(
+            insert(Wallet).values(chat_id=chat_id, user_id=user_id, balance=group_user.balance)
+            .on_conflict_do_nothing(constraint="uq_wallet_chat_user")
+        )
+        query = select(Wallet).where(Wallet.chat_id == chat_id, Wallet.user_id == user_id)
+        if lock:
+            query = query.with_for_update()
+        return (await session.execute(query)).scalar_one()
+
+    async def sync_legacy_balance(session: AsyncSession, chat_id: int, user_id: int, balance: int) -> None:
+        group_user = (await session.execute(
+            select(GroupUser).where(GroupUser.chat_id == chat_id, GroupUser.user_id == user_id).with_for_update()
+        )).scalar_one_or_none()
+        if group_user is not None:
+            group_user.balance = balance
+
     @router.message(Command("balance"), F.chat.type.in_({"group", "supergroup"}))
     async def balance_handler(message: Message) -> None:
         if message.from_user is None:
             return
         async with session_factory() as session:
-            if not await economy_enabled(session, message.chat.id):
-                await message.answer("💰 Экономика отключена в этой группе.")
-                return
-            result = await session.execute(
-                select(GroupUser).where(GroupUser.chat_id == message.chat.id, GroupUser.user_id == message.from_user.id)
-            )
-            user = result.scalar_one_or_none()
-            balance = user.balance if user else 0
+            async with session.begin():
+                if not await economy_enabled(session, message.chat.id):
+                    await message.answer("💰 Экономика отключена в этой группе.")
+                    return
+                wallet = await ensure_wallet(session, message.chat.id, message.from_user.id)
+                balance = wallet.balance if wallet else 0
         await message.answer(f"💰 Баланс: {balance}")
 
     @router.message(Command("money_add"), F.chat.type.in_({"group", "supergroup"}))
@@ -63,14 +84,12 @@ def create_economy_router(session_factory: async_sessionmaker[AsyncSession]) -> 
                 if not await economy_enabled(session, message.chat.id):
                     await message.answer("💰 Экономика отключена в этой группе.")
                     return
-                result = await session.execute(
-                    select(GroupUser).where(GroupUser.chat_id == message.chat.id, GroupUser.user_id == target.id).with_for_update()
-                )
-                user = result.scalar_one_or_none()
-                if user is None:
+                wallet = await ensure_wallet(session, message.chat.id, target.id, lock=True)
+                if wallet is None:
                     await message.answer("Пользователь ещё не зарегистрирован в этой группе.")
                     return
-                user.balance += amount
+                wallet.balance += amount
+                await sync_legacy_balance(session, message.chat.id, target.id, wallet.balance)
                 session.add(Transaction(
                     chat_id=message.chat.id,
                     from_user_id=None,
@@ -110,22 +129,21 @@ def create_economy_router(session_factory: async_sessionmaker[AsyncSession]) -> 
                 if not await economy_enabled(session, message.chat.id):
                     await message.answer("💰 Экономика отключена в этой группе.")
                     return
-                sender_result = await session.execute(
-                    select(GroupUser).where(GroupUser.chat_id == message.chat.id, GroupUser.user_id == message.from_user.id).with_for_update()
-                )
-                receiver_result = await session.execute(
-                    select(GroupUser).where(GroupUser.chat_id == message.chat.id, GroupUser.user_id == target.id).with_for_update()
-                )
-                sender = sender_result.scalar_one_or_none()
-                receiver = receiver_result.scalar_one_or_none()
-                if sender is None or receiver is None:
+                first_id, second_id = sorted((message.from_user.id, target.id))
+                first = await ensure_wallet(session, message.chat.id, first_id, lock=True)
+                second = await ensure_wallet(session, message.chat.id, second_id, lock=True)
+                if first is None or second is None:
                     await message.answer("Оба пользователя должны быть зарегистрированы в этой группе.")
                     return
+                sender = first if first.user_id == message.from_user.id else second
+                receiver = second if sender is first else first
                 if sender.balance < amount:
                     await message.answer(f"Недостаточно средств. Твой баланс: {sender.balance}")
                     return
                 sender.balance -= amount
                 receiver.balance += amount
+                await sync_legacy_balance(session, message.chat.id, sender.user_id, sender.balance)
+                await sync_legacy_balance(session, message.chat.id, receiver.user_id, receiver.balance)
                 session.add(Transaction(
                     chat_id=message.chat.id,
                     from_user_id=message.from_user.id,
