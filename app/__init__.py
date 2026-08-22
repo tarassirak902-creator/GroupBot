@@ -1,1 +1,0 @@
-"""GroupBot application package."""
