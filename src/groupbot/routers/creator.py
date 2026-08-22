@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -17,6 +17,10 @@ from groupbot.services.diagnostics import rights_diagnostic
 
 class TariffEditState(StatesGroup):
     waiting_value = State()
+
+
+class UserSubscriptionState(StatesGroup):
+    waiting_duration = State()
 
 
 def _creator_home_keyboard() -> InlineKeyboardMarkup:
@@ -128,10 +132,68 @@ def _users_keyboard(rows: list[User]) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     for user in rows:
         name = user.username and f"@{user.username}" or user.first_name or str(user.telegram_user_id)
-        buttons.append([InlineKeyboardButton(text=f"👤 {name}"[:64], callback_data=f"creator:user:{user.telegram_user_id}")])
+        buttons.append([InlineKeyboardButton(text=f"👤 {name}"[:64], callback_data=f"creator:usercard:{user.telegram_user_id}")])
     buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="creator:users")])
     buttons.append([InlineKeyboardButton(text="◀️ Панель создателя", callback_data="creator:home")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _user_card_keyboard(user_id: int, *, has_active_subscription: bool) -> InlineKeyboardMarkup:
+    subscription_label = "💳 Управление подпиской"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Группы пользователя", callback_data=f"creator:user_groups:{user_id}")],
+            [InlineKeyboardButton(text=subscription_label, callback_data=f"creator:user_sub:{user_id}")],
+            [InlineKeyboardButton(text="📋 История подписок", callback_data=f"creator:user_history:{user_id}")],
+            [InlineKeyboardButton(text="🔎 Диагностика пользователя", callback_data=f"creator:user_diag:{user_id}")],
+            [InlineKeyboardButton(text="◀️ Пользователи", callback_data="creator:users")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
+
+
+def _user_subscription_keyboard(user_id: int, *, has_active: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_active:
+        rows.append([InlineKeyboardButton(text="🔄 Сменить тариф", callback_data=f"creator:user_sub_choose:{user_id}")])
+        rows.append([InlineKeyboardButton(text="⛔ Отключить подписку", callback_data=f"creator:user_sub_cancel:{user_id}")])
+    else:
+        rows.append([InlineKeyboardButton(text="🎁 Назначить тариф", callback_data=f"creator:user_sub_choose:{user_id}")])
+    rows.append([InlineKeyboardButton(text="📋 История подписок", callback_data=f"creator:user_history:{user_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ Карточка пользователя", callback_data=f"creator:usercard:{user_id}")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _user_tariff_choice_keyboard(user_id: int, tariffs: list[Tariff]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for tariff in tariffs:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"💳 {tariff.code}",
+                callback_data=f"creator:user_assign:{user_id}:{tariff.code}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="◀️ Управление подпиской", callback_data=f"creator:user_sub:{user_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _cancel_subscription_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, отключить", callback_data=f"creator:user_sub_cancel_yes:{user_id}")],
+            [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"creator:user_sub:{user_id}")],
+        ]
+    )
+
+
+def _user_back_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Карточка пользователя", callback_data=f"creator:usercard:{user_id}")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
 
 
 def _fmt_dt(value: datetime | None) -> str:
@@ -151,6 +213,21 @@ def create_creator_router(session_factory: async_sessionmaker[AsyncSession], set
         if lock:
             query = query.with_for_update()
         return (await session.execute(query)).scalar_one_or_none()
+
+    async def get_active_user_subscription(session: AsyncSession, user_id: int) -> tuple[Subscription, Tariff] | None:
+        return (
+            await session.execute(
+                select(Subscription, Tariff)
+                .join(Tariff, Tariff.id == Subscription.tariff_id)
+                .where(
+                    Subscription.owner_user_id == user_id,
+                    Subscription.status == SubscriptionStatus.active.value,
+                    Subscription.ends_at > datetime.now(timezone.utc),
+                )
+                .order_by(Subscription.ends_at.desc())
+                .limit(1)
+            )
+        ).first()
 
     async def show_creator_home(message: Message, *, edit: bool = False) -> None:
         async with session_factory() as session:
@@ -215,6 +292,117 @@ def create_creator_router(session_factory: async_sessionmaker[AsyncSession], set
         if not rows:
             text += "\n\nПользователей пока нет."
         await message.edit_text(text, parse_mode="HTML", reply_markup=_users_keyboard(list(rows)))
+
+    async def show_user_card(message: Message, user_id: int) -> bool:
+        async with session_factory() as session:
+            user = (await session.execute(select(User).where(User.telegram_user_id == user_id))).scalar_one_or_none()
+            owned_count = (
+                await session.execute(
+                    select(func.count()).select_from(GroupOwner).where(
+                        GroupOwner.user_id == user_id, GroupOwner.is_current.is_(True)
+                    )
+                )
+            ).scalar_one()
+            sub = await get_active_user_subscription(session, user_id)
+        if user is None:
+            return False
+        name = " ".join(part for part in [user.first_name, user.last_name] if part) or "—"
+        username = f"@{user.username}" if user.username else "—"
+        tariff_text = f"{sub.Tariff.name} до {_fmt_dt(sub.Subscription.ends_at)}" if sub else "нет активного"
+        await message.edit_text(
+            "👤 <b>Карточка пользователя</b>\n\n"
+            f"Telegram ID: <code>{user.telegram_user_id}</code>\n"
+            f"Username: <b>{username}</b>\n"
+            f"Имя: <b>{name}</b>\n"
+            f"Telegram Premium: {'✅' if user.is_premium else '❌'}\n"
+            f"Владеет группами: <b>{owned_count}</b>\n"
+            f"Тариф: <b>{tariff_text}</b>\n"
+            f"Первый контакт: <b>{_fmt_dt(user.first_seen_at)}</b>\n"
+            f"Обновлён: <b>{_fmt_dt(user.updated_at)}</b>",
+            parse_mode="HTML",
+            reply_markup=_user_card_keyboard(user_id, has_active_subscription=sub is not None),
+        )
+        return True
+
+    async def show_user_subscription(message: Message, user_id: int) -> bool:
+        async with session_factory() as session:
+            user = (await session.execute(select(User).where(User.telegram_user_id == user_id))).scalar_one_or_none()
+            sub = await get_active_user_subscription(session, user_id)
+        if user is None:
+            return False
+        if sub is None:
+            text = (
+                "💳 <b>Управление подпиской</b>\n\n"
+                f"Пользователь: <code>{user_id}</code>\n"
+                "Активная подписка: <b>нет</b>"
+            )
+        else:
+            text = (
+                "💳 <b>Управление подпиской</b>\n\n"
+                f"Пользователь: <code>{user_id}</code>\n"
+                f"Тариф: <b>{sub.Tariff.name}</b>\n"
+                f"Начало: <b>{_fmt_dt(sub.Subscription.started_at)}</b>\n"
+                f"Окончание: <b>{_fmt_dt(sub.Subscription.ends_at)}</b>\n"
+                f"TEST: {'✅' if sub.Subscription.is_trial else '❌'}"
+            )
+        await message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=_user_subscription_keyboard(user_id, has_active=sub is not None),
+        )
+        return True
+
+    async def assign_subscription(
+        *,
+        creator_id: int,
+        user_id: int,
+        tariff_code: str,
+        duration_days: int,
+    ) -> Subscription | None:
+        now = datetime.now(timezone.utc)
+        async with session_factory() as session:
+            async with session.begin():
+                user = (await session.execute(select(User).where(User.telegram_user_id == user_id))).scalar_one_or_none()
+                tariff = await get_tariff(session, tariff_code, lock=True)
+                if user is None or tariff is None or not tariff.is_active:
+                    return None
+                active_rows = (
+                    await session.execute(
+                        select(Subscription).where(
+                            Subscription.owner_user_id == user_id,
+                            Subscription.status == SubscriptionStatus.active.value,
+                            Subscription.ends_at > now,
+                        ).with_for_update()
+                    )
+                ).scalars().all()
+                replaced = []
+                for old in active_rows:
+                    old.status = SubscriptionStatus.cancelled.value
+                    replaced.append(old.id)
+                subscription = Subscription(
+                    owner_user_id=user_id,
+                    tariff_id=tariff.id,
+                    status=SubscriptionStatus.active.value,
+                    started_at=now,
+                    ends_at=now + timedelta(days=duration_days),
+                    is_trial=tariff.is_trial,
+                )
+                session.add(subscription)
+                await session.flush()
+                await write_audit(
+                    session,
+                    "creator.user_subscription_assigned",
+                    actor_user_id=creator_id,
+                    target_type="user",
+                    target_id=str(user_id),
+                    payload={
+                        "subscription_id": subscription.id,
+                        "tariff": tariff.code,
+                        "duration_days": duration_days,
+                        "replaced_subscription_ids": replaced,
+                    },
+                )
+                return subscription
 
     @router.message(F.chat.type == "private", F.text == "👑 Панель создателя")
     async def creator_panel(message: Message) -> None:
@@ -315,11 +503,7 @@ def create_creator_router(session_factory: async_sessionmaker[AsyncSession], set
             text = f"🔎 Не удалось получить права бота для группы <code>{chat_id}</code>.\n\n<code>{type(exc).__name__}</code>"
             suffix = ""
         if callback.message is not None:
-            await callback.message.edit_text(
-                text + suffix,
-                parse_mode="HTML",
-                reply_markup=_group_card_keyboard(chat_id),
-            )
+            await callback.message.edit_text(text + suffix, parse_mode="HTML", reply_markup=_group_card_keyboard(chat_id))
         await callback.answer()
 
     @router.callback_query(F.data == "creator:users")
@@ -331,8 +515,292 @@ def create_creator_router(session_factory: async_sessionmaker[AsyncSession], set
             await show_users(callback.message)
         await callback.answer()
 
-    @router.callback_query(F.data.startswith("creator:user:"))
+    @router.callback_query(F.data.startswith("creator:usercard:"))
     async def creator_user_card(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        if callback.message is None or not await show_user_card(callback.message, user_id):
+            await callback.answer("Пользователь не найден.", show_alert=True)
+            return
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("creator:user_groups:"))
+    async def creator_user_groups(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(Group.chat_id, Group.title, Group.status)
+                    .join(GroupOwner, GroupOwner.chat_id == Group.chat_id)
+                    .where(GroupOwner.user_id == user_id, GroupOwner.is_current.is_(True))
+                    .order_by(Group.connected_at.desc().nullslast(), Group.chat_id)
+                )
+            ).all()
+        if callback.message is not None:
+            text = f"👥 <b>Группы пользователя</b>\n\nTelegram ID: <code>{user_id}</code>\nГрупп: <b>{len(rows)}</b>"
+            buttons: list[list[InlineKeyboardButton]] = []
+            for chat_id, title, status in rows:
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"{_group_status_icon(status)} {title or chat_id}"[:64],
+                        callback_data=f"creator:group:{chat_id}",
+                    )
+                ])
+            buttons.append([InlineKeyboardButton(text="◀️ Карточка пользователя", callback_data=f"creator:usercard:{user_id}")])
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("creator:user_sub:"))
+    async def creator_user_subscription(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        if callback.message is None or not await show_user_subscription(callback.message, user_id):
+            await callback.answer("Пользователь не найден.", show_alert=True)
+            return
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("creator:user_sub_choose:"))
+    async def creator_user_subscription_choose(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        async with session_factory() as session:
+            tariffs = (
+                await session.execute(select(Tariff).where(Tariff.is_active.is_(True)).order_by(Tariff.id))
+            ).scalars().all()
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "💳 <b>Выберите тариф</b>\n\n"
+                f"Пользователь: <code>{user_id}</code>\n\n"
+                "Если у выбранного тарифа не задан срок, Mimorus попросит указать его вручную.",
+                parse_mode="HTML",
+                reply_markup=_user_tariff_choice_keyboard(user_id, list(tariffs)),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("creator:user_assign:"))
+    async def creator_user_assign(callback: CallbackQuery, state: FSMContext) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        parts = (callback.data or "").split(":", 3)
+        if len(parts) != 4:
+            await callback.answer("Некорректное действие.", show_alert=True)
+            return
+        try:
+            user_id = int(parts[2])
+        except ValueError:
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        tariff_code = parts[3].upper()
+        async with session_factory() as session:
+            tariff = await get_tariff(session, tariff_code)
+        if tariff is None or not tariff.is_active:
+            await callback.answer("Тариф недоступен.", show_alert=True)
+            return
+        if tariff.duration_days is None:
+            await state.set_state(UserSubscriptionState.waiting_duration)
+            await state.update_data(user_id=user_id, tariff_code=tariff.code)
+            if callback.message is not None:
+                await callback.message.answer(
+                    f"⏳ <b>{tariff.code}</b>\n\n"
+                    "У этого тарифа не задан фиксированный срок. Отправьте срок подписки в днях целым числом.",
+                    parse_mode="HTML",
+                )
+            await callback.answer()
+            return
+        subscription = await assign_subscription(
+            creator_id=callback.from_user.id,
+            user_id=user_id,
+            tariff_code=tariff.code,
+            duration_days=tariff.duration_days,
+        )
+        if subscription is None:
+            await callback.answer("Не удалось назначить тариф.", show_alert=True)
+            return
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "✅ <b>Подписка назначена</b>\n\n"
+                f"Пользователь: <code>{user_id}</code>\n"
+                f"Тариф: <b>{tariff.code}</b>\n"
+                f"Действует до: <b>{_fmt_dt(subscription.ends_at)}</b>",
+                parse_mode="HTML",
+                reply_markup=_user_subscription_keyboard(user_id, has_active=True),
+            )
+        await callback.answer("Сохранено")
+
+    @router.message(UserSubscriptionState.waiting_duration, F.chat.type == "private")
+    async def creator_user_assign_duration(message: Message, state: FSMContext) -> None:
+        if message.from_user is None or not is_creator(message.from_user.id):
+            await state.clear()
+            return
+        raw = (message.text or "").strip()
+        try:
+            days = int(raw)
+        except ValueError:
+            await message.answer("Отправьте срок целым числом дней.")
+            return
+        if days <= 0:
+            await message.answer("Срок должен быть больше нуля дней.")
+            return
+        data = await state.get_data()
+        user_id = int(data.get("user_id"))
+        tariff_code = str(data.get("tariff_code", "")).upper()
+        subscription = await assign_subscription(
+            creator_id=message.from_user.id,
+            user_id=user_id,
+            tariff_code=tariff_code,
+            duration_days=days,
+        )
+        await state.clear()
+        if subscription is None:
+            await message.answer("Не удалось назначить подписку.")
+            return
+        await message.answer(
+            "✅ <b>Подписка назначена</b>\n\n"
+            f"Пользователь: <code>{user_id}</code>\n"
+            f"Тариф: <b>{tariff_code}</b>\n"
+            f"Срок: <b>{days} дн.</b>\n"
+            f"Действует до: <b>{_fmt_dt(subscription.ends_at)}</b>",
+            parse_mode="HTML",
+            reply_markup=_user_subscription_keyboard(user_id, has_active=True),
+        )
+
+    @router.callback_query(F.data.startswith("creator:user_sub_cancel:"))
+    async def creator_user_subscription_cancel(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "⚠️ <b>Отключить подписку?</b>\n\n"
+                f"Пользователь: <code>{user_id}</code>\n\n"
+                "Активная подписка будет помечена как отменённая. История сохранится.",
+                parse_mode="HTML",
+                reply_markup=_cancel_subscription_confirm_keyboard(user_id),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("creator:user_sub_cancel_yes:"))
+    async def creator_user_subscription_cancel_yes(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        now = datetime.now(timezone.utc)
+        cancelled_ids: list[int] = []
+        async with session_factory() as session:
+            async with session.begin():
+                rows = (
+                    await session.execute(
+                        select(Subscription).where(
+                            Subscription.owner_user_id == user_id,
+                            Subscription.status == SubscriptionStatus.active.value,
+                            Subscription.ends_at > now,
+                        ).with_for_update()
+                    )
+                ).scalars().all()
+                for subscription in rows:
+                    subscription.status = SubscriptionStatus.cancelled.value
+                    cancelled_ids.append(subscription.id)
+                if cancelled_ids:
+                    await write_audit(
+                        session,
+                        "creator.user_subscription_cancelled",
+                        actor_user_id=callback.from_user.id,
+                        target_type="user",
+                        target_id=str(user_id),
+                        payload={"subscription_ids": cancelled_ids},
+                    )
+        if not cancelled_ids:
+            await callback.answer("Активной подписки уже нет.", show_alert=True)
+            if callback.message is not None:
+                await show_user_subscription(callback.message, user_id)
+            return
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "✅ <b>Подписка отключена</b>\n\n"
+                f"Пользователь: <code>{user_id}</code>\n"
+                "История подписки сохранена.",
+                parse_mode="HTML",
+                reply_markup=_user_subscription_keyboard(user_id, has_active=False),
+            )
+        await callback.answer("Подписка отключена")
+
+    @router.callback_query(F.data.startswith("creator:user_history:"))
+    async def creator_user_history(callback: CallbackQuery) -> None:
+        if not is_creator(callback.from_user.id):
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            user_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный пользователь.", show_alert=True)
+            return
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(Subscription, Tariff)
+                    .join(Tariff, Tariff.id == Subscription.tariff_id)
+                    .where(Subscription.owner_user_id == user_id)
+                    .order_by(Subscription.created_at.desc(), Subscription.id.desc())
+                    .limit(10)
+                )
+            ).all()
+        lines = [
+            "📋 <b>История подписок</b>",
+            "",
+            f"Пользователь: <code>{user_id}</code>",
+            "",
+        ]
+        if not rows:
+            lines.append("История подписок пуста.")
+        else:
+            status_icons = {"active": "✅", "expired": "⌛", "cancelled": "⛔"}
+            for subscription, tariff in rows:
+                lines.extend([
+                    f"{status_icons.get(subscription.status, '•')} <b>{tariff.code}</b> — {subscription.status}",
+                    f"   {_fmt_dt(subscription.started_at)} → {_fmt_dt(subscription.ends_at)}",
+                ])
+        if callback.message is not None:
+            await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=_user_back_keyboard(user_id))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("creator:user_diag:"))
+    async def creator_user_diagnostic(callback: CallbackQuery) -> None:
         if not is_creator(callback.from_user.id):
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
@@ -343,50 +811,40 @@ def create_creator_router(session_factory: async_sessionmaker[AsyncSession], set
             return
         async with session_factory() as session:
             user = (await session.execute(select(User).where(User.telegram_user_id == user_id))).scalar_one_or_none()
-            owned_count = (
+            owned_groups = (
                 await session.execute(
                     select(func.count()).select_from(GroupOwner).where(
                         GroupOwner.user_id == user_id, GroupOwner.is_current.is_(True)
                     )
                 )
             ).scalar_one()
-            sub = (
+            total_subscriptions = (
                 await session.execute(
-                    select(Subscription, Tariff)
-                    .join(Tariff, Tariff.id == Subscription.tariff_id)
-                    .where(
-                        Subscription.owner_user_id == user_id,
-                        Subscription.status == SubscriptionStatus.active.value,
-                        Subscription.ends_at > datetime.now(timezone.utc),
-                    )
-                    .order_by(Subscription.ends_at.desc())
-                    .limit(1)
+                    select(func.count()).select_from(Subscription).where(Subscription.owner_user_id == user_id)
                 )
-            ).first()
-        if user is None or callback.message is None:
+            ).scalar_one()
+            active = await get_active_user_subscription(session, user_id)
+        if user is None:
             await callback.answer("Пользователь не найден.", show_alert=True)
             return
-        name = " ".join(part for part in [user.first_name, user.last_name] if part) or "—"
-        username = f"@{user.username}" if user.username else "—"
-        tariff_text = f"{sub.Tariff.name} до {_fmt_dt(sub.Subscription.ends_at)}" if sub else "нет активного"
-        await callback.message.edit_text(
-            "👤 <b>Карточка пользователя</b>\n\n"
-            f"Telegram ID: <code>{user.telegram_user_id}</code>\n"
-            f"Username: <b>{username}</b>\n"
-            f"Имя: <b>{name}</b>\n"
-            f"Telegram Premium: {'✅' if user.is_premium else '❌'}\n"
-            f"Владеет группами: <b>{owned_count}</b>\n"
-            f"Тариф: <b>{tariff_text}</b>\n"
-            f"Первый контакт: <b>{_fmt_dt(user.first_seen_at)}</b>\n"
-            f"Обновлён: <b>{_fmt_dt(user.updated_at)}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="◀️ Пользователи", callback_data="creator:users")],
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
-                ]
-            ),
+        active_text = (
+            f"{active.Tariff.code} до {_fmt_dt(active.Subscription.ends_at)}"
+            if active else "нет"
         )
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "🔎 <b>Диагностика пользователя</b>\n\n"
+                f"Telegram ID: <code>{user_id}</code>\n"
+                f"Удалённый аккаунт: {'⚠️ да' if user.deleted_account else '✅ нет'}\n"
+                f"Telegram Premium: {'✅ да' if user.is_premium else '❌ нет'}\n"
+                f"Текущих групп владельца: <b>{owned_groups}</b>\n"
+                f"Записей подписок: <b>{total_subscriptions}</b>\n"
+                f"Активная подписка: <b>{active_text}</b>\n"
+                f"Первый контакт: <b>{_fmt_dt(user.first_seen_at)}</b>\n"
+                f"Последнее обновление профиля: <b>{_fmt_dt(user.updated_at)}</b>",
+                parse_mode="HTML",
+                reply_markup=_user_back_keyboard(user_id),
+            )
         await callback.answer()
 
     @router.callback_query(F.data == "creator:diagnostics")
@@ -395,9 +853,7 @@ def create_creator_router(session_factory: async_sessionmaker[AsyncSession], set
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
         async with session_factory() as session:
-            statuses = dict(
-                (await session.execute(select(Group.status, func.count()).group_by(Group.status))).all()
-            )
+            statuses = dict((await session.execute(select(Group.status, func.count()).group_by(Group.status))).all())
             total_users = (await session.execute(select(func.count()).select_from(User))).scalar_one()
             active_subs = (
                 await session.execute(
