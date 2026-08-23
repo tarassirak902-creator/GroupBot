@@ -13,6 +13,7 @@ from groupbot.routers import creator_user_profile_links as creator_user_profile_
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admins_display import create_admins_display_router
+from groupbot.routers.ban_cleanup import create_ban_cleanup_router
 from groupbot.routers.creator import create_creator_router
 from groupbot.routers.creator_group_profile_links import create_creator_group_profile_links_router
 from groupbot.routers.creator_identity_privacy import create_creator_identity_privacy_router
@@ -58,6 +59,10 @@ async def main() -> None:
     dp.include_router(create_identity_privacy_router(session_factory, settings))
     # Exact confirmed message operations are handled before generic moderation.
     dp.include_router(create_message_operations_router(session_factory))
+    # Ban reason callbacks are intercepted only to add the confirmed
+    # "ban + cleanup" choice; both branches reuse the existing moderation
+    # and cleanup implementations instead of duplicating them.
+    dp.include_router(create_ban_cleanup_router(session_factory))
     dp.include_router(create_manual_moderation_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
     dp.include_router(create_admin_hierarchy_router(session_factory))
