@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import Group, GroupSettings, GroupStatus
+from groupbot.routers.user_display import clickable_identity
 from groupbot.services.subscriptions import active_subscription_for_group
 
 
@@ -94,12 +95,17 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
             return
         if message.from_user is None:
             return
-        username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+        identity = clickable_identity(
+            telegram_user_id=message.from_user.id,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name,
+            username=message.from_user.username,
+        )
         await message.answer(
-            "👤 Профиль\n\n"
-            f"Пользователь: {username}\n"
-            f"Telegram ID: {message.from_user.id}\n\n"
-            "Расширенная карточка пользователя будет подключена в блоке статистики и профилей."
+            "👤 <b>Профиль</b>\n\n"
+            f"Пользователь: {identity}\n\n"
+            "Расширенная карточка пользователя будет подключена в блоке статистики и профилей.",
+            parse_mode="HTML",
         )
 
     @router.message(Command("stats"), F.chat.type.in_({"group", "supergroup"}))
