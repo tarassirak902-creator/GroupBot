@@ -7,9 +7,11 @@ from aiogram.types import BotCommandScopeAllGroupChats
 from groupbot.config import get_settings
 from groupbot.db import create_session_factory
 from groupbot.middleware.idempotency import IdempotencyMiddleware
+from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
+from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.creator import create_creator_router
 from groupbot.routers.creator_group_profile_links import create_creator_group_profile_links_router
 from groupbot.routers.creator_identity_privacy import create_creator_identity_privacy_router
@@ -48,10 +50,15 @@ async def main() -> None:
     session_factory = create_session_factory(settings)
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
+    # Every ordinary group message updates users/group_members before routers run.
+    dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
+
     dp.include_router(create_group_router(session_factory))
-    # Privacy router is intentionally first among user-facing feature routers:
-    # it prevents numeric Telegram ids from leaking into current UI screens and
-    # lets owner-side assignments select people by human-readable identity.
+    # Telegram administrators are synchronized immediately when an owner opens
+    # the rank/VIP/Nedotroga picker, so the list is useful even on a fresh DB.
+    dp.include_router(create_admin_member_sync_router(session_factory))
+    # Privacy router keeps numeric Telegram ids out of the visible UI and handles
+    # human-readable member selections after the picker has been rendered.
     dp.include_router(create_identity_privacy_router(session_factory, settings))
     dp.include_router(create_group_commands_router(session_factory))
     # Fixed standard hierarchy and assignment limits go before the generic
