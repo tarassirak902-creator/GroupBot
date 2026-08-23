@@ -3,15 +3,16 @@ from __future__ import annotations
 from html import escape
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
-from sqlalchemy import func
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import GroupMember, MemberStatus
+from groupbot.models import AdminRole, GroupMember, MemberStatus
 from groupbot.routers.admin_hierarchy import RANK_META, SPECIAL_STATUSES, STANDARD_NAMES, _assignment_count
 from groupbot.routers.group_control import _owner_access
-from groupbot.routers.identity_privacy import _known_group_users, _user_picker_keyboard
+from groupbot.routers.identity_privacy import _known_group_users
+from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.users import upsert_user
 
 
@@ -45,6 +46,28 @@ async def _sync_telegram_admins(callback: CallbackQuery, session: AsyncSession, 
     return synced
 
 
+def _picker_keyboard(users, callback_prefix: str, back_data: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, user in enumerate(users, start=1):
+        rows.append([
+            InlineKeyboardButton(
+                text=f"✅ Выбрать #{index}",
+                callback_data=f"{callback_prefix}:{user.telegram_user_id}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=back_data)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _picker_users_text(users) -> str:
+    if not users:
+        return ""
+    return "\n".join(
+        f"{index}. {clickable_user_display(user)}"
+        for index, user in enumerate(users, start=1)
+    )
+
+
 def create_admin_member_sync_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="admin_member_sync")
 
@@ -61,9 +84,6 @@ def create_admin_member_sync_router(session_factory: async_sessionmaker[AsyncSes
             if not await _owner_access(session, chat_id, callback.from_user.id):
                 await callback.answer("Недостаточно прав.", show_alert=True)
                 return
-
-            from groupbot.models import AdminRole
-            from sqlalchemy import select
 
             role = (
                 await session.execute(
@@ -94,12 +114,14 @@ def create_admin_member_sync_router(session_factory: async_sessionmaker[AsyncSes
         if callback.message is not None:
             text = (
                 f"➕ <b>Назначить ранг «{escape(role.name)}»</b>\n\n"
-                "Выберите участника по имени или username.\n"
-                "Telegram ID используется только внутри Mimorus."
+                "Выберите участника из списка ниже.\n"
+                "Имя и @username кликабельны отдельно, а разделитель | — обычный текст."
             )
             if synced:
                 text += f"\n\nАдминистраторы Telegram синхронизированы: <b>{synced}</b>."
-            if not users:
+            if users:
+                text += "\n\n" + _picker_users_text(users)
+            else:
                 text += (
                     "\n\nПока нет известных участников. Обычные участники появляются здесь "
                     "после любой активности в группе."
@@ -107,7 +129,7 @@ def create_admin_member_sync_router(session_factory: async_sessionmaker[AsyncSes
             await callback.message.edit_text(
                 text,
                 parse_mode="HTML",
-                reply_markup=_user_picker_keyboard(
+                reply_markup=_picker_keyboard(
                     users,
                     f"priv:rank_pick:{chat_id}:{role_id}",
                     f"hier:role:{chat_id}:{role_id}",
@@ -141,16 +163,19 @@ def create_admin_member_sync_router(session_factory: async_sessionmaker[AsyncSes
         if callback.message is not None:
             text = (
                 f"➕ <b>{SPECIAL_STATUSES[status]}</b>\n\n"
-                "Выберите участника по имени или username."
+                "Выберите участника из списка ниже.\n"
+                "Имя и @username кликабельны отдельно, а разделитель | — обычный текст."
             )
             if synced:
                 text += f"\n\nАдминистраторы Telegram синхронизированы: <b>{synced}</b>."
-            if not users:
+            if users:
+                text += "\n\n" + _picker_users_text(users)
+            else:
                 text += "\n\nПока нет известных участников."
             await callback.message.edit_text(
                 text,
                 parse_mode="HTML",
-                reply_markup=_user_picker_keyboard(
+                reply_markup=_picker_keyboard(
                     users,
                     f"priv:special_pick:{chat_id}:{status}",
                     f"hier:special_list:{chat_id}:{status}",
