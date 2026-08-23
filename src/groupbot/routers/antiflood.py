@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import re
+from html import escape
+
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from groupbot.routers.group_control import _ensure_group_settings, _owner_access
+from groupbot.services.audit import write_audit
+
+
+DURATION_RE = re.compile(r"^(\d+)(м|мин|ч|д)$", re.IGNORECASE)
+ACTION_LABELS = {
+    "warning": "⚠️ Предупреждение",
+    "mute": "🔇 Мут",
+    "ban": "⛔ Бан",
+}
+
+
+class AntiFloodState(StatesGroup):
+    waiting_limit = State()
+    waiting_window = State()
+    waiting_mute_duration = State()
+
+
+def _config(raw: dict | None) -> dict:
+    data = dict((raw or {}).get("antiflood") or {})
+    exclusions = dict(data.get("exclusions") or {})
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        "message_limit": data.get("message_limit"),
+        "window_seconds": data.get("window_seconds"),
+        "action": data.get("action"),
+        "mute_duration": data.get("mute_duration"),
+        "exclusions": {
+            "admins": bool(exclusions.get("admins", False)),
+            "vip": bool(exclusions.get("vip", False)),
+            "nedotroga": bool(exclusions.get("nedotroga", False)),
+        },
+    }
+
+
+def _duration_seconds(token: str) -> int | None:
+    match = DURATION_RE.match(token.strip().casefold())
+    if not match:
+        return None
+    value = int(match.group(1))
+    if value <= 0:
+        return None
+    unit = match.group(2).casefold()
+    if unit in {"м", "мин"}:
+        return value * 60
+    if unit == "ч":
+        return value * 3600
+    return value * 86400
+
+
+def _window_seconds(token: str) -> int | None:
+    value = token.strip().casefold()
+    match = re.fullmatch(r"(\d+)(с|сек|м|мин|ч)?", value)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    if amount <= 0:
+        return None
+    unit = match.group(2) or "с"
+    if unit in {"с", "сек"}:
+        return amount
+    if unit in {"м", "мин"}:
+        return amount * 60
+    return amount * 3600
+
+
+def _window_label(seconds: int | None) -> str:
+    if not seconds:
+        return "не задан"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} ч."
+    if seconds % 60 == 0:
+        return f"{seconds // 60} мин."
+    return f"{seconds} сек."
+
+
+def _duration_label(token: str | None) -> str:
+    if not token:
+        return "не задан"
+    match = DURATION_RE.match(token)
+    if not match:
+        return escape(token)
+    amount = int(match.group(1))
+    unit = match.group(2).casefold()
+    if unit in {"м", "мин"}:
+        return f"{amount} мин."
+    if unit == "ч":
+        return f"{amount} ч."
+    return f"{amount} дн."
+
+
+def _complete(cfg: dict) -> bool:
+    if not cfg.get("message_limit") or not cfg.get("window_seconds") or cfg.get("action") not in ACTION_LABELS:
+        return False
+    if cfg.get("action") == "mute" and _duration_seconds(str(cfg.get("mute_duration") or "")) is None:
+        return False
+    return True
+
+
+def _keyboard(chat_id: int, cfg: dict) -> InlineKeyboardMarkup:
+    ex = cfg["exclusions"]
+    rows = [
+        [InlineKeyboardButton(
+            text="🟢 Выключить антифлуд" if cfg["enabled"] else "⚪ Включить антифлуд",
+            callback_data=f"af:toggle:{chat_id}",
+        )],
+        [InlineKeyboardButton(text="💬 Количество сообщений", callback_data=f"af:set_limit:{chat_id}")],
+        [InlineKeyboardButton(text="⏱ Временной промежуток", callback_data=f"af:set_window:{chat_id}")],
+        [InlineKeyboardButton(text="⚖️ Действие", callback_data=f"af:action:{chat_id}")],
+    ]
+    if cfg.get("action") == "mute":
+        rows.append([InlineKeyboardButton(text="⏳ Срок мута", callback_data=f"af:set_duration:{chat_id}")])
+    rows.extend([
+        [InlineKeyboardButton(text=("✅ " if ex["admins"] else "❌ ") + "Исключать администрацию", callback_data=f"af:ex:{chat_id}:admins")],
+        [InlineKeyboardButton(text=("✅ " if ex["vip"] else "❌ ") + "Исключать VIP", callback_data=f"af:ex:{chat_id}:vip")],
+        [InlineKeyboardButton(text=("✅ " if ex["nedotroga"] else "❌ ") + "Исключать Недотрогу", callback_data=f"af:ex:{chat_id}:nedotroga")],
+        [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession], chat_id: int) -> None:
+    async with session_factory() as session:
+        if not await _owner_access(session, chat_id, callback.from_user.id):
+            await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
+            return
+        settings = await _ensure_group_settings(session, chat_id)
+        cfg = _config(settings.moderation_config)
+    action = ACTION_LABELS.get(str(cfg.get("action")), "не задано")
+    duration_line = ""
+    if cfg.get("action") == "mute":
+        duration_line = f"\nСрок мута: <b>{_duration_label(cfg.get('mute_duration'))}</b>"
+    ex = cfg["exclusions"]
+    text = (
+        "💬 <b>Антифлуд</b>\n\n"
+        f"Статус: <b>{'✅ включён' if cfg['enabled'] else '❌ выключен'}</b>\n"
+        f"Количество сообщений: <b>{cfg.get('message_limit') or 'не задано'}</b>\n"
+        f"Временной промежуток: <b>{_window_label(cfg.get('window_seconds'))}</b>\n"
+        f"Действие: <b>{action}</b>"
+        f"{duration_line}\n\n"
+        "Исключения:\n"
+        f"• Администрация: <b>{'да' if ex['admins'] else 'нет'}</b>\n"
+        f"• VIP: <b>{'да' if ex['vip'] else 'нет'}</b>\n"
+        f"• Недотрога: <b>{'да' if ex['nedotroga'] else 'нет'}</b>\n\n"
+        "Антифлуд срабатывает, когда пользователь достигает заданного количества сообщений внутри выбранного промежутка."
+    )
+    if callback.message is not None:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_keyboard(chat_id, cfg))
+    await callback.answer()
+
+
+async def _save(session: AsyncSession, chat_id: int, cfg: dict) -> None:
+    settings = await _ensure_group_settings(session, chat_id)
+    root = dict(settings.moderation_config or {})
+    root["antiflood"] = cfg
+    settings.moderation_config = root
+
+
+def create_antiflood_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
+    router = Router(name="antiflood_settings")
+
+    @router.callback_query(F.data.startswith("gctl:feature:") & F.data.endswith(":antiflood"))
+    async def open_antiflood(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        try:
+            chat_id = int((callback.data or "").split(":", 3)[2])
+        except (ValueError, IndexError):
+            return
+        await _render(callback, session_factory, chat_id)
+
+    @router.callback_query(F.data.startswith("af:toggle:"))
+    async def toggle(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _config(settings.moderation_config)
+                if not cfg["enabled"] and not _complete(cfg):
+                    await callback.answer("Сначала задайте количество сообщений, промежуток и действие. Для мута также задайте срок.", show_alert=True)
+                    return
+                cfg["enabled"] = not cfg["enabled"]
+                await _save(session, chat_id, cfg)
+                await write_audit(session, "group.antiflood_toggled", chat_id=chat_id, actor_user_id=callback.from_user.id, target_type="group", target_id=str(chat_id), payload={"enabled": cfg["enabled"]})
+        await _render(callback, session_factory, chat_id)
+
+    @router.callback_query(F.data.startswith("af:set_limit:"))
+    async def set_limit(callback: CallbackQuery, state: FSMContext) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        await state.set_state(AntiFloodState.waiting_limit)
+        await state.update_data(af_chat_id=chat_id)
+        if callback.message is not None:
+            await callback.message.answer("Отправьте количество сообщений, после которого должен срабатывать антифлуд. Нужно целое положительное число.")
+        await callback.answer()
+
+    @router.message(AntiFloodState.waiting_limit, F.chat.type == "private")
+    async def save_limit(message: Message, state: FSMContext) -> None:
+        try:
+            value = int((message.text or "").strip())
+            if value <= 0:
+                raise ValueError
+        except ValueError:
+            await message.answer("Отправьте целое положительное число.")
+            return
+        chat_id = int((await state.get_data())["af_chat_id"])
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, message.from_user.id):
+                    await state.clear(); return
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _config(settings.moderation_config)
+                cfg["message_limit"] = value
+                await _save(session, chat_id, cfg)
+        await state.clear()
+        await message.answer("✅ Количество сообщений сохранено.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Антифлуд", callback_data=f"gctl:feature:{chat_id}:antiflood")]]))
+
+    @router.callback_query(F.data.startswith("af:set_window:"))
+    async def set_window(callback: CallbackQuery, state: FSMContext) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        await state.set_state(AntiFloodState.waiting_window)
+        await state.update_data(af_chat_id=chat_id)
+        if callback.message is not None:
+            await callback.message.answer("Отправьте временной промежуток. Например: <code>10с</code>, <code>1м</code> или <code>1ч</code>.", parse_mode="HTML")
+        await callback.answer()
+
+    @router.message(AntiFloodState.waiting_window, F.chat.type == "private")
+    async def save_window(message: Message, state: FSMContext) -> None:
+        seconds = _window_seconds(message.text or "")
+        if seconds is None:
+            await message.answer("Не удалось определить промежуток. Примеры: 10с, 1м, 1ч.")
+            return
+        chat_id = int((await state.get_data())["af_chat_id"])
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, message.from_user.id):
+                    await state.clear(); return
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _config(settings.moderation_config)
+                cfg["window_seconds"] = seconds
+                await _save(session, chat_id, cfg)
+        await state.clear()
+        await message.answer("✅ Временной промежуток сохранён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Антифлуд", callback_data=f"gctl:feature:{chat_id}:antiflood")]]))
+
+    @router.callback_query(F.data.startswith("af:action:"))
+    async def choose_action(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        rows = [[InlineKeyboardButton(text=label, callback_data=f"af:set_action:{chat_id}:{key}")] for key, label in ACTION_LABELS.items()]
+        rows.append([InlineKeyboardButton(text="◀️ Антифлуд", callback_data=f"gctl:feature:{chat_id}:antiflood")])
+        if callback.message is not None:
+            await callback.message.edit_text("⚖️ <b>Действие антифлуда</b>\n\nВыберите наказание при срабатывании:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("af:set_action:"))
+    async def set_action(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        chat_id = int(parts[2]); action = parts[3]
+        if action not in ACTION_LABELS:
+            return
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True); return
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _config(settings.moderation_config)
+                cfg["action"] = action
+                if action != "mute":
+                    cfg["mute_duration"] = None
+                await _save(session, chat_id, cfg)
+        await _render(callback, session_factory, chat_id)
+
+    @router.callback_query(F.data.startswith("af:set_duration:"))
+    async def set_duration(callback: CallbackQuery, state: FSMContext) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        await state.set_state(AntiFloodState.waiting_mute_duration)
+        await state.update_data(af_chat_id=chat_id)
+        if callback.message is not None:
+            await callback.message.answer("Отправьте срок мута: например <code>30м</code>, <code>2ч</code> или <code>7д</code>.", parse_mode="HTML")
+        await callback.answer()
+
+    @router.message(AntiFloodState.waiting_mute_duration, F.chat.type == "private")
+    async def save_duration(message: Message, state: FSMContext) -> None:
+        token = (message.text or "").strip().casefold()
+        if _duration_seconds(token) is None:
+            await message.answer("Не удалось определить срок. Используйте формат 30м, 2ч или 7д.")
+            return
+        chat_id = int((await state.get_data())["af_chat_id"])
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, message.from_user.id):
+                    await state.clear(); return
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _config(settings.moderation_config)
+                cfg["mute_duration"] = token
+                await _save(session, chat_id, cfg)
+        await state.clear()
+        await message.answer("✅ Срок мута сохранён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Антифлуд", callback_data=f"gctl:feature:{chat_id}:antiflood")]]))
+
+    @router.callback_query(F.data.startswith("af:ex:"))
+    async def toggle_exclusion(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        chat_id = int(parts[2]); key = parts[3]
+        if key not in {"admins", "vip", "nedotroga"}:
+            return
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True); return
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _config(settings.moderation_config)
+                cfg["exclusions"][key] = not cfg["exclusions"][key]
+                await _save(session, chat_id, cfg)
+        await _render(callback, session_factory, chat_id)
+
+    return router
