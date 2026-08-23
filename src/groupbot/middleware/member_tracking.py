@@ -10,11 +10,12 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import Group, GroupMember, MemberStatus
+from groupbot.moderation_models import ObservedMessage
 from groupbot.services.users import upsert_user
 
 
 class GroupMemberTrackingMiddleware(BaseMiddleware):
-    """Keep users/group_members populated from real Telegram group activity."""
+    """Keep users/group_members and deletable message ids from real group activity."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -42,6 +43,21 @@ class GroupMemberTrackingMiddleware(BaseMiddleware):
             )
         )
 
+    async def _remember_message(self, session: AsyncSession, event: Message) -> None:
+        user = event.from_user
+        if user is None or user.is_bot:
+            return
+        await session.execute(
+            insert(ObservedMessage)
+            .values(
+                chat_id=event.chat.id,
+                message_id=event.message_id,
+                user_id=user.id,
+                sent_at=event.date,
+            )
+            .on_conflict_do_nothing(index_elements=["chat_id", "message_id"])
+        )
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
@@ -58,6 +74,7 @@ class GroupMemberTrackingMiddleware(BaseMiddleware):
             if known_group is not None:
                 async with session.begin_nested():
                     await self._touch_member(session, event.chat.id, event.from_user)
+                    await self._remember_message(session, event)
                     for new_user in event.new_chat_members or []:
                         await self._touch_member(session, event.chat.id, new_user)
 
