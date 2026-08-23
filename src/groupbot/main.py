@@ -25,6 +25,7 @@ from groupbot.routers.group_control_ux import create_group_control_ux_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
 from groupbot.routers.manual_moderation import create_manual_moderation_router
+from groupbot.routers.message_operations import create_message_operations_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.user_display import clickable_user_display
@@ -55,13 +56,13 @@ async def main() -> None:
     dp.include_router(create_admin_member_sync_router(session_factory))
     dp.include_router(create_admins_display_router(session_factory))
     dp.include_router(create_identity_privacy_router(session_factory, settings))
+    # Exact confirmed message operations are handled before generic moderation.
+    dp.include_router(create_message_operations_router(session_factory))
     dp.include_router(create_manual_moderation_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
     dp.include_router(create_admin_hierarchy_router(session_factory))
     dp.include_router(create_group_control_ux_router(session_factory))
     dp.include_router(create_group_control_role_actions_router(session_factory))
-    # The real punishment-reason editor handles gctl:reasons before the old
-    # informational fallback in group_control.
     dp.include_router(create_punishment_reasons_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
