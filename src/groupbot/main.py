@@ -12,6 +12,7 @@ from groupbot.routers import creator_subscription_duration as creator_subscripti
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
+from groupbot.routers.admins_display import create_admins_display_router
 from groupbot.routers.creator import create_creator_router
 from groupbot.routers.creator_group_profile_links import create_creator_group_profile_links_router
 from groupbot.routers.creator_identity_privacy import create_creator_identity_privacy_router
@@ -57,6 +58,8 @@ async def main() -> None:
     # Telegram administrators are synchronized immediately when an owner opens
     # the rank/VIP/Nedotroga picker, so the list is useful even on a fresh DB.
     dp.include_router(create_admin_member_sync_router(session_factory))
+    # All Telegram-admin list identities follow the same clickable user format.
+    dp.include_router(create_admins_display_router(session_factory))
     # Privacy router keeps numeric Telegram ids out of the visible UI and handles
     # human-readable member selections after the picker has been rendered.
     dp.include_router(create_identity_privacy_router(session_factory, settings))
