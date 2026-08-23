@@ -24,6 +24,7 @@ from groupbot.routers.group_control_role_actions import create_group_control_rol
 from groupbot.routers.group_control_ux import create_group_control_ux_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
+from groupbot.routers.manual_moderation import create_manual_moderation_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
@@ -63,6 +64,8 @@ async def main() -> None:
     # Privacy router keeps numeric Telegram ids out of the visible UI and handles
     # human-readable member selections after the picker has been rendered.
     dp.include_router(create_identity_privacy_router(session_factory, settings))
+    # Real moderation actions and punishment lists run directly in groups.
+    dp.include_router(create_manual_moderation_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
     # Fixed standard hierarchy and assignment limits go before the generic
     # role UX so standard rank screens/assignments are handled deterministically.
