@@ -22,11 +22,7 @@ async def cleanup_user_messages(
     target_user_id: int,
     actor_user_id: int,
 ) -> tuple[int, int]:
-    """Delete only messages Mimorus actually observed and Telegram still permits deleting.
-
-    Returns (deleted_count, attempted_count). Failed Telegram deletions are not
-    counted and remain available for a later attempt.
-    """
+    """Delete only messages Mimorus actually observed and Telegram still permits deleting."""
     async with session_factory() as session:
         rows = list((await session.execute(
             select(ObservedMessage.message_id)
@@ -44,8 +40,6 @@ async def cleanup_user_messages(
             await bot.delete_message(chat_id, message_id)
             deleted_ids.append(message_id)
         except Exception:
-            # Telegram may reject old/already removed/service messages. The TЗ
-            # requires us to count only technically available deletions.
             continue
 
     if deleted_ids:
@@ -87,13 +81,14 @@ def create_message_operations_router(
 ) -> Router:
     router = Router(name="message_operations")
 
-    @router.message(F.chat.type.in_({"group", "supergroup"}), F.text)
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(r"(?i)^\s*(?:очистить\s+пользователя|закрепи)\s*$"),
+    )
     async def message_operation(message: Message, bot: Bot) -> None:
         if message.from_user is None:
             return
         command = " ".join((message.text or "").strip().split()).casefold()
-        if command not in {"очистить пользователя", "закрепи"}:
-            return
 
         async with session_factory() as session:
             if not await _group_ready(session, message.chat.id):
