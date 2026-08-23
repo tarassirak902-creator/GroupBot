@@ -26,13 +26,12 @@ from groupbot.routers.groups import create_group_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
 from groupbot.routers.manual_moderation import create_manual_moderation_router
 from groupbot.routers.private import create_private_router
+from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 
 
 async def clear_global_group_commands(bot: Bot) -> None:
-    # Commands are registered per chat only after an owner activates a tariff.
-    # This also clears any global group command menu left from an older build.
     await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
 
 
@@ -43,8 +42,6 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    # Single public identity format: clickable name | clickable @username.
-    # Numeric Telegram ids remain internal keys only.
     creator_subscription_duration_module._user_link = clickable_user_display
     creator_user_profile_links_module._user_link = clickable_user_display
 
@@ -52,46 +49,25 @@ async def main() -> None:
     session_factory = create_session_factory(settings)
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
-    # Every ordinary group message updates users/group_members before routers run.
     dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
 
     dp.include_router(create_group_router(session_factory))
-    # Telegram administrators are synchronized immediately when an owner opens
-    # the rank/VIP/Nedotroga picker, so the list is useful even on a fresh DB.
     dp.include_router(create_admin_member_sync_router(session_factory))
-    # All Telegram-admin list identities follow the same clickable user format.
     dp.include_router(create_admins_display_router(session_factory))
-    # Privacy router keeps numeric Telegram ids out of the visible UI and handles
-    # human-readable member selections after the picker has been rendered.
     dp.include_router(create_identity_privacy_router(session_factory, settings))
-    # Real moderation actions and punishment lists run directly in groups.
     dp.include_router(create_manual_moderation_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
-    # Fixed standard hierarchy and assignment limits go before the generic
-    # role UX so standard rank screens/assignments are handled deterministically.
     dp.include_router(create_admin_hierarchy_router(session_factory))
-    # UX overrides: mode descriptions stay visible and custom-role permissions
-    # are edited as a draft, then applied only by the explicit Save button.
     dp.include_router(create_group_control_ux_router(session_factory))
-    # Remaining role actions (for example role enable/disable) keep working.
     dp.include_router(create_group_control_role_actions_router(session_factory))
-    # Real owner-side moderation/administration screens intercept the generic
-    # group section callbacks before private.py's fallback placeholder.
+    # The real punishment-reason editor handles gctl:reasons before the old
+    # informational fallback in group_control.
+    dp.include_router(create_punishment_reasons_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
-    # Duration presets intercept creator subscription assignment before the
-    # generic creator handler, so paid tariffs offer fast 7/15/30-day choices.
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
-    # Creator subscription fallback screens also use the same private identity
-    # policy (tariff choice and cancel confirmation/results).
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
-    # Human-friendly creator user screens are also registered before the
-    # generic creator router. They keep telegram_user_id internally while
-    # rendering clickable tg://user links in the interface.
     dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
-    # Group cards use live Telegram metadata so title/username links stay current.
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
-    # Creator router goes before the generic private router so the creator-only
-    # menu button is handled by the real global panel rather than a placeholder.
     dp.include_router(create_creator_router(session_factory, settings))
     dp.include_router(create_private_router(session_factory, settings))
 
