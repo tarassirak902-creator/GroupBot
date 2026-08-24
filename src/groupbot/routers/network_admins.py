@@ -46,6 +46,18 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         if owner_id is None:
             await callback.answer("Не удалось определить владельца группы.", show_alert=True)
             return
+        network_id = (
+            await session.execute(
+                select(Network.id)
+                .join(NetworkGroup, NetworkGroup.network_id == Network.id)
+                .where(
+                    Network.owner_user_id == owner_id,
+                    NetworkGroup.chat_id == chat_id,
+                )
+                .order_by(Network.id.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
         groups_count = await _network_groups_count(session, owner_id)
         rows = list((await session.execute(
             select(NetworkAdmin, User)
@@ -75,6 +87,8 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         text_lines.extend(["", "Назначений пока нет."])
 
     buttons.append([InlineKeyboardButton(text="➕ Добавить сетевого администратора", callback_data=f"network:add:{chat_id}")])
+    if network_id is not None:
+        buttons.append([InlineKeyboardButton(text="◀️ К сетке", callback_data=f"networks:open:{network_id}")])
     buttons.append([InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")])
     if callback.message:
         await callback.message.edit_text(
