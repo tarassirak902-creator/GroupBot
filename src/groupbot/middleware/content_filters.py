@@ -25,9 +25,7 @@ def _normalize(text: str) -> str:
 def _word_hit(text: str, items: list[str]) -> str | None:
     for item in items:
         token = item.strip().casefold()
-        if not token:
-            continue
-        if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text, flags=re.UNICODE):
+        if token and re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text, flags=re.UNICODE):
             return item
     return None
 
@@ -96,7 +94,7 @@ class ContentFiltersMiddleware(BaseMiddleware):
                     continue
                 candidate_action = str(cfg.get("action") or "warning")
                 candidate_duration = str(cfg.get("mute_duration") or "") or None
-                if candidate_action not in {"warning", "mute"}:
+                if candidate_action not in {"warning", "mute", "ban"}:
                     continue
                 if candidate_action == "mute" and not candidate_duration:
                     continue
