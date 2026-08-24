@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import User
 from groupbot.moderation_models import ModerationAction
 from groupbot.routers.manual_moderation import _group_ready, _unmuted_permissions
-from groupbot.routers.user_display import clickable_user_display
+from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import has_permission
 from groupbot.services.users import upsert_user
@@ -23,12 +23,7 @@ COMMAND_RE = re.compile(
 TG_ID_RE = re.compile(r"^tg://user\?id=(\d+)$", re.IGNORECASE)
 
 
-async def _resolve_target(
-    session: AsyncSession,
-    *,
-    message: Message,
-    token: str | None,
-) -> User | None:
+async def _resolve_target(session: AsyncSession, *, message: Message, token: str | None) -> User | None:
     if token:
         raw = token.strip()
         tg_match = TG_ID_RE.match(raw)
@@ -36,41 +31,19 @@ async def _resolve_target(
             raw = tg_match.group(1)
         if raw.startswith("@"):
             raw = raw[1:]
-
         if raw.isdigit():
-            return (
-                await session.execute(
-                    select(User).where(User.telegram_user_id == int(raw))
-                )
-            ).scalar_one_or_none()
-
+            return (await session.execute(select(User).where(User.telegram_user_id == int(raw)))).scalar_one_or_none()
         if raw:
-            return (
-                await session.execute(
-                    select(User).where(func.lower(User.username) == raw.casefold())
-                )
-            ).scalar_one_or_none()
-
+            return (await session.execute(select(User).where(func.lower(User.username) == raw.casefold()))).scalar_one_or_none()
     reply = message.reply_to_message
     if reply is None or reply.from_user is None or reply.from_user.is_bot:
         return None
     await upsert_user(session, reply.from_user)
     await session.flush()
-    return (
-        await session.execute(
-            select(User).where(User.telegram_user_id == reply.from_user.id)
-        )
-    ).scalar_one_or_none()
+    return (await session.execute(select(User).where(User.telegram_user_id == reply.from_user.id))).scalar_one_or_none()
 
 
-async def _deactivate_actions(
-    session: AsyncSession,
-    *,
-    chat_id: int,
-    user_id: int,
-    action: str,
-) -> int:
-    now = datetime.now(timezone.utc)
+async def _deactivate_actions(session: AsyncSession, *, chat_id: int, user_id: int, action: str) -> int:
     result = await session.execute(
         update(ModerationAction)
         .where(
@@ -79,17 +52,12 @@ async def _deactivate_actions(
             ModerationAction.action == action,
             ModerationAction.is_active.is_(True),
         )
-        .values(is_active=False, revoked_at=now)
+        .values(is_active=False, revoked_at=datetime.now(timezone.utc))
     )
     return int(result.rowcount or 0)
 
 
-async def _deactivate_one_warning(
-    session: AsyncSession,
-    *,
-    chat_id: int,
-    user_id: int,
-) -> int:
+async def _deactivate_one_warning(session: AsyncSession, *, chat_id: int, user_id: int) -> int:
     warning_id = (
         await session.execute(
             select(ModerationAction.id)
@@ -113,31 +81,27 @@ async def _deactivate_one_warning(
     return int(result.rowcount or 0)
 
 
-async def _active_warning_count(
-    session: AsyncSession,
-    *,
-    chat_id: int,
-    user_id: int,
-) -> int:
-    return int(
-        (
-            await session.execute(
-                select(func.count())
-                .select_from(ModerationAction)
-                .where(
-                    ModerationAction.chat_id == chat_id,
-                    ModerationAction.target_user_id == user_id,
-                    ModerationAction.action == "warning",
-                    ModerationAction.is_active.is_(True),
-                )
-            )
-        ).scalar_one()
+async def _active_warning_count(session: AsyncSession, *, chat_id: int, user_id: int) -> int:
+    return int((await session.execute(
+        select(func.count()).select_from(ModerationAction).where(
+            ModerationAction.chat_id == chat_id,
+            ModerationAction.target_user_id == user_id,
+            ModerationAction.action == "warning",
+            ModerationAction.is_active.is_(True),
+        )
+    )).scalar_one())
+
+
+def _actor_identity(user) -> str:
+    return clickable_identity(
+        telegram_user_id=user.id,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        username=user.username,
     )
 
 
-def create_moderation_release_router(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> Router:
+def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="moderation_release")
 
     @router.message(F.chat.type.in_({"group", "supergroup"}), F.text)
@@ -147,15 +111,9 @@ def create_moderation_release_router(
         match = COMMAND_RE.match(" ".join((message.text or "").strip().split()))
         if not match:
             return
-
         command = match.group(1).casefold()
         token = match.group(2)
-        if command == "разбан":
-            permission = "unban"
-        elif command == "размут":
-            permission = "unmute"
-        else:
-            permission = "warning"
+        permission = "unban" if command == "разбан" else "unmute" if command == "размут" else "warning"
 
         async with session_factory() as session:
             if not await _group_ready(session, message.chat.id):
@@ -166,15 +124,14 @@ def create_moderation_release_router(
             async with session.begin_nested():
                 target = await _resolve_target(session, message=message, token=token)
             if target is None:
-                await message.reply(
-                    "Не удалось найти пользователя. Используйте reply, @username, Telegram ID или tg://user?id=..."
-                )
+                await message.reply("Не удалось найти пользователя. Используйте reply, @username, Telegram ID или tg://user?id=...")
                 return
             if target.telegram_user_id == message.from_user.id:
                 await message.reply("Нельзя применить эту команду к себе.")
                 return
 
         identity = clickable_user_display(target)
+        actor = _actor_identity(message.from_user)
         target_id = target.telegram_user_id
 
         try:
@@ -184,104 +141,46 @@ def create_moderation_release_router(
                     async with session.begin():
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="ban")
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="warning")
-                        await write_audit(
-                            session,
-                            "moderation.unban",
-                            chat_id=message.chat.id,
-                            actor_user_id=message.from_user.id,
-                            target_type="user",
-                            target_id=str(target_id),
-                            payload={"warnings_reset": True},
-                        )
+                        await write_audit(session, "moderation.unban", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"warnings_reset": True})
                 await message.answer(
-                    f"✅ {identity} разбанен.\n⚠️ Предупреждения: <b>0/5</b>.",
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
+                    f"✅ <b>Разбан</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>0/5</b>\nНаказание: снято ✅\nАдминистратор: {actor}",
+                    parse_mode="HTML", disable_web_page_preview=True,
                 )
                 return
 
             if command == "размут":
-                await bot.restrict_chat_member(
-                    message.chat.id,
-                    target_id,
-                    permissions=_unmuted_permissions(),
-                )
+                await bot.restrict_chat_member(message.chat.id, target_id, permissions=_unmuted_permissions())
                 async with session_factory() as session:
                     async with session.begin():
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="mute")
-                        await write_audit(
-                            session,
-                            "moderation.unmute",
-                            chat_id=message.chat.id,
-                            actor_user_id=message.from_user.id,
-                            target_type="user",
-                            target_id=str(target_id),
-                            payload={},
-                        )
+                        remaining = await _active_warning_count(session, chat_id=message.chat.id, user_id=target_id)
+                        await write_audit(session, "moderation.unmute", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={})
                 await message.answer(
-                    f"🔊 Мут снят с {identity}.",
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
+                    f"🔊 <b>Мут снят</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>{remaining}/5</b>\nНаказание: мут снят ✅\nАдминистратор: {actor}",
+                    parse_mode="HTML", disable_web_page_preview=True,
                 )
                 return
 
             if command == "снять пред":
                 async with session_factory() as session:
                     async with session.begin():
-                        removed = await _deactivate_one_warning(
-                            session,
-                            chat_id=message.chat.id,
-                            user_id=target_id,
-                        )
-                        remaining = await _active_warning_count(
-                            session,
-                            chat_id=message.chat.id,
-                            user_id=target_id,
-                        )
-                        await write_audit(
-                            session,
-                            "moderation.warning_removed",
-                            chat_id=message.chat.id,
-                            actor_user_id=message.from_user.id,
-                            target_type="user",
-                            target_id=str(target_id),
-                            payload={"removed": removed, "remaining": remaining},
-                        )
-                if removed == 0:
-                    await message.answer(
-                        f"⚠️ У {identity} нет активных предупреждений.\nПредупреждения: <b>0/5</b>.",
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                    )
-                else:
-                    await message.answer(
-                        f"✅ С {identity} снято одно предупреждение.\n⚠️ Предупреждения: <b>{remaining}/5</b>.",
-                        parse_mode="HTML",
-                        disable_web_page_preview=True,
-                    )
+                        removed = await _deactivate_one_warning(session, chat_id=message.chat.id, user_id=target_id)
+                        remaining = await _active_warning_count(session, chat_id=message.chat.id, user_id=target_id)
+                        await write_audit(session, "moderation.warning_removed", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"removed": removed, "remaining": remaining})
+                title = "⚠️ <b>Предупреждение не найдено</b>" if removed == 0 else "✅ <b>Предупреждение снято</b>"
+                await message.answer(
+                    f"{title}\n\n👤 {identity}\n⚠️ Предупреждения: <b>{remaining}/5</b>\nНаказание: {'без изменений' if removed == 0 else 'снято 1 предупреждение'} 📌\nАдминистратор: {actor}",
+                    parse_mode="HTML", disable_web_page_preview=True,
+                )
                 return
 
             async with session_factory() as session:
                 async with session.begin():
-                    removed = await _deactivate_actions(
-                        session,
-                        chat_id=message.chat.id,
-                        user_id=target_id,
-                        action="warning",
-                    )
-                    await write_audit(
-                        session,
-                        "moderation.warnings_clear",
-                        chat_id=message.chat.id,
-                        actor_user_id=message.from_user.id,
-                        target_type="user",
-                        target_id=str(target_id),
-                        payload={"removed": removed},
-                    )
+                    removed = await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="warning")
+                    await write_audit(session, "moderation.warnings_clear", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"removed": removed})
             await message.answer(
-                f"✅ Все предупреждения {identity} сняты.\n⚠️ Предупреждения: <b>0/5</b>.",
-                parse_mode="HTML",
-                disable_web_page_preview=True,
+                f"✅ <b>Предупреждения сняты</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>0/5</b>\nНаказание: снято предупреждений — <b>{removed}</b> 📌\nАдминистратор: {actor}",
+                parse_mode="HTML", disable_web_page_preview=True,
             )
         except Exception as exc:
             await message.reply(f"Не удалось выполнить действие через Telegram: {str(exc)[:300]}")
