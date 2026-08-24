@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.routers.antiflood import ACTION_LABELS, DURATION_RE, _duration_label, _duration_seconds
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
 
+CONTENT_ACTION_LABELS = {
+    **ACTION_LABELS,
+    "ban": "⛔ Бан",
+}
+
 
 class ContentFilterState(StatesGroup):
     waiting_item = State()
@@ -66,7 +71,7 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         settings = await _ensure_group_settings(session, chat_id)
         cfg = _cfg(settings.moderation_config, kind)
     duration = f"\nСрок мута: <b>{_duration_label(cfg.get('mute_duration'))}</b>" if cfg["action"] == "mute" else ""
-    action = ACTION_LABELS.get(cfg["action"], "не задано")
+    action = CONTENT_ACTION_LABELS.get(cfg["action"], "не задано")
     lines = [
         f"{_title(kind)}",
         "",
@@ -75,7 +80,9 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         f"Записей: <b>{len(cfg['items'])}</b>",
         "",
         "Администрация, VIP и Недотрога защищены автоматически.",
-        "При действии «Предупреждение» используется общая настраиваемая шкала группы.",
+        "⚠️ Пред — используется общая настраиваемая шкала группы.",
+        "🔇 Мут — применяется сразу на выбранный срок.",
+        "⛔ Бан — применяется сразу за первое совпадение.",
     ]
     if cfg["items"]:
         lines += ["", "Список:"] + [f"• <code>{item}</code>" for item in cfg["items"][:20]]
@@ -91,8 +98,7 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
     async def open_feature(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         parts = (callback.data or "").split(":", 3)
-        chat_id = int(parts[2]); kind = parts[3]
-        await _render(callback, session_factory, kind, chat_id)
+        await _render(callback, session_factory, parts[3], int(parts[2]))
 
     @router.callback_query(F.data.startswith("cf:toggle:"))
     async def toggle(callback: CallbackQuery) -> None:
@@ -101,12 +107,14 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id): return
-                settings = await _ensure_group_settings(session, chat_id); cfg = _cfg(settings.moderation_config, kind)
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _cfg(settings.moderation_config, kind)
                 if not cfg["items"] and not cfg["enabled"]:
                     await callback.answer("Сначала добавьте хотя бы одну запись.", show_alert=True); return
                 if cfg["action"] == "mute" and _duration_seconds(str(cfg.get("mute_duration") or "")) is None:
                     await callback.answer("Для мута сначала задайте срок.", show_alert=True); return
-                cfg["enabled"] = not cfg["enabled"]; await _save(session, chat_id, kind, cfg)
+                cfg["enabled"] = not cfg["enabled"]
+                await _save(session, chat_id, kind, cfg)
         await _render(callback, session_factory, kind, chat_id)
 
     @router.callback_query(F.data.startswith("cf:add:"))
@@ -131,8 +139,7 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
             async with session.begin():
                 if not await _owner_access(session, chat_id, message.from_user.id): await state.clear(); return
                 settings = await _ensure_group_settings(session, chat_id); cfg = _cfg(settings.moderation_config, kind)
-                existing = {x.casefold() for x in cfg["items"]}
-                if item.casefold() not in existing: cfg["items"].append(item)
+                if item.casefold() not in {x.casefold() for x in cfg["items"]}: cfg["items"].append(item)
                 await _save(session, chat_id, kind, cfg)
         try: await message.delete()
         except Exception: pass
@@ -155,19 +162,28 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
     @router.callback_query(F.data.startswith("cf:action:"))
     async def action(callback: CallbackQuery) -> None:
         _, _, kind, chat_raw = (callback.data or "").split(":", 3); chat_id = int(chat_raw)
-        rows = [[InlineKeyboardButton(text=label, callback_data=f"cf:set_action:{kind}:{chat_id}:{key}")] for key, label in ACTION_LABELS.items()]
+        rows = [[InlineKeyboardButton(text=label, callback_data=f"cf:set_action:{kind}:{chat_id}:{key}")] for key, label in CONTENT_ACTION_LABELS.items()]
         rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"gctl:feature:{chat_id}:{kind}")])
-        if callback.message: await callback.message.edit_text("⚖️ <b>Действие</b>\n\nВыберите наказание:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        if callback.message:
+            await callback.message.edit_text(
+                "⚖️ <b>Действие</b>\n\n"
+                "⚠️ Пред — по общей шкале предупреждений.\n"
+                "🔇 Мут — сразу на выбранный срок.\n"
+                "⛔ Бан — сразу за первое совпадение.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("cf:set_action:"))
     async def set_action(callback: CallbackQuery) -> None:
         _, _, kind, chat_raw, action_name = (callback.data or "").split(":", 4); chat_id = int(chat_raw)
-        if action_name not in ACTION_LABELS: return
+        if action_name not in CONTENT_ACTION_LABELS: return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id): return
-                settings = await _ensure_group_settings(session, chat_id); cfg = _cfg(settings.moderation_config, kind); cfg["action"] = action_name
+                settings = await _ensure_group_settings(session, chat_id); cfg = _cfg(settings.moderation_config, kind)
+                cfg["action"] = action_name
                 if action_name != "mute": cfg["mute_duration"] = None
                 await _save(session, chat_id, kind, cfg)
         await _render(callback, session_factory, kind, chat_id)
@@ -188,6 +204,7 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
         if not DURATION_RE.match(token) or _duration_seconds(token) is None: return
         async with session_factory() as session:
             async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id): return
                 settings = await _ensure_group_settings(session, chat_id); cfg = _cfg(settings.moderation_config, kind); cfg["mute_duration"] = token; await _save(session, chat_id, kind, cfg)
         await _render(callback, session_factory, kind, chat_id)
 
@@ -206,6 +223,7 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
         data = await state.get_data(); kind = str(data["cf_kind"]); chat_id = int(data["cf_chat_id"])
         async with session_factory() as session:
             async with session.begin():
+                if not await _owner_access(session, chat_id, message.from_user.id): await state.clear(); return
                 settings = await _ensure_group_settings(session, chat_id); cfg = _cfg(settings.moderation_config, kind); cfg["mute_duration"] = token; await _save(session, chat_id, kind, cfg)
         try: await message.delete()
         except Exception: pass
