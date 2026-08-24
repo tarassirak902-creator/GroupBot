@@ -7,6 +7,7 @@ from aiogram.types import BotCommandScopeAllGroupChats
 from groupbot.config import get_settings
 from groupbot.db import create_session_factory
 from groupbot.middleware.antiflood import AntiFloodMiddleware
+from groupbot.middleware.antilinks import AntiLinksMiddleware
 from groupbot.middleware.antispam import AntiSpamMiddleware
 from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
@@ -16,6 +17,7 @@ from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admins_display import create_admins_display_router
 from groupbot.routers.antiflood import create_antiflood_router
+from groupbot.routers.antilinks import create_antilinks_router
 from groupbot.routers.antispam import create_antispam_router
 from groupbot.routers.ban_cleanup import create_ban_cleanup_router
 from groupbot.routers.creator import create_creator_router
@@ -61,6 +63,7 @@ async def main() -> None:
     dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
     dp.message.outer_middleware(AntiFloodMiddleware(session_factory))
     dp.message.outer_middleware(AntiSpamMiddleware(session_factory))
+    dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
 
     dp.include_router(create_group_router(session_factory))
     dp.include_router(create_admin_member_sync_router(session_factory))
@@ -79,6 +82,7 @@ async def main() -> None:
     dp.include_router(create_punishment_reasons_router(session_factory))
     dp.include_router(create_antiflood_router(session_factory))
     dp.include_router(create_antispam_router(session_factory))
+    dp.include_router(create_antilinks_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
