@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from groupbot.models import AdminAssignment, AdminPermission, GroupOwner
+from groupbot.models import AdminAssignment, AdminPermission, GroupOwner, NetworkAdmin
 
 
 OWNER_PERMISSION = "*"
@@ -17,6 +17,29 @@ async def is_group_owner(session: AsyncSession, chat_id: int, user_id: int) -> b
     )).scalar_one_or_none() is not None
 
 
+async def _network_permission(session: AsyncSession, chat_id: int, user_id: int, permission: str) -> bool:
+    owner_id = (await session.execute(
+        select(GroupOwner.user_id).where(
+            GroupOwner.chat_id == chat_id,
+            GroupOwner.is_current.is_(True),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if owner_id is None:
+        return False
+
+    row = (await session.execute(
+        select(NetworkAdmin.permissions_json).where(
+            NetworkAdmin.owner_user_id == owner_id,
+            NetworkAdmin.user_id == user_id,
+            NetworkAdmin.is_active.is_(True),
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        return False
+    permissions = {str(value) for value in (row or [])}
+    return permission in permissions or OWNER_PERMISSION in permissions
+
+
 async def has_permission(session: AsyncSession, chat_id: int, user_id: int, permission: str) -> bool:
     if await is_group_owner(session, chat_id, user_id):
         return True
@@ -27,13 +50,14 @@ async def has_permission(session: AsyncSession, chat_id: int, user_id: int, perm
             AdminAssignment.user_id == user_id,
         )
     )).scalar_one_or_none()
-    if assignment is None or assignment.role_id is None:
-        return False
+    if assignment is not None and assignment.role_id is not None:
+        allowed = (await session.execute(
+            select(AdminPermission.allowed).where(
+                AdminPermission.role_id == assignment.role_id,
+                AdminPermission.permission.in_([permission, OWNER_PERMISSION]),
+            )
+        )).scalars().all()
+        if any(allowed):
+            return True
 
-    allowed = (await session.execute(
-        select(AdminPermission.allowed).where(
-            AdminPermission.role_id == assignment.role_id,
-            AdminPermission.permission.in_([permission, OWNER_PERMISSION]),
-        )
-    )).scalars().all()
-    return any(allowed)
+    return await _network_permission(session, chat_id, user_id, permission)
