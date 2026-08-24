@@ -9,6 +9,7 @@ from groupbot.db import create_session_factory
 from groupbot.middleware.antiflood import AntiFloodMiddleware
 from groupbot.middleware.antilinks import AntiLinksMiddleware
 from groupbot.middleware.antispam import AntiSpamMiddleware
+from groupbot.middleware.content_filters import ContentFiltersMiddleware
 from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
@@ -20,6 +21,7 @@ from groupbot.routers.antiflood import create_antiflood_router
 from groupbot.routers.antilinks import create_antilinks_router
 from groupbot.routers.antispam import create_antispam_router
 from groupbot.routers.ban_cleanup import create_ban_cleanup_router
+from groupbot.routers.content_filters import create_content_filters_router
 from groupbot.routers.creator import create_creator_router
 from groupbot.routers.creator_group_profile_links import create_creator_group_profile_links_router
 from groupbot.routers.creator_identity_privacy import create_creator_identity_privacy_router
@@ -61,6 +63,7 @@ async def main() -> None:
     # Persist the current group message first; protection middleware then sees it
     # in observed_messages before ordinary routers process the update.
     dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
+    dp.message.outer_middleware(ContentFiltersMiddleware(session_factory))
     dp.message.outer_middleware(AntiFloodMiddleware(session_factory))
     dp.message.outer_middleware(AntiSpamMiddleware(session_factory))
     dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
@@ -83,6 +86,7 @@ async def main() -> None:
     dp.include_router(create_antiflood_router(session_factory))
     dp.include_router(create_antispam_router(session_factory))
     dp.include_router(create_antilinks_router(session_factory))
+    dp.include_router(create_content_filters_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
