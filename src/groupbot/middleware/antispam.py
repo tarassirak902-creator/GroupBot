@@ -4,18 +4,16 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from html import escape
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.types import Message, TelegramObject
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, GroupSettings
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.manual_moderation import _execute_action, _group_ready
-from groupbot.routers.user_display import clickable_identity
 from groupbot.services.permissions import is_group_owner
 
 logger = logging.getLogger(__name__)
@@ -162,7 +160,7 @@ class AntiSpamMiddleware(BaseMiddleware):
         if action is not None:
             try:
                 bot_user = await bot.me()
-                await _execute_action(
+                action_text = await _execute_action(
                     bot=bot,
                     session_factory=self.session_factory,
                     chat_id=event.chat.id,
@@ -190,55 +188,16 @@ class AntiSpamMiddleware(BaseMiddleware):
                                 .where(ModerationAction.id == latest_id)
                                 .values(source="antispam")
                             )
-                        warning_count = int((await session.execute(
-                            select(func.count()).select_from(ModerationAction).where(
-                                ModerationAction.chat_id == event.chat.id,
-                                ModerationAction.target_user_id == event.from_user.id,
-                                ModerationAction.action == "warning",
-                                ModerationAction.is_active.is_(True),
-                            )
-                        )).scalar_one())
 
-                target_text = clickable_identity(
-                    telegram_user_id=event.from_user.id,
-                    first_name=event.from_user.first_name,
-                    last_name=event.from_user.last_name,
-                    username=event.from_user.username,
-                )
-                if action == "warning":
-                    shown_count = min(warning_count, 5)
-                    if shown_count >= 5:
-                        header = "⛔ Антиспам"
-                        marker = " ⛔"
-                        punishment = "бан"
-                    elif shown_count == 4:
-                        header = "⚠️ Антиспам"
-                        marker = " 🔇"
-                        punishment = "мут на 1 час"
-                    elif shown_count == 3:
-                        header = "⚠️ Антиспам"
-                        marker = " 🔇"
-                        punishment = "мут на 15 минут"
-                    else:
-                        header = "⚠️ Антиспам"
-                        marker = ""
-                        punishment = "предупреждение"
-                    text = (
-                        f"<b>{header}</b>\n\n"
-                        f"👤 {target_text}\n"
-                        "🧹 Повторное сообщение удалено.\n\n"
-                        f"⚠️ Предупреждения: <b>{shown_count}/5</b>{marker}\n"
-                        f"Наказание: <b>{punishment}</b> 📌\n"
-                        "Причина: <b>Антиспам</b>"
+                deleted_line = "🧹 Повторное сообщение удалено."
+                if action == "warning" and "\n\nБудьте аккуратнее!" in action_text:
+                    text = action_text.replace(
+                        "\n\nБудьте аккуратнее!",
+                        f"\n\n{deleted_line}\n\nБудьте аккуратнее!",
+                        1,
                     )
                 else:
-                    text = (
-                        "<b>🔇 Антиспам</b>\n\n"
-                        f"👤 {target_text}\n"
-                        "🧹 Повторное сообщение удалено.\n\n"
-                        f"Наказание: <b>мут {escape(mute_duration or '')}</b> 📌\n"
-                        "Причина: <b>Антиспам</b>"
-                    )
+                    text = f"{action_text}\n\n{deleted_line}"
                 await bot.send_message(
                     event.chat.id,
                     text,
