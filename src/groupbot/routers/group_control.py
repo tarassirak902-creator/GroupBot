@@ -63,7 +63,10 @@ def _moderation_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⚖️ Причины наказаний", callback_data=f"gctl:reasons:{chat_id}")],
             [InlineKeyboardButton(text="🎚 Режим админ-команд", callback_data=f"gctl:mode:{chat_id}")],
             [InlineKeyboardButton(text="📈 Шкала предупреждений", callback_data=f"gctl:warnings:{chat_id}")],
-            [InlineKeyboardButton(text="🚫 Запрещённые слова/фразы", callback_data=f"gctl:content_filters:{chat_id}")],
+            [
+                InlineKeyboardButton(text="🚫 Запрещённые слова", callback_data=f"gctl:feature:{chat_id}:words"),
+                InlineKeyboardButton(text="📝 Запрещённые фразы", callback_data=f"gctl:feature:{chat_id}:phrases"),
+            ],
             [
                 InlineKeyboardButton(text="💬 Антифлуд", callback_data=f"gctl:feature:{chat_id}:antiflood"),
                 InlineKeyboardButton(text="🔁 Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam"),
@@ -627,7 +630,7 @@ def create_group_control_router(
                     await callback.answer("Недостаточно прав.", show_alert=True)
                     return
                 role = (
-                    await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))
+                    await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update())
                 ).scalar_one_or_none()
                 if role is None:
                     await callback.answer("Ранг не найден.", show_alert=True)

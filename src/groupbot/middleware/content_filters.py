@@ -39,6 +39,34 @@ def _phrase_hit(text: str, items: list[str]) -> str | None:
     return None
 
 
+def _filter_lists(root: dict, key: str) -> list[dict]:
+    data = dict(root.get(key) or {})
+    raw_lists = data.get("lists")
+    if isinstance(raw_lists, list):
+        result: list[dict] = []
+        for index, raw in enumerate(raw_lists):
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            row["name"] = str(row.get("name") or f"Список {index + 1}")
+            row["items"] = [str(x) for x in (row.get("items") or []) if str(x).strip()]
+            result.append(row)
+        return result
+
+    # Old installations stored one category-wide list. Treat it as a single
+    # named list until the owner edits it in the new UI.
+    items = [str(x) for x in (data.get("items") or []) if str(x).strip()]
+    if items or data.get("enabled") or data.get("action") or data.get("mute_duration"):
+        return [{
+            "name": "Основной список",
+            "enabled": bool(data.get("enabled", False)),
+            "items": items,
+            "action": str(data.get("action") or "warning"),
+            "mute_duration": data.get("mute_duration"),
+        }]
+    return []
+
+
 class ContentFiltersMiddleware(BaseMiddleware):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -73,23 +101,28 @@ class ContentFiltersMiddleware(BaseMiddleware):
                 ("blocked_phrases", "phrases", "Запрещённая фраза", "blocked_phrases", _phrase_hit),
             )
             for key, schedule_key, reason_label, source_label, matcher in checks:
-                cfg = dict(root.get(key) or {})
-                if not protection_enabled(root, schedule_key, bool(cfg.get("enabled"))):
+                lists = _filter_lists(root, key)
+                if not protection_enabled(root, schedule_key, any(bool(row.get("enabled")) for row in lists)):
                     continue
-                items = [str(x) for x in (cfg.get("items") or []) if str(x).strip()]
-                if matcher(normalized, items) is None:
-                    continue
-                candidate_action = str(cfg.get("action") or "warning")
-                candidate_duration = str(cfg.get("mute_duration") or "") or None
-                if candidate_action not in {"warning", "mute", "ban"}:
-                    continue
-                if candidate_action == "mute" and not candidate_duration:
-                    continue
-                action = candidate_action
-                mute_duration = candidate_duration
-                reason = reason_label
-                source = source_label
-                break
+                for row in lists:
+                    if not row.get("enabled"):
+                        continue
+                    items = [str(x) for x in (row.get("items") or []) if str(x).strip()]
+                    if matcher(normalized, items) is None:
+                        continue
+                    candidate_action = str(row.get("action") or "warning")
+                    candidate_duration = str(row.get("mute_duration") or "") or None
+                    if candidate_action not in {"warning", "mute", "ban"}:
+                        continue
+                    if candidate_action == "mute" and not candidate_duration:
+                        continue
+                    action = candidate_action
+                    mute_duration = candidate_duration
+                    reason = reason_label
+                    source = source_label
+                    break
+                if action is not None:
+                    break
 
         if action is None or reason is None or source is None:
             return await handler(event, data)
@@ -101,18 +134,52 @@ class ContentFiltersMiddleware(BaseMiddleware):
 
         try:
             bot_user = await bot.me()
-            action_text = await _execute_action(bot=bot, session_factory=self.session_factory, chat_id=event.chat.id, actor=bot_user, target=event.from_user, action=action, reason=reason, duration_token=mute_duration)
+            action_text = await _execute_action(
+                bot=bot,
+                session_factory=self.session_factory,
+                chat_id=event.chat.id,
+                actor=bot_user,
+                target=event.from_user,
+                action=action,
+                reason=reason,
+                duration_token=mute_duration,
+            )
             async with self.session_factory() as session:
                 async with session.begin():
-                    latest_id = (await session.execute(select(ModerationAction.id).where(ModerationAction.chat_id == event.chat.id, ModerationAction.target_user_id == event.from_user.id, ModerationAction.actor_user_id == bot_user.id, ModerationAction.action == action).order_by(ModerationAction.id.desc()).limit(1))).scalar_one_or_none()
+                    latest_id = (
+                        await session.execute(
+                            select(ModerationAction.id)
+                            .where(
+                                ModerationAction.chat_id == event.chat.id,
+                                ModerationAction.target_user_id == event.from_user.id,
+                                ModerationAction.actor_user_id == bot_user.id,
+                                ModerationAction.action == action,
+                            )
+                            .order_by(ModerationAction.id.desc())
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
                     if latest_id is not None:
-                        await session.execute(update(ModerationAction).where(ModerationAction.id == latest_id).values(source=source))
+                        await session.execute(
+                            update(ModerationAction)
+                            .where(ModerationAction.id == latest_id)
+                            .values(source=source)
+                        )
             deleted_line = "🗑 Сообщение удалено."
             if action == "warning" and "\n\nБудьте аккуратнее!" in action_text:
-                result = action_text.replace("\n\nБудьте аккуратнее!", f"\n\n{deleted_line}\n\nБудьте аккуратнее!", 1)
+                result = action_text.replace(
+                    "\n\nБудьте аккуратнее!",
+                    f"\n\n{deleted_line}\n\nБудьте аккуратнее!",
+                    1,
+                )
             else:
                 result = f"{action_text}\n\n{deleted_line}"
-            await bot.send_message(event.chat.id, result, parse_mode="HTML", disable_web_page_preview=True)
+            await bot.send_message(
+                event.chat.id,
+                result,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
         except Exception:
             logger.exception("Content filter action failed for chat_id=%s user_id=%s", event.chat.id, event.from_user.id)
 
