@@ -47,6 +47,7 @@ from groupbot.routers.manual_moderation import create_manual_moderation_router
 from groupbot.routers.message_operations import create_message_operations_router
 from groupbot.routers.moderation_release import create_moderation_release_router
 from groupbot.routers.network_admins import create_network_admins_router
+from groupbot.routers.network_moderation import create_network_moderation_router
 from groupbot.routers.networks import create_networks_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.protection_schedule import create_protection_schedule_router
@@ -102,6 +103,7 @@ async def main() -> None:
     dp.include_router(create_admin_member_sync_router(session_factory))
     dp.include_router(create_admins_display_router(session_factory))
     dp.include_router(create_identity_privacy_router(session_factory, settings))
+    dp.include_router(create_network_moderation_router(session_factory))
     dp.include_router(create_message_operations_router(session_factory))
     dp.include_router(create_ban_cleanup_router(session_factory))
     dp.include_router(create_moderation_release_router(session_factory))
