@@ -41,11 +41,39 @@ FOR EACH ROW
 EXECUTE FUNCTION reset_group_warnings_after_unban();
 """
 
+STALE_WARNING_CLEANUP = r"""
+WITH stale AS (
+    SELECT chat_id, target_user_id
+    FROM moderation_actions
+    WHERE action = 'warning'
+      AND is_active = TRUE
+    GROUP BY chat_id, target_user_id
+    HAVING COUNT(*) > 5
+       AND NOT EXISTS (
+           SELECT 1
+           FROM moderation_actions b
+           WHERE b.chat_id = moderation_actions.chat_id
+             AND b.target_user_id = moderation_actions.target_user_id
+             AND b.action = 'ban'
+             AND b.is_active = TRUE
+       )
+)
+UPDATE moderation_actions w
+SET is_active = FALSE,
+    revoked_at = COALESCE(w.revoked_at, NOW())
+FROM stale s
+WHERE w.chat_id = s.chat_id
+  AND w.target_user_id = s.target_user_id
+  AND w.action = 'warning'
+  AND w.is_active = TRUE;
+"""
+
 
 def upgrade() -> None:
     op.execute(TRIGGER_FUNCTION)
     op.execute("DROP TRIGGER IF EXISTS trg_reset_group_warnings_after_unban ON moderation_actions")
     op.execute(TRIGGER)
+    op.execute(STALE_WARNING_CLEANUP)
 
 
 def downgrade() -> None:
