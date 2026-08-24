@@ -6,6 +6,10 @@ from aiogram.types import BotCommandScopeAllGroupChats
 
 from groupbot.config import get_settings
 from groupbot.db import create_session_factory
+from groupbot.middleware import antiflood as antiflood_middleware_module
+from groupbot.middleware import antilinks as antilinks_middleware_module
+from groupbot.middleware import antispam as antispam_middleware_module
+from groupbot.middleware import content_filters as content_filters_middleware_module
 from groupbot.middleware.antiflood import AntiFloodMiddleware
 from groupbot.middleware.antilinks import AntiLinksMiddleware
 from groupbot.middleware.antispam import AntiSpamMiddleware
@@ -14,6 +18,7 @@ from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
+from groupbot.routers import manual_moderation as manual_moderation_module
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admins_display import create_admins_display_router
@@ -39,6 +44,7 @@ from groupbot.routers.moderation_release import create_moderation_release_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.user_display import clickable_user_display
+from groupbot.services.moderation_notifications import unified_execute_action
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 
 
@@ -55,6 +61,13 @@ async def main() -> None:
 
     creator_subscription_duration_module._user_link = clickable_user_display
     creator_user_profile_links_module._user_link = clickable_user_display
+
+    # One formatter for manual moderation and every automatic protection module.
+    manual_moderation_module._execute_action = unified_execute_action
+    antiflood_middleware_module._execute_action = unified_execute_action
+    antispam_middleware_module._execute_action = unified_execute_action
+    antilinks_middleware_module._execute_action = unified_execute_action
+    content_filters_middleware_module._execute_action = unified_execute_action
 
     bot = Bot(settings.bot_token)
     session_factory = create_session_factory(settings)
