@@ -17,7 +17,7 @@ from groupbot.services.permissions import has_permission
 from groupbot.services.users import upsert_user
 
 COMMAND_RE = re.compile(
-    r"^(разбан|размут|снять\s+пред(?:ы)?)(?:\s+(.+))?$",
+    r"^(разбан|размут|снять\s+преды|снять\s+пред)(?:\s+(.+))?$",
     re.IGNORECASE,
 )
 TG_ID_RE = re.compile(r"^tg://user\?id=(\d+)$", re.IGNORECASE)
@@ -84,6 +84,57 @@ async def _deactivate_actions(
     return int(result.rowcount or 0)
 
 
+async def _deactivate_one_warning(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    user_id: int,
+) -> int:
+    warning_id = (
+        await session.execute(
+            select(ModerationAction.id)
+            .where(
+                ModerationAction.chat_id == chat_id,
+                ModerationAction.target_user_id == user_id,
+                ModerationAction.action == "warning",
+                ModerationAction.is_active.is_(True),
+            )
+            .order_by(ModerationAction.created_at.desc(), ModerationAction.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if warning_id is None:
+        return 0
+    result = await session.execute(
+        update(ModerationAction)
+        .where(ModerationAction.id == warning_id)
+        .values(is_active=False, revoked_at=datetime.now(timezone.utc))
+    )
+    return int(result.rowcount or 0)
+
+
+async def _active_warning_count(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    user_id: int,
+) -> int:
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(ModerationAction)
+                .where(
+                    ModerationAction.chat_id == chat_id,
+                    ModerationAction.target_user_id == user_id,
+                    ModerationAction.action == "warning",
+                    ModerationAction.is_active.is_(True),
+                )
+            )
+        ).scalar_one()
+    )
+
+
 def create_moderation_release_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
@@ -132,7 +183,6 @@ def create_moderation_release_router(
                 async with session_factory() as session:
                     async with session.begin():
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="ban")
-                        # Reset warnings explicitly as well as through the DB trigger.
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="warning")
                         await write_audit(
                             session,
@@ -175,6 +225,42 @@ def create_moderation_release_router(
                 )
                 return
 
+            if command == "снять пред":
+                async with session_factory() as session:
+                    async with session.begin():
+                        removed = await _deactivate_one_warning(
+                            session,
+                            chat_id=message.chat.id,
+                            user_id=target_id,
+                        )
+                        remaining = await _active_warning_count(
+                            session,
+                            chat_id=message.chat.id,
+                            user_id=target_id,
+                        )
+                        await write_audit(
+                            session,
+                            "moderation.warning_removed",
+                            chat_id=message.chat.id,
+                            actor_user_id=message.from_user.id,
+                            target_type="user",
+                            target_id=str(target_id),
+                            payload={"removed": removed, "remaining": remaining},
+                        )
+                if removed == 0:
+                    await message.answer(
+                        f"⚠️ У {identity} нет активных предупреждений.\nПредупреждения: <b>0/5</b>.",
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    await message.answer(
+                        f"✅ С {identity} снято одно предупреждение.\n⚠️ Предупреждения: <b>{remaining}/5</b>.",
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                return
+
             async with session_factory() as session:
                 async with session.begin():
                     removed = await _deactivate_actions(
@@ -193,7 +279,7 @@ def create_moderation_release_router(
                         payload={"removed": removed},
                     )
             await message.answer(
-                f"✅ Предупреждения {identity} сняты.\n⚠️ Предупреждения: <b>0/5</b>.",
+                f"✅ Все предупреждения {identity} сняты.\n⚠️ Предупреждения: <b>0/5</b>.",
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
