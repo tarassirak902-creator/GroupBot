@@ -45,6 +45,7 @@ from groupbot.routers.moderation_release import create_moderation_release_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.user_display import clickable_user_display
+from groupbot.services.default_punishment_reasons import configured_reasons_with_defaults
 from groupbot.services.moderation_notifications import unified_execute_action
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 
@@ -70,6 +71,10 @@ async def main() -> None:
     antispam_middleware_module._execute_action = unified_execute_action
     antilinks_middleware_module._execute_action = unified_execute_action
     content_filters_middleware_module._execute_action = unified_execute_action
+
+    # Built-in reasons are always available; group-specific custom reasons are appended.
+    manual_moderation_module._configured_reasons = configured_reasons_with_defaults
+    ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
 
     bot = Bot(settings.bot_token)
     session_factory = create_session_factory(settings)
