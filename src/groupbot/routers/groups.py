@@ -1,4 +1,5 @@
 from aiogram import Bot, F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import (
     ChatMemberUpdated,
     InlineKeyboardButton,
@@ -116,7 +117,10 @@ def create_group_router(session_factory: async_sessionmaker[AsyncSession]) -> Ro
     async def bot_added_service_message(message: Message, bot: Bot) -> None:
         me = await bot.get_me()
         if not any(member.id == me.id for member in (message.new_chat_members or [])):
-            return
+            # This handler is only responsible for the bot itself being added.
+            # Let ordinary member-join service messages continue to the captcha/
+            # antiraid router registered later in the dispatcher.
+            raise SkipHandler()
         await _register_added_group(
             session_factory,
             bot,
