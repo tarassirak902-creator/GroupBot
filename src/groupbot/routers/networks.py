@@ -32,6 +32,52 @@ async def _owner_network(
     ).scalar_one_or_none()
 
 
+async def _network_groups(
+    session: AsyncSession,
+    network_id: int,
+    owner_id: int,
+):
+    return (
+        await session.execute(
+            select(Group.chat_id, Group.title)
+            .join(NetworkGroup, NetworkGroup.chat_id == Group.chat_id)
+            .join(
+                GroupOwner,
+                (GroupOwner.chat_id == NetworkGroup.chat_id)
+                & (GroupOwner.user_id == owner_id)
+                & (GroupOwner.is_current.is_(True)),
+            )
+            .where(NetworkGroup.network_id == network_id)
+            .order_by(NetworkGroup.added_at.asc(), Group.title.asc().nullslast())
+        )
+    ).all()
+
+
+async def _network_group(
+    session: AsyncSession,
+    network_id: int,
+    owner_id: int,
+    chat_id: int,
+):
+    return (
+        await session.execute(
+            select(Group.chat_id, Group.title)
+            .join(NetworkGroup, NetworkGroup.chat_id == Group.chat_id)
+            .join(
+                GroupOwner,
+                (GroupOwner.chat_id == NetworkGroup.chat_id)
+                & (GroupOwner.user_id == owner_id)
+                & (GroupOwner.is_current.is_(True)),
+            )
+            .where(
+                NetworkGroup.network_id == network_id,
+                NetworkGroup.chat_id == chat_id,
+            )
+            .limit(1)
+        )
+    ).first()
+
+
 async def _render_list(
     message: Message,
     session_factory: async_sessionmaker[AsyncSession],
@@ -109,35 +155,17 @@ async def _render_card(
         if network is None:
             await callback.answer("Сетка не найдена.", show_alert=True)
             return
-        groups = (
-            await session.execute(
-                select(Group.chat_id, Group.title)
-                .join(NetworkGroup, NetworkGroup.chat_id == Group.chat_id)
-                .join(
-                    GroupOwner,
-                    (GroupOwner.chat_id == NetworkGroup.chat_id)
-                    & (GroupOwner.user_id == owner_id)
-                    & (GroupOwner.is_current.is_(True)),
-                )
-                .where(NetworkGroup.network_id == network_id)
-                .order_by(NetworkGroup.added_at.asc(), Group.title.asc().nullslast())
-            )
-        ).all()
+        groups = await _network_groups(session, network_id, owner_id)
 
     lines = [
         "🌐 <b>Сетка групп</b>",
         "",
         f"Подключено групп: <b>{len(groups)}</b>",
     ]
-    if groups:
-        lines.extend(["", "Группы:"])
-        for row in groups:
-            lines.append(f"• {row.title or 'Группа без названия'}")
-    else:
-        lines.extend(["", "В сетке пока нет групп."])
 
     buttons: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="➕ Добавить группу", callback_data=f"networks:add:{network_id}")]
+        [InlineKeyboardButton(text="🌐 Сетка", callback_data=f"networks:groups:{network_id}")],
+        [InlineKeyboardButton(text="➕ Добавить группу", callback_data=f"networks:add:{network_id}")],
     ]
     if groups:
         buttons.append([
@@ -152,21 +180,94 @@ async def _render_card(
             callback_data=f"networks:moderation:{network_id}",
         )
     ])
-    for row in groups:
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"➖ {row.title or 'Группа без названия'}"[:64],
-                    callback_data=f"networks:remove_group:{network_id}:{row.chat_id}",
-                )
-            ]
-        )
     buttons.append([InlineKeyboardButton(text="🗑 Удалить сетку", callback_data=f"networks:delete:{network_id}")])
     buttons.append([InlineKeyboardButton(text="◀️ Все сетки", callback_data="networks:list")])
     await callback.message.edit_text(
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+async def _render_groups(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    network_id: int,
+) -> None:
+    if callback.message is None:
+        return
+    owner_id = callback.from_user.id
+    async with session_factory() as session:
+        if await _owner_network(session, network_id, owner_id) is None:
+            await callback.answer("Сетка не найдена.", show_alert=True)
+            return
+        groups = await _network_groups(session, network_id, owner_id)
+
+    lines = [
+        "🌐 <b>Сетка</b>",
+        "",
+        f"Подключено групп: <b>{len(groups)}</b>",
+    ]
+    buttons: list[list[InlineKeyboardButton]] = []
+    if groups:
+        lines.extend(["", "Выберите группу:"])
+        for row in groups:
+            buttons.append([
+                InlineKeyboardButton(
+                    text=(row.title or "Группа без названия")[:64],
+                    callback_data=f"networks:group:{network_id}:{row.chat_id}",
+                )
+            ])
+    else:
+        lines.extend(["", "В этой сетке пока нет подключённых групп."])
+
+    buttons.append([InlineKeyboardButton(text="◀️ Назад к сетке", callback_data=f"networks:open:{network_id}")])
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+async def _render_group_card(
+    callback: CallbackQuery,
+    session_factory: async_sessionmaker[AsyncSession],
+    network_id: int,
+    chat_id: int,
+) -> None:
+    if callback.message is None:
+        return
+    owner_id = callback.from_user.id
+    async with session_factory() as session:
+        if await _owner_network(session, network_id, owner_id) is None:
+            await callback.answer("Сетка не найдена.", show_alert=True)
+            return
+        group = await _network_group(session, network_id, owner_id, chat_id)
+
+    if group is None:
+        await callback.answer("Группа больше не состоит в этой сетке.", show_alert=True)
+        await _render_groups(callback, session_factory, network_id)
+        return
+
+    title = group.title or "Группа без названия"
+    await callback.message.edit_text(
+        "🌐 <b>Группа в сетке</b>\n\n"
+        f"🏠 <b>{title}</b>\n\n"
+        "Группа подключена к этой сетке.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="➖ Удалить группу из сетки",
+                        callback_data=f"networks:remove_confirm:{network_id}:{chat_id}",
+                    )
+                ],
+                [InlineKeyboardButton(text="◀️ Назад к группам", callback_data=f"networks:groups:{network_id}")],
+            ]
+        ),
     )
     await callback.answer()
 
@@ -234,6 +335,73 @@ def create_networks_router(
         except (ValueError, IndexError):
             return
         await _render_card(callback, session_factory, network_id)
+
+    @router.callback_query(F.data.startswith("networks:groups:"))
+    async def network_groups(callback: CallbackQuery) -> None:
+        try:
+            network_id = int((callback.data or "").rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            return
+        await _render_groups(callback, session_factory, network_id)
+
+    @router.callback_query(F.data.startswith("networks:group:"))
+    async def network_group_card(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":")
+        if len(parts) != 4:
+            return
+        try:
+            network_id, chat_id = int(parts[2]), int(parts[3])
+        except ValueError:
+            return
+        await _render_group_card(callback, session_factory, network_id, chat_id)
+
+    @router.callback_query(F.data.startswith("networks:remove_confirm:"))
+    async def remove_group_confirm(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+        parts = (callback.data or "").split(":")
+        if len(parts) != 4:
+            return
+        try:
+            network_id, chat_id = int(parts[2]), int(parts[3])
+        except ValueError:
+            return
+        owner_id = callback.from_user.id
+        async with session_factory() as session:
+            if await _owner_network(session, network_id, owner_id) is None:
+                await callback.answer("Сетка не найдена.", show_alert=True)
+                return
+            group = await _network_group(session, network_id, owner_id, chat_id)
+        if group is None:
+            await callback.answer("Группа больше не состоит в этой сетке.", show_alert=True)
+            await _render_groups(callback, session_factory, network_id)
+            return
+
+        title = group.title or "Группа без названия"
+        await callback.message.edit_text(
+            "⚠️ <b>Удалить группу из сетки?</b>\n\n"
+            f"🏠 <b>{title}</b>\n\n"
+            "Группа останется подключённой к Mimorus, но перестанет входить в эту сетку. "
+            "Сетевая модерация и права сетевых администраторов больше не будут действовать на неё через эту сетку.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="✅ Да, удалить",
+                            callback_data=f"networks:remove_group:{network_id}:{chat_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отмена",
+                            callback_data=f"networks:group:{network_id}:{chat_id}",
+                        )
+                    ],
+                ]
+            ),
+        )
+        await callback.answer()
 
     @router.callback_query(F.data.startswith("networks:moderation:"))
     async def network_moderation_info(callback: CallbackQuery) -> None:
@@ -416,6 +584,18 @@ def create_networks_router(
                 if await _owner_network(session, network_id, owner_id) is None:
                     await callback.answer("Сетка не найдена.", show_alert=True)
                     return
+                exists = (
+                    await session.execute(
+                        select(NetworkGroup.id).where(
+                            NetworkGroup.network_id == network_id,
+                            NetworkGroup.chat_id == chat_id,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if exists is None:
+                    await callback.answer("Группа уже удалена из сетки.", show_alert=True)
+                    return
                 await session.execute(
                     delete(NetworkGroup).where(
                         NetworkGroup.network_id == network_id,
@@ -430,7 +610,8 @@ def create_networks_router(
                     target_type="network",
                     target_id=str(network_id),
                 )
-        await _render_card(callback, session_factory, network_id)
+        await callback.answer("Группа удалена из сетки")
+        await _render_groups(callback, session_factory, network_id)
 
     @router.callback_query(F.data.startswith("networks:delete:"))
     async def delete_network(callback: CallbackQuery) -> None:
