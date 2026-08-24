@@ -15,6 +15,7 @@ from groupbot.models import GroupSettings
 from groupbot.moderation_models import ModerationAction
 from groupbot.routers.manual_moderation import _execute_action, _group_ready
 from groupbot.services.protected_members import is_protected_member
+from groupbot.services.protection_schedule import protection_enabled
 
 logger = logging.getLogger(__name__)
 URL_RE = re.compile(r"(?i)(?:(?:https?://)|(?:www\.))[^^\s<>]+")
@@ -75,7 +76,7 @@ class AntiLinksMiddleware(BaseMiddleware):
                 return await handler(event, data)
             raw = (await session.execute(select(GroupSettings.moderation_config).where(GroupSettings.chat_id == event.chat.id))).scalar_one_or_none() or {}
             cfg = dict(raw.get("antilinks") or {})
-            if not cfg.get("enabled"):
+            if not protection_enabled(raw, "antilinks", bool(cfg.get("enabled"))):
                 return await handler(event, data)
             action = str(cfg.get("action") or "warning")
             mute_duration = str(cfg.get("mute_duration") or "") or None
