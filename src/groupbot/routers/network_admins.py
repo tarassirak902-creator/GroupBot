@@ -5,7 +5,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import Group, GroupOwner, GroupStatus, NetworkAdmin, User
+from groupbot.models import GroupOwner, NetworkAdmin, User
+from groupbot.network_models import Network, NetworkGroup
 from groupbot.routers.group_control import KNOWN_PERMISSIONS, _owner_access
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.audit import write_audit
@@ -23,11 +24,10 @@ async def _owner_id(session: AsyncSession, chat_id: int) -> int | None:
 
 async def _network_groups_count(session: AsyncSession, owner_id: int) -> int:
     return int((await session.execute(
-        select(func.count()).select_from(GroupOwner).join(Group, Group.chat_id == GroupOwner.chat_id).where(
-            GroupOwner.user_id == owner_id,
-            GroupOwner.is_current.is_(True),
-            Group.status == GroupStatus.active.value,
-        )
+        select(func.count(func.distinct(NetworkGroup.chat_id)))
+        .select_from(NetworkGroup)
+        .join(Network, Network.id == NetworkGroup.network_id)
+        .where(Network.owner_user_id == owner_id)
     )).scalar_one())
 
 
@@ -51,17 +51,17 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
     text_lines = [
         "🌐 <b>Сетевые администраторы</b>",
         "",
-        f"Групп в сетке владельца: <b>{groups_count}</b>",
+        f"Групп в сетках владельца: <b>{groups_count}</b>",
         f"Сетевых администраторов: <b>{len(rows)}</b>",
         "",
-        "Сетевые права действуют только в группах, где текущим владельцем является этот же пользователь. На чужие группы права не распространяются.",
+        "Сетевые права действуют только в группах, добавленных в сетки этого владельца. На остальные и чужие группы права не распространяются.",
     ]
     buttons: list[list[InlineKeyboardButton]] = []
     if rows:
         text_lines.extend(["", "Назначенные:"])
         for row, user in rows:
             text_lines.append(f"• {clickable_user_display(user)}")
-            label = user.first_name or user.username or str(user.telegram_user_id)
+            label = user.first_name or user.username or "Пользователь"
             if user.last_name:
                 label = f"{label} {user.last_name}"
             buttons.append([InlineKeyboardButton(text=f"👤 {label}"[:64], callback_data=f"network:card:{chat_id}:{user.telegram_user_id}")])
@@ -110,8 +110,8 @@ async def _render_card(callback: CallbackQuery, session_factory: async_sessionma
         await callback.message.edit_text(
             "🌐 <b>Сетевой администратор</b>\n\n"
             f"Пользователь: {clickable_user_display(user)}\n"
-            f"Групп в сетке: <b>{groups_count}</b>\n\n"
-            "Права применяются ко всем группам этого владельца. Включите только необходимые действия:",
+            f"Групп в сетках: <b>{groups_count}</b>\n\n"
+            "Права применяются только к группам, добавленным в сетки этого владельца. Включите только необходимые действия:",
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -160,7 +160,7 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
 
         buttons = []
         for user in candidates:
-            label = user.full_name or (f"@{user.username}" if user.username else str(user.id))
+            label = user.full_name or (f"@{user.username}" if user.username else "Пользователь")
             if user.username:
                 label = f"{label} | @{user.username}"
             buttons.append([InlineKeyboardButton(text=label[:64], callback_data=f"network:set:{chat_id}:{user.id}")])

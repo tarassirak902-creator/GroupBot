@@ -2,6 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.models import AdminAssignment, AdminPermission, GroupOwner, NetworkAdmin
+from groupbot.network_models import Network, NetworkGroup
 
 
 OWNER_PERMISSION = "*"
@@ -25,6 +26,18 @@ async def _network_permission(session: AsyncSession, chat_id: int, user_id: int,
         ).limit(1)
     )).scalar_one_or_none()
     if owner_id is None:
+        return False
+
+    network_group_id = (await session.execute(
+        select(NetworkGroup.id)
+        .join(Network, Network.id == NetworkGroup.network_id)
+        .where(
+            NetworkGroup.chat_id == chat_id,
+            Network.owner_user_id == owner_id,
+        )
+        .limit(1)
+    )).scalar_one_or_none()
+    if network_group_id is None:
         return False
 
     row = (await session.execute(
