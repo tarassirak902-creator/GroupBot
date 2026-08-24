@@ -40,6 +40,13 @@ KNOWN_PERMISSIONS = [
     ("stats", "📊 Полная статистика"),
 ]
 WARNING_LIMIT_CHOICES = (3, 4, 5, 6, 7, 8, 9, 10, 15, 20)
+STANDARD_ADMIN_ROLE_NAMES = frozenset({
+    "Зам. владельца",
+    "Глав. админ",
+    "Администратор чата",
+    "Администратор войса",
+    "Помощник",
+})
 
 
 class AdminRoleState(StatesGroup):
@@ -201,6 +208,19 @@ async def _rank_limit(session: AsyncSession, owner_id: int) -> int | None:
     return await effective_limit_for_owner(session, owner_id, "admin_ranks")
 
 
+async def _custom_rank_count(session: AsyncSession, chat_id: int) -> int:
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(AdminRole)
+            .where(
+                AdminRole.chat_id == chat_id,
+                ~AdminRole.name.in_(STANDARD_ADMIN_ROLE_NAMES),
+            )
+        )
+    ).scalar_one()
+
+
 def create_group_control_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
@@ -228,9 +248,7 @@ def create_group_control_router(
             ).scalar_one_or_none()
             settings = await _ensure_group_settings(session, chat_id)
             moderation_config = settings.moderation_config or {}
-            roles_count = (
-                await session.execute(select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id))
-            ).scalar_one()
+            roles_count = await _custom_rank_count(session, chat_id)
             assignments_count = (
                 await session.execute(select(func.count()).select_from(AdminAssignment).where(AdminAssignment.chat_id == chat_id))
             ).scalar_one()
@@ -493,11 +511,12 @@ def create_group_control_router(
                 await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))
             ).scalars().all()
             limit = await _rank_limit(session, callback.from_user.id)
+        custom_count = sum(1 for role in rows if role.name not in STANDARD_ADMIN_ROLE_NAMES)
         suffix = f"\nЛимит тарифа с дополнениями: <b>{limit}</b> ранга." if limit is not None else ""
         if callback.message is not None:
             await callback.message.edit_text(
                 "👑 <b>Ранги администрации</b>\n\n"
-                f"Создано: <b>{len(rows)}</b>.{suffix}\n"
+                f"Собственных рангов: <b>{custom_count}</b>.{suffix}\n"
                 "Новые ранги создаются без автоматически выданных прав: владелец включает каждое действие сам.",
                 parse_mode="HTML",
                 reply_markup=_roles_keyboard(chat_id, list(rows)),
@@ -512,16 +531,14 @@ def create_group_control_router(
                 await callback.answer("Недостаточно прав.", show_alert=True)
                 return
             limit = await _rank_limit(session, callback.from_user.id)
-            count = (
-                await session.execute(select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id))
-            ).scalar_one()
+            count = await _custom_rank_count(session, chat_id)
         if limit is not None and count >= limit:
-            await callback.answer(f"Достигнут лимит административных рангов: {limit}.", show_alert=True)
+            await callback.answer(f"Достигнут лимит дополнительных административных рангов: {limit}.", show_alert=True)
             return
         await state.set_state(AdminRoleState.waiting_name)
         await state.update_data(chat_id=chat_id)
         if callback.message is not None:
-            await callback.message.answer("Отправьте название нового административного ранга (1–128 символов).")
+            await callback.message.answer("Отправьте название нового дополнительного административного ранга (1–128 символов).")
         await callback.answer()
 
     @router.message(AdminRoleState.waiting_name, F.chat.type == "private")
@@ -542,12 +559,10 @@ def create_group_control_router(
                     await message.answer("Недостаточно прав.")
                     return
                 limit = await _rank_limit(session, message.from_user.id)
-                count = (
-                    await session.execute(select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id))
-                ).scalar_one()
+                count = await _custom_rank_count(session, chat_id)
                 if limit is not None and count >= limit:
                     await state.clear()
-                    await message.answer(f"Достигнут лимит административных рангов: {limit}.")
+                    await message.answer(f"Достигнут лимит дополнительных административных рангов: {limit}.")
                     return
                 exists = (
                     await session.execute(select(AdminRole.id).where(AdminRole.chat_id == chat_id, AdminRole.name == name))
