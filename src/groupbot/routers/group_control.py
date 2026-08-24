@@ -17,6 +17,12 @@ from groupbot.models import (
     SubscriptionStatus,
     Tariff,
 )
+from groupbot.routers.manual_moderation import (
+    DEFAULT_WARNING_LIMIT,
+    MAX_WARNING_LIMIT,
+    MIN_WARNING_LIMIT,
+    _warning_stage,
+)
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import is_group_owner
 from groupbot.services.subscriptions import active_subscription_for_owner
@@ -33,6 +39,7 @@ KNOWN_PERMISSIONS = [
     ("pin", "📌 Закрепление сообщений"),
     ("stats", "📊 Полная статистика"),
 ]
+WARNING_LIMIT_CHOICES = (3, 4, 5, 6, 7, 8, 9, 10, 15, 20)
 
 
 class AdminRoleState(StatesGroup):
@@ -103,6 +110,44 @@ def _mode_keyboard(chat_id: int, current: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")],
         ]
     )
+
+
+def _warning_keyboard(chat_id: int, current: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    values = list(WARNING_LIMIT_CHOICES)
+    for start in range(0, len(values), 4):
+        row: list[InlineKeyboardButton] = []
+        for value in values[start:start + 4]:
+            prefix = "✅ " if value == current else ""
+            row.append(InlineKeyboardButton(text=f"{prefix}{value}", callback_data=f"gctl:setwarnings:{chat_id}:{value}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _warning_scale_text(limit: int) -> str:
+    lines = [
+        "📈 <b>Шкала предупреждений</b>",
+        "",
+        f"Лимит предупреждений: <b>{limit}</b>",
+        "",
+    ]
+    for count in range(1, limit + 1):
+        stage = _warning_stage(count, limit)
+        if stage == "ban":
+            action = "⛔ Бан"
+        elif stage == "mute_1h":
+            action = "🔇 Мут 1 час"
+        elif stage == "mute_15m":
+            action = "🔇 Мут 15 минут"
+        else:
+            action = "⚠️ Предупреждение"
+        lines.append(f"{count}/{limit} — {action}")
+    lines.extend([
+        "",
+        "Лимит применяется к ручным предупреждениям и автоматической модерации этой группы.",
+    ])
+    return "\n".join(lines)
 
 
 def _roles_keyboard(chat_id: int, roles: list[AdminRole]) -> InlineKeyboardMarkup:
@@ -284,21 +329,60 @@ def create_group_control_router(
     @router.callback_query(F.data.startswith("gctl:warnings:"))
     async def warning_scale(callback: CallbackQuery) -> None:
         chat_id = int((callback.data or "").split(":", 2)[2])
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            settings = await _ensure_group_settings(session, chat_id)
+            try:
+                current = int((settings.moderation_config or {}).get("warning_limit", DEFAULT_WARNING_LIMIT))
+            except (TypeError, ValueError):
+                current = DEFAULT_WARNING_LIMIT
+            current = max(MIN_WARNING_LIMIT, min(MAX_WARNING_LIMIT, current))
         if callback.message is not None:
             await callback.message.edit_text(
-                "📈 <b>Шкала предупреждений</b>\n\n"
-                "1/5 — Предупреждение\n"
-                "2/5 — Предупреждение\n"
-                "3/5 — Мут 15 минут\n"
-                "4/5 — Мут 1 час\n"
-                "5/5 — Бан\n\n"
-                "Это стартовая шкала, закреплённая MASTER-ТЗ. Настройку шкалы в допустимых глобальных рамках добавим отдельным экраном.",
+                _warning_scale_text(current),
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]
-                ]),
+                reply_markup=_warning_keyboard(chat_id, current),
             )
         await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:setwarnings:"))
+    async def set_warning_limit(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2])
+            limit = int(parts[3])
+        except (ValueError, IndexError):
+            return
+        if limit not in WARNING_LIMIT_CHOICES:
+            await callback.answer("Некорректный лимит.", show_alert=True)
+            return
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                settings = await _ensure_group_settings(session, chat_id)
+                config = dict(settings.moderation_config or {})
+                config["warning_limit"] = limit
+                settings.moderation_config = config
+                await write_audit(
+                    session,
+                    "group.warning_limit_changed",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="group",
+                    target_id=str(chat_id),
+                    payload={"warning_limit": limit},
+                )
+        if callback.message is not None:
+            await callback.message.edit_text(
+                _warning_scale_text(limit),
+                parse_mode="HTML",
+                reply_markup=_warning_keyboard(chat_id, limit),
+            )
+        await callback.answer("Сохранено")
 
     @router.callback_query(F.data.startswith("gctl:mod_help:"))
     async def mod_help(callback: CallbackQuery) -> None:
