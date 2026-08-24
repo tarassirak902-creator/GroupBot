@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.routers.antiflood import ACTION_LABELS, DURATION_RE, _duration_label, _duration_seconds
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
+from groupbot.services.subscriptions import effective_limit_for_owner
 
 CONTENT_ACTION_LABELS = {
     **ACTION_LABELS,
@@ -46,6 +47,10 @@ async def _save(session: AsyncSession, chat_id: int, kind: str, cfg: dict) -> No
     settings.moderation_config = root
 
 
+async def _item_limit(session: AsyncSession, owner_id: int, kind: str) -> int | None:
+    return await effective_limit_for_owner(session, owner_id, _key(kind))
+
+
 def _keyboard(chat_id: int, kind: str, cfg: dict) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
@@ -70,20 +75,24 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
             return
         settings = await _ensure_group_settings(session, chat_id)
         cfg = _cfg(settings.moderation_config, kind)
+        limit = await _item_limit(session, callback.from_user.id, kind)
     duration = f"\nСрок мута: <b>{_duration_label(cfg.get('mute_duration'))}</b>" if cfg["action"] == "mute" else ""
     action = CONTENT_ACTION_LABELS.get(cfg["action"], "не задано")
+    count_label = str(len(cfg["items"])) if limit is None else f"{len(cfg['items'])}/{limit}"
     lines = [
         f"{_title(kind)}",
         "",
         f"Статус: <b>{'✅ включено' if cfg['enabled'] else '❌ выключено'}</b>",
         f"Действие: <b>{action}</b>{duration}",
-        f"Записей: <b>{len(cfg['items'])}</b>",
+        f"Записей: <b>{count_label}</b>",
         "",
         "Администрация, VIP и Недотрога защищены автоматически.",
         "⚠️ Пред — используется общая настраиваемая шкала группы.",
         "🔇 Мут — применяется сразу на выбранный срок.",
         "⛔ Бан — применяется сразу за первое совпадение.",
     ]
+    if limit is not None:
+        lines.append(f"Лимит тарифа с дополнениями: <b>{limit}</b>.")
     if cfg["items"]:
         lines += ["", "Список:"] + [f"• <code>{item}</code>" for item in cfg["items"][:20]]
     if callback.message:
@@ -121,6 +130,16 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
     async def add(callback: CallbackQuery, state: FSMContext) -> None:
         _, _, kind, chat_raw = (callback.data or "").split(":", 3)
         chat_id = int(chat_raw)
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            settings = await _ensure_group_settings(session, chat_id)
+            cfg = _cfg(settings.moderation_config, kind)
+            limit = await _item_limit(session, callback.from_user.id, kind)
+        if limit is not None and len(cfg["items"]) >= limit:
+            await callback.answer(f"Достигнут лимит записей: {limit}.", show_alert=True)
+            return
         await state.set_state(ContentFilterState.waiting_item)
         await state.update_data(cf_kind=kind, cf_chat_id=chat_id)
         prompt = "Отправьте одно запрещённое слово." if kind == "words" else "Отправьте запрещённую фразу."
@@ -135,16 +154,29 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
             await message.answer("Введите текст длиной от 1 до 200 символов."); return
         if kind == "words" and any(ch.isspace() for ch in item):
             await message.answer("Для раздела слов добавьте одно слово без пробелов. Для текста из нескольких слов используйте «Запрещённые фразы»."); return
+        limit_reached = False
+        duplicate = False
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, message.from_user.id): await state.clear(); return
                 settings = await _ensure_group_settings(session, chat_id); cfg = _cfg(settings.moderation_config, kind)
-                if item.casefold() not in {x.casefold() for x in cfg["items"]}: cfg["items"].append(item)
-                await _save(session, chat_id, kind, cfg)
+                duplicate = item.casefold() in {x.casefold() for x in cfg["items"]}
+                if not duplicate:
+                    limit = await _item_limit(session, message.from_user.id, kind)
+                    if limit is not None and len(cfg["items"]) >= limit:
+                        limit_reached = True
+                    else:
+                        cfg["items"].append(item)
+                        await _save(session, chat_id, kind, cfg)
+        if limit_reached:
+            await state.clear()
+            await message.answer("Достигнут лимит записей для текущего тарифа.")
+            return
         try: await message.delete()
         except Exception: pass
         await state.clear()
-        await message.answer("✅ Добавлено.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_title(kind), callback_data=f"gctl:feature:{chat_id}:{kind}")]]))
+        result_text = "ℹ️ Такая запись уже есть." if duplicate else "✅ Добавлено."
+        await message.answer(result_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=_title(kind), callback_data=f"gctl:feature:{chat_id}:{kind}")]]))
 
     @router.callback_query(F.data.startswith("cf:del:"))
     async def delete(callback: CallbackQuery) -> None:
