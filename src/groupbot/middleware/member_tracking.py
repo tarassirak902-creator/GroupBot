@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -14,8 +15,16 @@ from groupbot.moderation_models import ObservedMessage
 from groupbot.services.users import upsert_user
 
 
+def normalize_message_text(message: Message) -> str | None:
+    raw = message.text or message.caption
+    if not raw:
+        return None
+    value = re.sub(r"\s+", " ", raw.casefold()).strip()
+    return value[:4000] or None
+
+
 class GroupMemberTrackingMiddleware(BaseMiddleware):
-    """Keep users/group_members and deletable message ids from real group activity."""
+    """Keep users/group_members and observed messages from real group activity."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -54,6 +63,7 @@ class GroupMemberTrackingMiddleware(BaseMiddleware):
                 message_id=event.message_id,
                 user_id=user.id,
                 sent_at=event.date,
+                normalized_text=normalize_message_text(event),
             )
             .on_conflict_do_nothing(index_elements=["chat_id", "message_id"])
         )
