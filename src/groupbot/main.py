@@ -44,6 +44,7 @@ from groupbot.routers.manual_moderation import create_manual_moderation_router
 from groupbot.routers.message_operations import create_message_operations_router
 from groupbot.routers.moderation_release import create_moderation_release_router
 from groupbot.routers.private import create_private_router
+from groupbot.routers.protection_schedule import create_protection_schedule_router
 from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.default_punishment_reasons import configured_reasons_with_defaults
@@ -65,7 +66,6 @@ async def main() -> None:
     creator_subscription_duration_module._user_link = clickable_user_display
     creator_user_profile_links_module._user_link = clickable_user_display
 
-    # One formatter for manual moderation and every automatic protection module.
     manual_moderation_module._execute_action = unified_execute_action
     ban_cleanup_module._execute_action = unified_execute_action
     antiflood_middleware_module._execute_action = unified_execute_action
@@ -73,7 +73,6 @@ async def main() -> None:
     antilinks_middleware_module._execute_action = unified_execute_action
     content_filters_middleware_module._execute_action = unified_execute_action
 
-    # Built-in reasons are always available; group-specific custom reasons are appended.
     manual_moderation_module._configured_reasons = configured_reasons_with_defaults
     ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
 
@@ -81,8 +80,6 @@ async def main() -> None:
     session_factory = create_session_factory(settings)
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
-    # Persist the current group message first; protection middleware then sees it
-    # in observed_messages before ordinary routers process the update.
     dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
     dp.message.outer_middleware(ContentFiltersMiddleware(session_factory))
     dp.message.outer_middleware(AntiFloodMiddleware(session_factory))
@@ -95,8 +92,6 @@ async def main() -> None:
     dp.include_router(create_identity_privacy_router(session_factory, settings))
     dp.include_router(create_message_operations_router(session_factory))
     dp.include_router(create_ban_cleanup_router(session_factory))
-    # Release/clear commands support reply, @username, numeric ID and tg://user?id=...
-    # and are handled before generic manual moderation.
     dp.include_router(create_moderation_release_router(session_factory))
     dp.include_router(create_manual_moderation_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
@@ -109,6 +104,7 @@ async def main() -> None:
     dp.include_router(create_antilinks_router(session_factory))
     dp.include_router(create_content_filters_router(session_factory))
     dp.include_router(create_entry_protection_router(session_factory))
+    dp.include_router(create_protection_schedule_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
