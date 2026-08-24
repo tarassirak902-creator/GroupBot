@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, GroupMember, MemberStatus, User
+from groupbot.models import AdminAssignment, User
 from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.audit import write_audit
+from groupbot.services.users import upsert_user
 
 
 async def _current_reserve(session: AsyncSession, chat_id: int):
@@ -22,20 +23,16 @@ async def _current_reserve(session: AsyncSession, chat_id: int):
     ).first()
 
 
-async def _active_members(session: AsyncSession, chat_id: int) -> list[User]:
-    return list((
-        await session.execute(
-            select(User)
-            .join(GroupMember, GroupMember.user_id == User.telegram_user_id)
-            .where(
-                GroupMember.chat_id == chat_id,
-                GroupMember.status == MemberStatus.member.value,
-                User.is_bot.is_(False),
-            )
-            .order_by(GroupMember.last_activity_at.desc().nullslast(), User.first_name.asc().nullslast())
-            .limit(50)
-        )
-    ).scalars().all())
+async def _active_telegram_admins(bot: Bot, chat_id: int):
+    """Return real active Telegram admins, excluding the owner and bots."""
+    members = await bot.get_chat_administrators(chat_id)
+    result = []
+    for member in members:
+        user = member.user
+        if member.status == "creator" or user.is_bot:
+            continue
+        result.append(user)
+    return result
 
 
 def _back(chat_id: int) -> InlineKeyboardMarkup:
@@ -66,8 +63,10 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         await callback.message.edit_text(
             "🧯 <b>Резервный администратор</b>\n\n"
             f"Текущий резервный администратор: {current_text}\n\n"
+            "Резерв можно назначить только из действующих Telegram-администраторов группы. "
+            "Владелец группы и боты в список выбора не попадают.\n\n"
             "На группу назначается один резервный администратор. При выборе нового предыдущий резерв автоматически снимается. "
-            "Если у пользователя уже есть ранг Mimorus, он сохраняется.",
+            "Если у администратора уже есть ранг Mimorus, он сохраняется.",
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
@@ -84,65 +83,79 @@ def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession
         await _render(callback, session_factory, chat_id)
 
     @router.callback_query(F.data.startswith("reserve:choose:"))
-    async def choose(callback: CallbackQuery) -> None:
+    async def choose(callback: CallbackQuery, bot: Bot) -> None:
         chat_id = int((callback.data or "").rsplit(":", 1)[1])
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id):
                 await callback.answer("Недостаточно прав.", show_alert=True)
                 return
-            members = await _active_members(session, chat_id)
             current = await _current_reserve(session, chat_id)
             current_id = current[0].user_id if current else None
 
-        if not members:
-            await callback.answer("Пока нет известных активных участников.", show_alert=True)
+        try:
+            admins = await _active_telegram_admins(bot, chat_id)
+        except Exception:
+            await callback.answer("Не удалось получить список администраторов Telegram.", show_alert=True)
+            return
+
+        if not admins:
+            await callback.answer("В группе нет других действующих администраторов.", show_alert=True)
             return
 
         rows: list[list[InlineKeyboardButton]] = []
-        for user in members:
-            marker = "✅ " if user.telegram_user_id == current_id else ""
-            label = user.first_name or user.username or str(user.telegram_user_id)
-            if user.last_name:
-                label = f"{label} {user.last_name}"
+        for user in admins:
+            marker = "✅ " if user.id == current_id else ""
+            label = user.full_name or (f"@{user.username}" if user.username else "Администратор")
             if user.username:
                 label = f"{label} | @{user.username}"
             rows.append([
                 InlineKeyboardButton(
                     text=f"{marker}{label}"[:64],
-                    callback_data=f"reserve:set:{chat_id}:{user.telegram_user_id}",
+                    callback_data=f"reserve:set:{chat_id}:{user.id}",
                 )
             ])
         rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"gctl:reserve:{chat_id}")])
 
         if callback.message:
             await callback.message.edit_text(
-                "🧯 <b>Выбор резервного администратора</b>\n\nВыберите активного участника группы:",
+                "🧯 <b>Выбор резервного администратора</b>\n\n"
+                "Выберите одного из действующих администраторов Telegram:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
             )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("reserve:set:"))
-    async def set_reserve(callback: CallbackQuery) -> None:
+    async def set_reserve(callback: CallbackQuery, bot: Bot) -> None:
         _, _, chat_raw, user_raw = (callback.data or "").split(":", 3)
         chat_id, user_id = int(chat_raw), int(user_raw)
+
+        try:
+            telegram_admins = await bot.get_chat_administrators(chat_id)
+        except Exception:
+            await callback.answer("Не удалось проверить администраторов Telegram.", show_alert=True)
+            return
+
+        selected = None
+        for member in telegram_admins:
+            if member.user.id != user_id:
+                continue
+            if member.status == "creator" or member.user.is_bot:
+                break
+            selected = member.user
+            break
+        if selected is None:
+            await callback.answer("Пользователь больше не является действующим администратором группы.", show_alert=True)
+            return
+
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
                     await callback.answer("Недостаточно прав.", show_alert=True)
                     return
-                member = (
-                    await session.execute(
-                        select(GroupMember.id).where(
-                            GroupMember.chat_id == chat_id,
-                            GroupMember.user_id == user_id,
-                            GroupMember.status == MemberStatus.member.value,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if member is None:
-                    await callback.answer("Участник больше не активен в группе.", show_alert=True)
-                    return
+
+                await upsert_user(session, selected)
+                await session.flush()
 
                 await session.execute(
                     update(AdminAssignment)
@@ -169,7 +182,7 @@ def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession
                     actor_user_id=callback.from_user.id,
                     target_type="user",
                     target_id=str(user_id),
-                    payload={},
+                    payload={"telegram_admin_verified": True},
                 )
         await _render(callback, session_factory, chat_id)
 
