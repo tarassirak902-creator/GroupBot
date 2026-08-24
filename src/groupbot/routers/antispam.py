@@ -6,16 +6,15 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.routers.antiflood import (
-    ACTION_LABELS,
-    DURATION_RE,
-    _duration_label,
-    _duration_seconds,
-    _window_label,
-    _window_seconds,
-)
+from groupbot.routers.antiflood import ACTION_LABELS, DURATION_RE, _duration_label, _duration_seconds, _window_label, _window_seconds
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
 from groupbot.services.audit import write_audit
+
+
+ANTISPAM_ACTIONS = {
+    "warning": ACTION_LABELS["warning"],
+    "mute": ACTION_LABELS["mute"],
+}
 
 
 class AntiSpamState(StatesGroup):
@@ -23,12 +22,6 @@ class AntiSpamState(StatesGroup):
     waiting_window = State()
     waiting_similarity = State()
     waiting_mute_duration = State()
-
-
-REPEAT_PRESETS = (2, 3, 4, 5, 10)
-WINDOW_PRESETS = ((10, "10 сек."), (30, "30 сек."), (60, "1 мин."), (300, "5 мин."), (900, "15 мин."), (3600, "1 ч."))
-SIMILARITY_PRESETS = (70, 80, 90, 95, 100)
-DURATION_PRESETS = (("15м", "15 мин."), ("30м", "30 мин."), ("1ч", "1 ч."), ("2ч", "2 ч."), ("1д", "1 день"), ("7д", "7 дней"))
 
 
 def _config(raw: dict | None) -> dict:
@@ -56,7 +49,7 @@ def _complete(cfg: dict) -> bool:
         similarity = int(cfg.get("similarity_percent"))
     except (TypeError, ValueError):
         return False
-    if repeats < 2 or window <= 0 or not 1 <= similarity <= 100 or cfg.get("action") not in ACTION_LABELS:
+    if repeats < 2 or window <= 0 or not 1 <= similarity <= 100 or cfg.get("action") not in ANTISPAM_ACTIONS:
         return False
     if cfg.get("action") == "mute" and _duration_seconds(str(cfg.get("mute_duration") or "")) is None:
         return False
@@ -67,13 +60,13 @@ def _keyboard(chat_id: int, cfg: dict) -> InlineKeyboardMarkup:
     ex = cfg["exclusions"]
     rows = [
         [InlineKeyboardButton(text="🟢 Выключить антиспам" if cfg["enabled"] else "⚪ Включить антиспам", callback_data=f"as:toggle:{chat_id}")],
-        [InlineKeyboardButton(text="🔁 Количество повторов", callback_data=f"as:pick:repeats:{chat_id}")],
-        [InlineKeyboardButton(text="⏱ Временной промежуток", callback_data=f"as:pick:window:{chat_id}")],
-        [InlineKeyboardButton(text="🎯 Сходство сообщений", callback_data=f"as:pick:similarity:{chat_id}")],
+        [InlineKeyboardButton(text="🔁 Количество повторов", callback_data=f"as:set_repeats:{chat_id}")],
+        [InlineKeyboardButton(text="⏱ Временной промежуток", callback_data=f"as:set_window:{chat_id}")],
+        [InlineKeyboardButton(text="🎯 Сходство сообщений", callback_data=f"as:set_similarity:{chat_id}")],
         [InlineKeyboardButton(text="⚖️ Действие", callback_data=f"as:action:{chat_id}")],
     ]
     if cfg.get("action") == "mute":
-        rows.append([InlineKeyboardButton(text="⏳ Срок мута", callback_data=f"as:pick:duration:{chat_id}")])
+        rows.append([InlineKeyboardButton(text="⏳ Срок мута", callback_data=f"as:set_duration:{chat_id}")])
     rows.extend([
         [InlineKeyboardButton(text=("✅ " if ex["admins"] else "❌ ") + "Исключать администрацию", callback_data=f"as:ex:{chat_id}:admins")],
         [InlineKeyboardButton(text=("✅ " if ex["vip"] else "❌ ") + "Исключать VIP", callback_data=f"as:ex:{chat_id}:vip")],
@@ -97,7 +90,7 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
             return
         settings = await _ensure_group_settings(session, chat_id)
         cfg = _config(settings.moderation_config)
-    action = ACTION_LABELS.get(str(cfg.get("action")), "не задано")
+    action = ANTISPAM_ACTIONS.get(str(cfg.get("action")), "не задано")
     duration = f"\nСрок мута: <b>{_duration_label(cfg.get('mute_duration'))}</b>" if cfg.get("action") == "mute" else ""
     ex = cfg["exclusions"]
     text = (
@@ -111,57 +104,31 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         f"• Администрация: <b>{'да' if ex['admins'] else 'нет'}</b>\n"
         f"• VIP: <b>{'да' if ex['vip'] else 'нет'}</b>\n"
         f"• Недотрога: <b>{'да' if ex['nedotroga'] else 'нет'}</b>\n\n"
-        "Сходство задаёт владелец: 100% означает только одинаковые нормализованные сообщения; меньшее значение позволяет ловить близкие варианты."
+        "При срабатывании первое сообщение цепочки остаётся, а повторные похожие сообщения пользователя удаляются. "
+        "Если выбрано предупреждение, дальше применяется общая шкала предупреждений Mimorus."
     )
     if callback.message is not None:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_keyboard(chat_id, cfg))
     await callback.answer()
 
 
-def _preset_keyboard(kind: str, chat_id: int) -> InlineKeyboardMarkup:
+def _choice_keyboard(prefix: str, chat_id: int, choices: list[tuple[str, str]], back: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    if kind == "repeats":
-        buttons = [InlineKeyboardButton(text=str(value), callback_data=f"as:set:repeats:{chat_id}:{value}") for value in REPEAT_PRESETS]
-        rows = [buttons[:3], buttons[3:]]
-    elif kind == "window":
-        buttons = [InlineKeyboardButton(text=label, callback_data=f"as:set:window:{chat_id}:{seconds}") for seconds, label in WINDOW_PRESETS]
-        rows = [buttons[:2], buttons[2:4], buttons[4:]]
-    elif kind == "similarity":
-        buttons = [InlineKeyboardButton(text=f"{value}%", callback_data=f"as:set:similarity:{chat_id}:{value}") for value in SIMILARITY_PRESETS]
-        rows = [buttons[:3], buttons[3:]]
-    elif kind == "duration":
-        buttons = [InlineKeyboardButton(text=label, callback_data=f"as:set:duration:{chat_id}:{token}") for token, label in DURATION_PRESETS]
-        rows = [buttons[:2], buttons[2:4], buttons[4:]]
-    rows.append([InlineKeyboardButton(text="✍️ Свой вариант", callback_data=f"as:custom:{kind}:{chat_id}")])
-    rows.append([InlineKeyboardButton(text="◀️ Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam")])
+    for index in range(0, len(choices), 2):
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data=f"as:quick:{prefix}:{chat_id}:{value}")
+            for label, value in choices[index:index + 2]
+        ])
+    rows.append([InlineKeyboardButton(text="✍️ Свой вариант", callback_data=f"as:custom:{prefix}:{chat_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ Антиспам", callback_data=back)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _preset_title(kind: str) -> str:
-    return {
-        "repeats": "🔁 <b>Количество повторов</b>\n\nВыберите, после скольких похожих сообщений должен срабатывать антиспам:",
-        "window": "⏱ <b>Временной промежуток</b>\n\nВыберите окно, в котором Mimorus будет искать похожие сообщения этого пользователя:",
-        "similarity": "🎯 <b>Сходство сообщений</b>\n\nВыберите минимальный процент сходства:",
-        "duration": "⏳ <b>Срок мута</b>\n\nВыберите срок наказания:",
-    }[kind]
-
-
-async def _delete_input(message: Message) -> None:
+async def _delete_user_input(message: Message) -> None:
     try:
         await message.delete()
     except Exception:
         pass
-
-
-async def _custom_saved(message: Message, text: str, chat_id: int) -> None:
-    await _delete_input(message)
-    await message.bot.send_message(
-        message.chat.id,
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔁 Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam")]
-        ]),
-    )
 
 
 def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
@@ -194,27 +161,63 @@ def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) ->
                 await write_audit(session, "group.antispam_toggled", chat_id=chat_id, actor_user_id=callback.from_user.id, target_type="group", target_id=str(chat_id), payload={"enabled": cfg["enabled"]})
         await _render(callback, session_factory, chat_id)
 
-    @router.callback_query(F.data.startswith("as:pick:"))
-    async def pick_value(callback: CallbackQuery, state: FSMContext) -> None:
-        parts = (callback.data or "").split(":", 3)
-        if len(parts) != 4 or parts[2] not in {"repeats", "window", "similarity", "duration"}:
-            return
-        kind = parts[2]
-        chat_id = int(parts[3])
-        await state.clear()
+    @router.callback_query(F.data.startswith("as:set_repeats:"))
+    async def set_repeats(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
         if callback.message is not None:
-            await callback.message.edit_text(_preset_title(kind), parse_mode="HTML", reply_markup=_preset_keyboard(kind, chat_id))
+            await callback.message.edit_text(
+                "🔁 <b>Количество повторов</b>\n\nВыберите количество похожих сообщений для срабатывания:",
+                parse_mode="HTML",
+                reply_markup=_choice_keyboard("repeat", chat_id, [(str(v), str(v)) for v in (2, 3, 4, 5, 10)], f"gctl:feature:{chat_id}:antispam"),
+            )
         await callback.answer()
 
-    @router.callback_query(F.data.startswith("as:set:"))
-    async def set_preset(callback: CallbackQuery) -> None:
+    @router.callback_query(F.data.startswith("as:set_window:"))
+    async def set_window(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        choices = [("30с", "30"), ("1м", "60"), ("5м", "300"), ("15м", "900"), ("1ч", "3600"), ("5ч", "18000"), ("15ч", "54000")]
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "⏱ <b>Временной промежуток</b>\n\nВыберите окно антиспама:",
+                parse_mode="HTML",
+                reply_markup=_choice_keyboard("window", chat_id, choices, f"gctl:feature:{chat_id}:antispam"),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("as:set_similarity:"))
+    async def set_similarity(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        choices = [(f"{v}%", str(v)) for v in (70, 80, 90, 95, 100)]
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "🎯 <b>Сходство сообщений</b>\n\nВыберите минимальный процент сходства:",
+                parse_mode="HTML",
+                reply_markup=_choice_keyboard("similarity", chat_id, choices, f"gctl:feature:{chat_id}:antispam"),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("as:set_duration:"))
+    async def set_duration(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").split(":", 2)[2])
+        choices = [("15м", "15м"), ("30м", "30м"), ("1ч", "1ч"), ("2ч", "2ч"), ("1д", "1д"), ("7д", "7д")]
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "⏳ <b>Срок мута</b>\n\nВыберите срок:",
+                parse_mode="HTML",
+                reply_markup=_choice_keyboard("duration", chat_id, choices, f"gctl:feature:{chat_id}:antispam"),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("as:quick:"))
+    async def quick_value(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 4)
         if len(parts) != 5:
             return
-        kind, chat_raw, value_raw = parts[2], parts[3], parts[4]
-        if kind not in {"repeats", "window", "similarity", "duration"}:
+        key, chat_raw, raw_value = parts[2], parts[3], parts[4]
+        try:
+            chat_id = int(chat_raw)
+        except ValueError:
             return
-        chat_id = int(chat_raw)
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
@@ -222,65 +225,75 @@ def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) ->
                     return
                 settings = await _ensure_group_settings(session, chat_id)
                 cfg = _config(settings.moderation_config)
-                if kind == "repeats":
-                    cfg["repeat_count"] = int(value_raw)
-                elif kind == "window":
-                    cfg["window_seconds"] = int(value_raw)
-                elif kind == "similarity":
-                    cfg["similarity_percent"] = int(value_raw)
-                else:
-                    if not DURATION_RE.match(value_raw) or _duration_seconds(value_raw) is None:
-                        await callback.answer("Некорректный срок.", show_alert=True)
+                if key == "repeat":
+                    value = int(raw_value)
+                    if value < 2:
                         return
-                    cfg["mute_duration"] = value_raw
+                    cfg["repeat_count"] = value
+                elif key == "window":
+                    value = int(raw_value)
+                    if value <= 0:
+                        return
+                    cfg["window_seconds"] = value
+                elif key == "similarity":
+                    value = int(raw_value)
+                    if not 1 <= value <= 100:
+                        return
+                    cfg["similarity_percent"] = value
+                elif key == "duration":
+                    if not DURATION_RE.match(raw_value) or _duration_seconds(raw_value) is None:
+                        return
+                    cfg["mute_duration"] = raw_value
+                else:
+                    return
                 await _save(session, chat_id, cfg)
         await _render(callback, session_factory, chat_id)
 
     @router.callback_query(F.data.startswith("as:custom:"))
     async def custom_value(callback: CallbackQuery, state: FSMContext) -> None:
         parts = (callback.data or "").split(":", 3)
-        if len(parts) != 4:
+        key = parts[2]
+        try:
+            chat_id = int(parts[3])
+        except (ValueError, IndexError):
             return
-        kind = parts[2]
-        chat_id = int(parts[3])
         state_map = {
-            "repeats": AntiSpamState.waiting_repeat_count,
+            "repeat": AntiSpamState.waiting_repeat_count,
             "window": AntiSpamState.waiting_window,
             "similarity": AntiSpamState.waiting_similarity,
             "duration": AntiSpamState.waiting_mute_duration,
         }
-        state_name = state_map.get(kind)
-        if state_name is None:
+        if key not in state_map:
             return
-        await state.set_state(state_name)
-        await state.update_data(as_chat_id=chat_id)
-        prompt = {
-            "repeats": "✍️ Отправьте своё количество повторов. Минимум 2. После сохранения ваше сообщение будет удалено.",
-            "window": "✍️ Отправьте свой промежуток, например 45с, 3м или 2ч. После сохранения ваше сообщение будет удалено.",
-            "similarity": "✍️ Отправьте свой процент сходства от 1 до 100. После сохранения ваше сообщение будет удалено.",
-            "duration": "✍️ Отправьте свой срок мута, например 45м, 3ч или 5д. После сохранения ваше сообщение будет удалено.",
-        }[kind]
+        await state.set_state(state_map[key])
+        await state.update_data(as_chat_id=chat_id, as_key=key)
+        prompts = {
+            "repeat": "Отправьте своё количество повторов. Минимум 2.",
+            "window": "Отправьте свой промежуток, например <code>45с</code>, <code>20м</code> или <code>3ч</code>.",
+            "similarity": "Отправьте свой процент сходства от <code>1</code> до <code>100</code>.",
+            "duration": "Отправьте свой срок мута, например <code>45м</code>, <code>3ч</code> или <code>2д</code>.",
+        }
         if callback.message is not None:
-            await callback.message.edit_text(
-                prompt,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="◀️ К вариантам", callback_data=f"as:pick:{kind}:{chat_id}")],
-                    [InlineKeyboardButton(text="◀️ Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam")],
-                ]),
-            )
+            await callback.message.answer(prompts[key], parse_mode="HTML")
         await callback.answer()
 
     @router.message(AntiSpamState.waiting_repeat_count, F.chat.type == "private")
-    async def save_custom_repeats(message: Message, state: FSMContext) -> None:
+    @router.message(AntiSpamState.waiting_similarity, F.chat.type == "private")
+    async def save_number(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        key = str(data["as_key"])
+        chat_id = int(data["as_chat_id"])
         try:
             value = int((message.text or "").strip())
-            if value < 2:
-                raise ValueError
         except ValueError:
-            await _delete_input(message)
-            await message.bot.send_message(message.chat.id, "Количество повторов должно быть целым числом не меньше 2.")
+            await message.answer("Нужно целое число.")
             return
-        chat_id = int((await state.get_data())["as_chat_id"])
+        if key == "repeat" and value < 2:
+            await message.answer("Количество повторов должно быть не меньше 2.")
+            return
+        if key == "similarity" and not 1 <= value <= 100:
+            await message.answer("Процент сходства должен быть от 1 до 100.")
+            return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, message.from_user.id):
@@ -288,17 +301,17 @@ def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) ->
                     return
                 settings = await _ensure_group_settings(session, chat_id)
                 cfg = _config(settings.moderation_config)
-                cfg["repeat_count"] = value
+                cfg["repeat_count" if key == "repeat" else "similarity_percent"] = value
                 await _save(session, chat_id, cfg)
         await state.clear()
-        await _custom_saved(message, f"✅ Количество повторов сохранено: {value}.", chat_id)
+        await _delete_user_input(message)
+        await message.bot.send_message(message.chat.id, "✅ Настройка сохранена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam")]]))
 
     @router.message(AntiSpamState.waiting_window, F.chat.type == "private")
-    async def save_custom_window(message: Message, state: FSMContext) -> None:
+    async def save_window(message: Message, state: FSMContext) -> None:
         seconds = _window_seconds(message.text or "")
         if seconds is None:
-            await _delete_input(message)
-            await message.bot.send_message(message.chat.id, "Не удалось определить промежуток. Примеры: 45с, 3м, 2ч.")
+            await message.answer("Не удалось определить промежуток. Примеры: 45с, 20м, 3ч.")
             return
         chat_id = int((await state.get_data())["as_chat_id"])
         async with session_factory() as session:
@@ -311,17 +324,14 @@ def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) ->
                 cfg["window_seconds"] = seconds
                 await _save(session, chat_id, cfg)
         await state.clear()
-        await _custom_saved(message, f"✅ Временной промежуток сохранён: {_window_label(seconds)}", chat_id)
+        await _delete_user_input(message)
+        await message.bot.send_message(message.chat.id, "✅ Временной промежуток сохранён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam")]]))
 
-    @router.message(AntiSpamState.waiting_similarity, F.chat.type == "private")
-    async def save_custom_similarity(message: Message, state: FSMContext) -> None:
-        try:
-            value = int((message.text or "").strip().rstrip("%"))
-            if not 1 <= value <= 100:
-                raise ValueError
-        except ValueError:
-            await _delete_input(message)
-            await message.bot.send_message(message.chat.id, "Процент сходства должен быть целым числом от 1 до 100.")
+    @router.message(AntiSpamState.waiting_mute_duration, F.chat.type == "private")
+    async def save_duration(message: Message, state: FSMContext) -> None:
+        token = (message.text or "").strip().casefold()
+        if not DURATION_RE.match(token) or _duration_seconds(token) is None:
+            await message.answer("Не удалось определить срок. Примеры: 45м, 3ч, 2д.")
             return
         chat_id = int((await state.get_data())["as_chat_id"])
         async with session_factory() as session:
@@ -331,18 +341,25 @@ def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) ->
                     return
                 settings = await _ensure_group_settings(session, chat_id)
                 cfg = _config(settings.moderation_config)
-                cfg["similarity_percent"] = value
+                cfg["mute_duration"] = token
                 await _save(session, chat_id, cfg)
         await state.clear()
-        await _custom_saved(message, f"✅ Сходство сообщений сохранено: {value}%.", chat_id)
+        await _delete_user_input(message)
+        await message.bot.send_message(message.chat.id, "✅ Срок мута сохранён.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam")]]))
 
     @router.callback_query(F.data.startswith("as:action:"))
     async def choose_action(callback: CallbackQuery) -> None:
         chat_id = int((callback.data or "").split(":", 2)[2])
-        rows = [[InlineKeyboardButton(text=label, callback_data=f"as:set_action:{chat_id}:{key}")] for key, label in ACTION_LABELS.items()]
+        rows = [[InlineKeyboardButton(text=label, callback_data=f"as:set_action:{chat_id}:{key}")] for key, label in ANTISPAM_ACTIONS.items()]
         rows.append([InlineKeyboardButton(text="◀️ Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam")])
         if callback.message is not None:
-            await callback.message.edit_text("⚖️ <b>Действие антиспама</b>\n\nВыберите наказание:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            await callback.message.edit_text(
+                "⚖️ <b>Действие антиспама</b>\n\n"
+                "⚠️ Пред — выдаёт предупреждение и использует общую шкалу 1/5 → 5/5.\n"
+                "🔇 Мут — сразу выдаёт мут на выбранный срок.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
         await callback.answer()
 
     @router.callback_query(F.data.startswith("as:set_action:"))
@@ -350,7 +367,7 @@ def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) ->
         parts = (callback.data or "").split(":", 3)
         chat_id = int(parts[2])
         action = parts[3]
-        if action not in ACTION_LABELS:
+        if action not in ANTISPAM_ACTIONS:
             return
         async with session_factory() as session:
             async with session.begin():
@@ -364,26 +381,6 @@ def create_antispam_router(session_factory: async_sessionmaker[AsyncSession]) ->
                     cfg["mute_duration"] = None
                 await _save(session, chat_id, cfg)
         await _render(callback, session_factory, chat_id)
-
-    @router.message(AntiSpamState.waiting_mute_duration, F.chat.type == "private")
-    async def save_custom_duration(message: Message, state: FSMContext) -> None:
-        token = (message.text or "").strip().casefold()
-        if not DURATION_RE.match(token) or _duration_seconds(token) is None:
-            await _delete_input(message)
-            await message.bot.send_message(message.chat.id, "Не удалось определить срок. Примеры: 45м, 3ч, 5д.")
-            return
-        chat_id = int((await state.get_data())["as_chat_id"])
-        async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, message.from_user.id):
-                    await state.clear()
-                    return
-                settings = await _ensure_group_settings(session, chat_id)
-                cfg = _config(settings.moderation_config)
-                cfg["mute_duration"] = token
-                await _save(session, chat_id, cfg)
-        await state.clear()
-        await _custom_saved(message, f"✅ Срок мута сохранён: {_duration_label(token)}", chat_id)
 
     @router.callback_query(F.data.startswith("as:ex:"))
     async def toggle_exclusion(callback: CallbackQuery) -> None:
