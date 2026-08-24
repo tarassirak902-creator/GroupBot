@@ -78,9 +78,15 @@ async def _render_list(
             await session.execute(
                 select(
                     Network.id,
-                    func.count(NetworkGroup.id).label("groups_count"),
+                    func.count(GroupOwner.id).label("groups_count"),
                 )
                 .outerjoin(NetworkGroup, NetworkGroup.network_id == Network.id)
+                .outerjoin(
+                    GroupOwner,
+                    (GroupOwner.chat_id == NetworkGroup.chat_id)
+                    & (GroupOwner.user_id == owner_id)
+                    & (GroupOwner.is_current.is_(True)),
+                )
                 .where(Network.owner_user_id == owner_id)
                 .group_by(Network.id)
                 .order_by(Network.id.asc())
@@ -133,6 +139,12 @@ async def _render_card(
             await session.execute(
                 select(Group.chat_id, Group.title)
                 .join(NetworkGroup, NetworkGroup.chat_id == Group.chat_id)
+                .join(
+                    GroupOwner,
+                    (GroupOwner.chat_id == NetworkGroup.chat_id)
+                    & (GroupOwner.user_id == owner_id)
+                    & (GroupOwner.is_current.is_(True)),
+                )
                 .where(NetworkGroup.network_id == network_id)
                 .order_by(NetworkGroup.added_at.asc(), Group.title.asc().nullslast())
             )
