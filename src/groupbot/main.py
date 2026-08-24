@@ -35,6 +35,7 @@ from groupbot.routers.creator_identity_privacy import create_creator_identity_pr
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
 from groupbot.routers.entry_protection import create_entry_protection_router
+from groupbot.routers.group_analytics import create_group_analytics_router
 from groupbot.routers.group_commands import create_group_commands_router
 from groupbot.routers.group_control import create_group_control_router
 from groupbot.routers.group_control_role_actions import create_group_control_role_actions_router
@@ -105,6 +106,7 @@ async def main() -> None:
     dp.include_router(create_moderation_release_router(session_factory))
     dp.include_router(create_manual_moderation_router(session_factory))
     dp.include_router(create_group_profile_stats_router(session_factory))
+    dp.include_router(create_group_analytics_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
     dp.include_router(create_special_status_members_router(session_factory))
     dp.include_router(create_admin_hierarchy_router(session_factory))
