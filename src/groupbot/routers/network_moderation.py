@@ -5,7 +5,7 @@ from aiogram.types import Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import Group, GroupSettings, GroupStatus, NetworkAdmin, User
+from groupbot.models import Group, GroupOwner, GroupSettings, GroupStatus, NetworkAdmin, User
 from groupbot.moderation_models import ModerationAction
 from groupbot.network_models import Network, NetworkGroup
 from groupbot.routers.user_display import clickable_user_display
@@ -31,6 +31,12 @@ async def _network_for_chat(session: AsyncSession, chat_id: int) -> Network | No
         await session.execute(
             select(Network)
             .join(NetworkGroup, NetworkGroup.network_id == Network.id)
+            .join(
+                GroupOwner,
+                (GroupOwner.chat_id == NetworkGroup.chat_id)
+                & (GroupOwner.user_id == Network.owner_user_id)
+                & (GroupOwner.is_current.is_(True)),
+            )
             .where(NetworkGroup.chat_id == chat_id)
             .order_by(Network.id.asc())
         )
@@ -38,14 +44,20 @@ async def _network_for_chat(session: AsyncSession, chat_id: int) -> Network | No
     return rows[0] if len(rows) == 1 else None
 
 
-async def _network_group_ids(session: AsyncSession, network_id: int) -> list[int]:
+async def _network_group_ids(session: AsyncSession, network: Network) -> list[int]:
     return list(
         (
             await session.execute(
                 select(NetworkGroup.chat_id)
                 .join(Group, Group.chat_id == NetworkGroup.chat_id)
+                .join(
+                    GroupOwner,
+                    (GroupOwner.chat_id == NetworkGroup.chat_id)
+                    & (GroupOwner.user_id == network.owner_user_id)
+                    & (GroupOwner.is_current.is_(True)),
+                )
                 .where(
-                    NetworkGroup.network_id == network_id,
+                    NetworkGroup.network_id == network.id,
                     Group.status == GroupStatus.active.value,
                 )
                 .order_by(NetworkGroup.added_at.asc())
@@ -228,7 +240,7 @@ def create_network_moderation_router(
                 if count == 0:
                     await message.reply("Эта группа не добавлена в сетку.")
                 else:
-                    await message.reply("Не удалось однозначно определить сетку этой группы.")
+                    await message.reply("Эта группа не входит в действующую сетку текущего владельца или сетка определена неоднозначно.")
                 return
             permission = "unban" if command == "сразбан" else "ban"
             if not await _network_permission(
@@ -239,7 +251,7 @@ def create_network_moderation_router(
             ):
                 await message.reply("Недостаточно сетевых прав Mimorus.")
                 return
-            group_ids = await _network_group_ids(session, network.id)
+            group_ids = await _network_group_ids(session, network)
 
         if command == "сбанлист":
             await _render_network_banlist(message, session_factory, network, group_ids)
