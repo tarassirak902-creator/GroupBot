@@ -25,7 +25,7 @@ from groupbot.routers.manual_moderation import (
 )
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import is_group_owner
-from groupbot.services.subscriptions import active_subscription_for_owner
+from groupbot.services.subscriptions import active_subscription_for_owner, effective_limit_for_owner
 from groupbot.services.users import upsert_user
 
 
@@ -197,20 +197,8 @@ async def _owner_access(session: AsyncSession, chat_id: int, user_id: int) -> bo
     return await active_subscription_for_owner(session, user_id) is not None
 
 
-async def _trial_rank_limit(session: AsyncSession, owner_id: int) -> int | None:
-    row = await active_subscription_for_owner(session, owner_id)
-    if row is None:
-        return None
-    if isinstance(row, tuple):
-        subscription, tariff = row
-    else:
-        subscription = row
-        tariff = (
-            await session.execute(select(Tariff).where(Tariff.id == subscription.tariff_id))
-        ).scalar_one_or_none()
-    if tariff is not None and tariff.code == "TEST":
-        return 3
-    return None
+async def _rank_limit(session: AsyncSession, owner_id: int) -> int | None:
+    return await effective_limit_for_owner(session, owner_id, "admin_ranks")
 
 
 def create_group_control_router(
@@ -504,8 +492,8 @@ def create_group_control_router(
             rows = (
                 await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))
             ).scalars().all()
-            limit = await _trial_rank_limit(session, callback.from_user.id)
-        suffix = f"\nЛимит TEST: <b>{limit}</b> ранга." if limit is not None else ""
+            limit = await _rank_limit(session, callback.from_user.id)
+        suffix = f"\nЛимит тарифа с дополнениями: <b>{limit}</b> ранга." if limit is not None else ""
         if callback.message is not None:
             await callback.message.edit_text(
                 "👑 <b>Ранги администрации</b>\n\n"
@@ -523,12 +511,12 @@ def create_group_control_router(
             if not await _owner_access(session, chat_id, callback.from_user.id):
                 await callback.answer("Недостаточно прав.", show_alert=True)
                 return
-            limit = await _trial_rank_limit(session, callback.from_user.id)
+            limit = await _rank_limit(session, callback.from_user.id)
             count = (
                 await session.execute(select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id))
             ).scalar_one()
         if limit is not None and count >= limit:
-            await callback.answer(f"На TEST доступно до {limit} админ-рангов.", show_alert=True)
+            await callback.answer(f"Достигнут лимит административных рангов: {limit}.", show_alert=True)
             return
         await state.set_state(AdminRoleState.waiting_name)
         await state.update_data(chat_id=chat_id)
@@ -552,6 +540,14 @@ def create_group_control_router(
                 if not await _owner_access(session, chat_id, message.from_user.id):
                     await state.clear()
                     await message.answer("Недостаточно прав.")
+                    return
+                limit = await _rank_limit(session, message.from_user.id)
+                count = (
+                    await session.execute(select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id))
+                ).scalar_one()
+                if limit is not None and count >= limit:
+                    await state.clear()
+                    await message.answer(f"Достигнут лимит административных рангов: {limit}.")
                     return
                 exists = (
                     await session.execute(select(AdminRole.id).where(AdminRole.chat_id == chat_id, AdminRole.name == name))
