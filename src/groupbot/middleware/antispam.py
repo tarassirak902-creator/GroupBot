@@ -52,11 +52,11 @@ class AntiSpamMiddleware(BaseMiddleware):
         if not isinstance(bot, Bot):
             return await handler(event, data)
 
-        current_text = None
-        action = None
-        mute_duration = None
+        action: str | None = None
+        mute_duration: str | None = None
         should_trigger = False
-        cutoff = None
+        cutoff: datetime | None = None
+        repeated_message_ids: list[int] = []
 
         async with self.session_factory() as session:
             if not await _group_ready(session, event.chat.id):
@@ -78,7 +78,7 @@ class AntiSpamMiddleware(BaseMiddleware):
                 return await handler(event, data)
             action = str(cfg.get("action") or "")
             mute_duration = str(cfg.get("mute_duration") or "") or None
-            if repeat_count < 2 or window_seconds <= 0 or not 1 <= similarity_percent <= 100 or action not in {"warning", "mute", "ban"}:
+            if repeat_count < 2 or window_seconds <= 0 or not 1 <= similarity_percent <= 100 or action not in {"warning", "mute"}:
                 return await handler(event, data)
             if action == "mute" and not mute_duration:
                 return await handler(event, data)
@@ -104,27 +104,31 @@ class AntiSpamMiddleware(BaseMiddleware):
                 return await handler(event, data)
 
             cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
-            previous = list((await session.execute(
-                select(ObservedMessage.normalized_text).where(
+            candidates = list((await session.execute(
+                select(
+                    ObservedMessage.message_id,
+                    ObservedMessage.normalized_text,
+                    ObservedMessage.sent_at,
+                ).where(
                     ObservedMessage.chat_id == event.chat.id,
                     ObservedMessage.user_id == event.from_user.id,
                     ObservedMessage.sent_at >= cutoff,
-                    ObservedMessage.message_id != event.message_id,
                     ObservedMessage.normalized_text.is_not(None),
-                ).order_by(ObservedMessage.sent_at.desc()).limit(100)
-            )).scalars().all())
+                    ObservedMessage.deleted_at.is_(None),
+                ).order_by(ObservedMessage.sent_at.asc(), ObservedMessage.message_id.asc()).limit(200)
+            )).all())
 
             threshold = similarity_percent / 100.0
-            similar_count = 1
-            for candidate in previous:
-                if not candidate:
-                    continue
-                if SequenceMatcher(None, current_text, candidate).ratio() >= threshold:
-                    similar_count += 1
-                    if similar_count >= repeat_count:
-                        break
-            if similar_count < repeat_count:
+            similar_rows = [
+                row for row in candidates
+                if row.normalized_text
+                and SequenceMatcher(None, current_text, row.normalized_text).ratio() >= threshold
+            ]
+            if len(similar_rows) < repeat_count:
                 return await handler(event, data)
+
+            # The earliest matching message is the original. Every later match is a repeat.
+            repeated_message_ids = [int(row.message_id) for row in similar_rows[1:]]
 
             recent = (
                 await session.execute(
@@ -140,6 +144,30 @@ class AntiSpamMiddleware(BaseMiddleware):
             should_trigger = recent is None
 
         if should_trigger and action is not None:
+            deleted_ids: list[int] = []
+            for message_id in repeated_message_ids:
+                try:
+                    await bot.delete_message(event.chat.id, message_id)
+                    deleted_ids.append(message_id)
+                except Exception:
+                    logger.info(
+                        "Anti-spam could not delete chat_id=%s message_id=%s",
+                        event.chat.id,
+                        message_id,
+                    )
+
+            if deleted_ids:
+                async with self.session_factory() as session:
+                    async with session.begin():
+                        await session.execute(
+                            update(ObservedMessage)
+                            .where(
+                                ObservedMessage.chat_id == event.chat.id,
+                                ObservedMessage.message_id.in_(deleted_ids),
+                            )
+                            .values(deleted_at=datetime.now(timezone.utc))
+                        )
+
             try:
                 bot_user = await bot.me()
                 text = await _execute_action(
@@ -165,8 +193,20 @@ class AntiSpamMiddleware(BaseMiddleware):
                             )
                         ).scalar_one_or_none()
                         if latest_id is not None:
-                            await session.execute(update(ModerationAction).where(ModerationAction.id == latest_id).values(source="antispam"))
-                await bot.send_message(event.chat.id, text, parse_mode="HTML", disable_web_page_preview=True)
+                            await session.execute(
+                                update(ModerationAction)
+                                .where(ModerationAction.id == latest_id)
+                                .values(source="antispam")
+                            )
+                cleanup_text = ""
+                if repeated_message_ids:
+                    cleanup_text = f"\n\n🧹 Повторные сообщения: удалено <b>{len(deleted_ids)}/{len(repeated_message_ids)}</b>."
+                await bot.send_message(
+                    event.chat.id,
+                    text + cleanup_text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
             except Exception:
                 logger.exception("Anti-spam action failed for chat_id=%s user_id=%s", event.chat.id, event.from_user.id)
 
