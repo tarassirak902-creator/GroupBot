@@ -54,7 +54,7 @@ class AntiSpamMiddleware(BaseMiddleware):
 
         action: str | None = None
         mute_duration: str | None = None
-        should_trigger = False
+        should_punish = False
         cutoff: datetime | None = None
         repeated_message_ids: list[int] = []
 
@@ -141,33 +141,35 @@ class AntiSpamMiddleware(BaseMiddleware):
                     ).order_by(ModerationAction.id.desc()).limit(1)
                 )
             ).scalar_one_or_none()
-            should_trigger = recent is None
+            should_punish = recent is None
 
-        if should_trigger and action is not None:
-            deleted_ids: list[int] = []
-            for message_id in repeated_message_ids:
-                try:
-                    await bot.delete_message(event.chat.id, message_id)
-                    deleted_ids.append(message_id)
-                except Exception:
-                    logger.info(
-                        "Anti-spam could not delete chat_id=%s message_id=%s",
-                        event.chat.id,
-                        message_id,
+        # Cleanup is independent from punishment cooldown: every newly detected
+        # repeat should disappear even when a punishment was already issued.
+        deleted_ids: list[int] = []
+        for message_id in repeated_message_ids:
+            try:
+                await bot.delete_message(event.chat.id, message_id)
+                deleted_ids.append(message_id)
+            except Exception:
+                logger.info(
+                    "Anti-spam could not delete chat_id=%s message_id=%s",
+                    event.chat.id,
+                    message_id,
+                )
+
+        if deleted_ids:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    await session.execute(
+                        update(ObservedMessage)
+                        .where(
+                            ObservedMessage.chat_id == event.chat.id,
+                            ObservedMessage.message_id.in_(deleted_ids),
+                        )
+                        .values(deleted_at=datetime.now(timezone.utc))
                     )
 
-            if deleted_ids:
-                async with self.session_factory() as session:
-                    async with session.begin():
-                        await session.execute(
-                            update(ObservedMessage)
-                            .where(
-                                ObservedMessage.chat_id == event.chat.id,
-                                ObservedMessage.message_id.in_(deleted_ids),
-                            )
-                            .values(deleted_at=datetime.now(timezone.utc))
-                        )
-
+        if should_punish and action is not None:
             try:
                 bot_user = await bot.me()
                 text = await _execute_action(
