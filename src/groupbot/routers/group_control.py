@@ -63,10 +63,7 @@ def _moderation_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⚖️ Причины наказаний", callback_data=f"gctl:reasons:{chat_id}")],
             [InlineKeyboardButton(text="🎚 Режим админ-команд", callback_data=f"gctl:mode:{chat_id}")],
             [InlineKeyboardButton(text="📈 Шкала предупреждений", callback_data=f"gctl:warnings:{chat_id}")],
-            [
-                InlineKeyboardButton(text="🚫 Запрещённые слова", callback_data=f"gctl:feature:{chat_id}:words"),
-                InlineKeyboardButton(text="📝 Запрещённые фразы", callback_data=f"gctl:feature:{chat_id}:phrases"),
-            ],
+            [InlineKeyboardButton(text="🚫 Запрещённые слова/фразы", callback_data=f"gctl:content_filters:{chat_id}")],
             [
                 InlineKeyboardButton(text="💬 Антифлуд", callback_data=f"gctl:feature:{chat_id}:antiflood"),
                 InlineKeyboardButton(text="🔁 Антиспам", callback_data=f"gctl:feature:{chat_id}:antispam"),
@@ -270,6 +267,31 @@ def create_group_control_router(
                 "Владелец может создавать собственные ранги и отдельно задавать доступные действия.",
                 parse_mode="HTML",
                 reply_markup=_administration_keyboard(chat_id),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("gctl:content_filters:"))
+    async def content_filters(callback: CallbackQuery) -> None:
+        try:
+            chat_id = int((callback.data or "").split(":", 2)[2])
+        except (ValueError, IndexError):
+            return
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "🚫 <b>Запрещённые слова/фразы</b>\n\n"
+                "Выберите список, который хотите посмотреть или изменить.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="🚫 Запрещённые слова", callback_data=f"gctl:feature:{chat_id}:words")],
+                        [InlineKeyboardButton(text="📝 Запрещённые фразы", callback_data=f"gctl:feature:{chat_id}:phrases")],
+                        [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")],
+                    ]
+                ),
             )
         await callback.answer()
 
