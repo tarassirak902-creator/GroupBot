@@ -77,7 +77,7 @@ class AntiFloodMiddleware(BaseMiddleware):
                 return await handler(event, data)
             action = str(cfg.get("action") or "")
             mute_duration = str(cfg.get("mute_duration") or "") or None
-            if message_limit <= 0 or window_seconds <= 0 or action not in {"warning", "mute", "ban"}:
+            if message_limit < 2 or window_seconds <= 0 or action not in {"warning", "mute"}:
                 return await handler(event, data)
             if action == "mute" and not mute_duration:
                 return await handler(event, data)
