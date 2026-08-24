@@ -19,6 +19,7 @@ from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
 from groupbot.routers import ban_cleanup as ban_cleanup_module
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
+from groupbot.routers import entry_protection as entry_protection_module
 from groupbot.routers import manual_moderation as manual_moderation_module
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
@@ -48,6 +49,7 @@ from groupbot.routers.protection_schedule import create_protection_schedule_rout
 from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.default_punishment_reasons import configured_reasons_with_defaults
+from groupbot.services.entry_schedule_adapter import install_entry_schedule
 from groupbot.services.moderation_notifications import unified_execute_action
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 
@@ -75,6 +77,10 @@ async def main() -> None:
 
     manual_moderation_module._configured_reasons = configured_reasons_with_defaults
     ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
+
+    # Make captcha and anti-raid use the same temporary schedule policy as the
+    # message protection middleware without changing their ordinary settings.
+    install_entry_schedule(entry_protection_module)
 
     bot = Bot(settings.bot_token)
     session_factory = create_session_factory(settings)
