@@ -107,13 +107,13 @@ class AntiSpamMiddleware(BaseMiddleware):
                     ObservedMessage.message_id,
                     ObservedMessage.normalized_text,
                     ObservedMessage.sent_at,
+                    ObservedMessage.deleted_at,
                 ).where(
                     ObservedMessage.chat_id == event.chat.id,
                     ObservedMessage.user_id == event.from_user.id,
                     ObservedMessage.sent_at >= cutoff,
                     ObservedMessage.normalized_text.is_not(None),
-                    ObservedMessage.deleted_at.is_(None),
-                ).order_by(ObservedMessage.sent_at.asc(), ObservedMessage.message_id.asc()).limit(200)
+                ).order_by(ObservedMessage.sent_at.asc(), ObservedMessage.message_id.asc()).limit(500)
             )).all())
 
             threshold = similarity_percent / 100.0
@@ -125,11 +125,20 @@ class AntiSpamMiddleware(BaseMiddleware):
             if len(similar_rows) < repeat_count:
                 return await handler(event, data)
 
-            # Keep the earliest matching message as the original. Every later
-            # match belongs to this violation batch and is removed. Because
-            # removed rows are excluded on the next update, a fresh batch of
-            # repeats can trigger another punishment inside the same time window.
-            repeated_message_ids = [int(row.message_id) for row in similar_rows[1:]]
+            # Once the configured threshold is reached, every next similar
+            # message is a new violation. Rows already deleted by Mimorus stay
+            # in the time-window history for counting, but are never deleted
+            # twice. The earliest matching message remains the original.
+            repeated_message_ids = [
+                int(row.message_id)
+                for row in similar_rows[1:]
+                if row.deleted_at is None
+            ]
+
+            # A threshold hit must include the current message as a live repeat.
+            # This prevents an unrelated update from re-punishing an old chain.
+            if event.message_id not in repeated_message_ids:
+                return await handler(event, data)
 
         deleted_ids: list[int] = []
         for message_id in repeated_message_ids:
