@@ -7,13 +7,11 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import GroupSettings, Tariff
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
 from groupbot.services.audit import write_audit
-from groupbot.services.subscriptions import active_subscription_for_owner
+from groupbot.services.subscriptions import effective_limit_for_owner
 
 
 ACTION_TITLES = {
@@ -74,16 +72,8 @@ def _keyboard(chat_id: int, reasons: dict[str, list[dict]]) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _trial_reason_limit(session: AsyncSession, owner_id: int) -> int | None:
-    subscription = await active_subscription_for_owner(session, owner_id)
-    if subscription is None:
-        return None
-    tariff = (
-        await session.execute(select(Tariff).where(Tariff.id == subscription.tariff_id))
-    ).scalar_one_or_none()
-    if tariff is not None and tariff.code == "TEST":
-        return 3
-    return None
+async def _reason_limit(session: AsyncSession, owner_id: int) -> int | None:
+    return await effective_limit_for_owner(session, owner_id, "custom_reasons")
 
 
 async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession], chat_id: int) -> None:
@@ -93,7 +83,7 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
             return
         settings = await _ensure_group_settings(session, chat_id)
         reasons = _reason_config(settings.moderation_config)
-        limit = await _trial_reason_limit(session, callback.from_user.id)
+        limit = await _reason_limit(session, callback.from_user.id)
     total = sum(len(items) for items in reasons.values())
     lines = [
         "⚖️ <b>Причины наказаний</b>",
@@ -112,7 +102,7 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
                 lines.append(f"• {escape(str(item.get('text') or 'Причина'))}{suffix}")
         lines.append("")
     if limit is not None:
-        lines.append(f"TEST: <b>{total}/{limit}</b> собственных причин.")
+        lines.append(f"Лимит тарифа с дополнениями: <b>{total}/{limit}</b> собственных причин.")
     if callback.message is not None:
         await callback.message.edit_text(
             "\n".join(lines),
@@ -150,10 +140,10 @@ def create_punishment_reasons_router(session_factory: async_sessionmaker[AsyncSe
                 return
             settings = await _ensure_group_settings(session, chat_id)
             reasons = _reason_config(settings.moderation_config)
-            limit = await _trial_reason_limit(session, callback.from_user.id)
+            limit = await _reason_limit(session, callback.from_user.id)
             total = sum(len(items) for items in reasons.values())
         if limit is not None and total >= limit:
-            await callback.answer(f"На TEST доступно до {limit} собственных причин.", show_alert=True)
+            await callback.answer(f"Достигнут лимит собственных причин: {limit}.", show_alert=True)
             return
         await state.set_state(ReasonState.waiting_text)
         await state.update_data(reason_chat_id=chat_id, reason_action=action)
@@ -183,8 +173,11 @@ def create_punishment_reasons_router(session_factory: async_sessionmaker[AsyncSe
                 parse_mode="HTML",
             )
             return
-        await _save_reason(session_factory, chat_id, message.from_user.id, action, text, None)
+        saved = await _save_reason(session_factory, chat_id, message.from_user.id, action, text, None)
         await state.clear()
+        if not saved:
+            await message.answer("Достигнут лимит собственных причин для текущего тарифа.")
+            return
         await message.answer(
             f"✅ Причина «{text}» сохранена.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -204,8 +197,11 @@ def create_punishment_reasons_router(session_factory: async_sessionmaker[AsyncSe
         data = await state.get_data()
         chat_id = int(data["reason_chat_id"])
         text = str(data["reason_text"])
-        await _save_reason(session_factory, chat_id, message.from_user.id, "mute", text, token)
+        saved = await _save_reason(session_factory, chat_id, message.from_user.id, "mute", text, token)
         await state.clear()
+        if not saved:
+            await message.answer("Достигнут лимит собственных причин для текущего тарифа.")
+            return
         await message.answer(
             f"✅ Причина «{text}» сохранена со сроком {_duration_label(token)}.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -259,14 +255,18 @@ async def _save_reason(
     action: str,
     text: str,
     duration: str | None,
-) -> None:
+) -> bool:
     async with session_factory() as session:
         async with session.begin():
             if not await _owner_access(session, chat_id, actor_user_id):
-                return
+                return False
             settings = await _ensure_group_settings(session, chat_id)
             config = dict(settings.moderation_config or {})
             reasons = _reason_config(config)
+            total = sum(len(items) for items in reasons.values())
+            limit = await _reason_limit(session, actor_user_id)
+            if limit is not None and total >= limit:
+                return False
             reasons[action].append({"text": text, "duration": duration})
             config["punishment_reasons"] = reasons
             settings.moderation_config = config
@@ -279,3 +279,4 @@ async def _save_reason(
                 target_id=str(chat_id),
                 payload={"action": action, "text": text, "duration": duration},
             )
+            return True
