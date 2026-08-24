@@ -15,6 +15,7 @@ from groupbot.models import GroupSettings
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.manual_moderation import _execute_action, _group_ready
 from groupbot.services.protected_members import is_protected_member
+from groupbot.services.protection_schedule import protection_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class AntiSpamMiddleware(BaseMiddleware):
             if not await _group_ready(session, event.chat.id): return await handler(event, data)
             raw = (await session.execute(select(GroupSettings.moderation_config).where(GroupSettings.chat_id == event.chat.id))).scalar_one_or_none() or {}
             cfg = dict(raw.get("antispam") or {})
-            if not cfg.get("enabled"): return await handler(event, data)
+            if not protection_enabled(raw, "antispam", bool(cfg.get("enabled"))): return await handler(event, data)
             try:
                 repeat_count = int(cfg.get("repeat_count")); window_seconds = int(cfg.get("window_seconds")); similarity_percent = int(cfg.get("similarity_percent"))
             except (TypeError, ValueError): return await handler(event, data)
