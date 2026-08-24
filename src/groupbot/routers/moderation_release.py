@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import User
 from groupbot.moderation_models import ModerationAction
-from groupbot.routers.manual_moderation import _group_ready, _unmuted_permissions
+from groupbot.routers.manual_moderation import _group_ready, _unmuted_permissions, _warning_limit
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import has_permission
@@ -128,6 +128,7 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
             if not await has_permission(session, message.chat.id, message.from_user.id, permission):
                 await message.reply("Недостаточно прав Mimorus для этой команды.")
                 return
+            limit = await _warning_limit(session, message.chat.id)
             async with session.begin_nested():
                 target = await _resolve_target(session, message=message, token=token)
             if target is None:
@@ -150,7 +151,7 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="warning")
                         await write_audit(session, "moderation.unban", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"warnings_reset": True})
                 await message.answer(
-                    f"✅ <b>Разбан</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>0/5</b>\nНаказание: снято ✅\nАдминистратор: {actor}",
+                    f"✅ <b>Разбан</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>0/{limit}</b>\nНаказание: снято ✅\nАдминистратор: {actor}",
                     parse_mode="HTML", disable_web_page_preview=True,
                 )
                 return
@@ -160,10 +161,10 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
                 async with session_factory() as session:
                     async with session.begin():
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="mute")
-                        remaining = await _active_warning_count(session, chat_id=message.chat.id, user_id=target_id)
+                        remaining = min(await _active_warning_count(session, chat_id=message.chat.id, user_id=target_id), limit)
                         await write_audit(session, "moderation.unmute", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={})
                 await message.answer(
-                    f"🔊 <b>Мут снят</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>{remaining}/5</b>\nНаказание: мут снят ✅\nАдминистратор: {actor}",
+                    f"🔊 <b>Мут снят</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>{remaining}/{limit}</b>\nНаказание: мут снят ✅\nАдминистратор: {actor}",
                     parse_mode="HTML", disable_web_page_preview=True,
                 )
                 return
@@ -172,11 +173,11 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
                 async with session_factory() as session:
                     async with session.begin():
                         removed = await _deactivate_one_warning(session, chat_id=message.chat.id, user_id=target_id)
-                        remaining = await _active_warning_count(session, chat_id=message.chat.id, user_id=target_id)
+                        remaining = min(await _active_warning_count(session, chat_id=message.chat.id, user_id=target_id), limit)
                         await write_audit(session, "moderation.warning_removed", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"removed": removed, "remaining": remaining})
                 title = "⚠️ <b>Предупреждение не найдено</b>" if removed == 0 else "✅ <b>Предупреждение снято</b>"
                 await message.answer(
-                    f"{title}\n\n👤 {identity}\n⚠️ Предупреждения: <b>{remaining}/5</b>\nНаказание: {'без изменений' if removed == 0 else 'снято 1 предупреждение'} 📌\nАдминистратор: {actor}",
+                    f"{title}\n\n👤 {identity}\n⚠️ Предупреждения: <b>{remaining}/{limit}</b>\nНаказание: {'без изменений' if removed == 0 else 'снято 1 предупреждение'} 📌\nАдминистратор: {actor}",
                     parse_mode="HTML", disable_web_page_preview=True,
                 )
                 return
@@ -186,7 +187,7 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
                     removed = await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="warning")
                     await write_audit(session, "moderation.warnings_clear", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"removed": removed})
             await message.answer(
-                f"✅ <b>Предупреждения сняты</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>0/5</b>\nНаказание: снято предупреждений — <b>{removed}</b> 📌\nАдминистратор: {actor}",
+                f"✅ <b>Предупреждения сняты</b>\n\n👤 {identity}\n⚠️ Предупреждения: <b>0/{limit}</b>\nНаказание: снято предупреждений — <b>{removed}</b> 📌\nАдминистратор: {actor}",
                 parse_mode="HTML", disable_web_page_preview=True,
             )
         except Exception as exc:
