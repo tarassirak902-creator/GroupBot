@@ -47,6 +47,7 @@ from groupbot.routers.moderation_release import create_moderation_release_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.protection_schedule import create_protection_schedule_router
 from groupbot.routers.punishment_reasons import create_punishment_reasons_router
+from groupbot.routers.reserve_admin import create_reserve_admin_router
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.default_punishment_reasons import configured_reasons_with_defaults
 from groupbot.services.entry_schedule_adapter import install_entry_schedule
@@ -111,6 +112,7 @@ async def main() -> None:
     dp.include_router(create_content_filters_router(session_factory))
     dp.include_router(create_entry_protection_router(session_factory))
     dp.include_router(create_protection_schedule_router(session_factory))
+    dp.include_router(create_reserve_admin_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
