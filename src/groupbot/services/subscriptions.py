@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from groupbot.addon_models import SubscriptionAddon
 from groupbot.models import GroupOwner, Subscription, SubscriptionStatus, Tariff
 from groupbot.services.audit import write_audit
 
@@ -35,6 +36,42 @@ async def active_subscription_for_group(session: AsyncSession, chat_id: int) -> 
     if owner_id is None:
         return None
     return await active_subscription_for_owner(session, owner_id)
+
+
+async def effective_limit_for_owner(
+    session: AsyncSession,
+    owner_user_id: int,
+    limit_key: str,
+) -> int | None:
+    subscription = await active_subscription_for_owner(session, owner_user_id)
+    if subscription is None:
+        return None
+
+    tariff = (
+        await session.execute(select(Tariff).where(Tariff.id == subscription.tariff_id))
+    ).scalar_one_or_none()
+    if tariff is None:
+        return None
+
+    raw_base = (tariff.limits_json or {}).get(limit_key)
+    if raw_base is None:
+        return None
+    try:
+        base = max(int(raw_base), 0)
+    except (TypeError, ValueError):
+        return None
+
+    addon_quantity = (
+        await session.execute(
+            select(SubscriptionAddon.quantity).where(
+                SubscriptionAddon.subscription_id == subscription.id,
+                SubscriptionAddon.limit_key == limit_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if addon_quantity is None:
+        return base
+    return base + max(int(addon_quantity), 0)
 
 
 async def activate_test(session: AsyncSession, owner_user_id: int) -> tuple[Subscription | None, str]:

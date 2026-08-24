@@ -5,42 +5,16 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import Group, GroupOwner, GroupStatus, Tariff
+from groupbot.models import Group, GroupOwner, GroupStatus
 from groupbot.network_models import Network, NetworkGroup
 from groupbot.services.audit import write_audit
-from groupbot.services.subscriptions import active_subscription_for_owner
+from groupbot.services.subscriptions import active_subscription_for_owner, effective_limit_for_owner
 
 
 def _home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")]]
     )
-
-
-async def _active_tariff(session: AsyncSession, owner_id: int) -> Tariff | None:
-    active = await active_subscription_for_owner(session, owner_id)
-    if active is None:
-        return None
-    if isinstance(active, tuple):
-        _, tariff = active
-        return tariff
-    return (
-        await session.execute(select(Tariff).where(Tariff.id == active.tariff_id))
-    ).scalar_one_or_none()
-
-
-async def _network_limit(session: AsyncSession, owner_id: int) -> int | None:
-    tariff = await _active_tariff(session, owner_id)
-    if tariff is None:
-        return None
-    raw = (tariff.limits_json or {}).get("networks")
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return max(value, 0)
 
 
 async def _owner_network(
@@ -64,8 +38,8 @@ async def _render_list(
     owner_id: int,
 ) -> None:
     async with session_factory() as session:
-        tariff = await _active_tariff(session, owner_id)
-        if tariff is None:
+        subscription = await active_subscription_for_owner(session, owner_id)
+        if subscription is None:
             await message.edit_text(
                 "🌐 <b>Сетки групп</b>\n\n"
                 "Для управления сетками нужен активный тариф.",
@@ -92,7 +66,7 @@ async def _render_list(
                 .order_by(Network.id.asc())
             )
         ).all()
-        limit = await _network_limit(session, owner_id)
+        limit = await effective_limit_for_owner(session, owner_id, "networks")
 
     lines = ["🌐 <b>Сетки групп</b>", ""]
     if rows:
@@ -112,7 +86,7 @@ async def _render_list(
     elif limit == 0:
         lines.extend(["", "Создание сеток недоступно на текущем тарифе."])
     else:
-        lines.extend(["", f"Лимит текущего тарифа: <b>{limit}</b>."])
+        lines.extend(["", f"Лимит текущего тарифа с дополнениями: <b>{limit}</b>."])
 
     buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
     await message.edit_text(
@@ -223,11 +197,11 @@ def create_networks_router(
         owner_id = callback.from_user.id
         async with session_factory() as session:
             async with session.begin():
-                tariff = await _active_tariff(session, owner_id)
-                if tariff is None:
+                subscription = await active_subscription_for_owner(session, owner_id)
+                if subscription is None:
                     await callback.answer("Сначала активируйте тариф.", show_alert=True)
                     return
-                limit = await _network_limit(session, owner_id)
+                limit = await effective_limit_for_owner(session, owner_id, "networks")
                 count = int(
                     (
                         await session.execute(
@@ -238,7 +212,7 @@ def create_networks_router(
                     ).scalar_one()
                 )
                 if limit is not None and count >= limit:
-                    await callback.answer("Достигнут лимит сеток текущего тарифа.", show_alert=True)
+                    await callback.answer("Достигнут лимит сеток текущего тарифа с дополнениями.", show_alert=True)
                     return
                 network = Network(owner_user_id=owner_id)
                 session.add(network)
