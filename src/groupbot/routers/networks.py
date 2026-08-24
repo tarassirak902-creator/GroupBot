@@ -153,6 +153,19 @@ async def _render_card(
     buttons: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="➕ Добавить группу", callback_data=f"networks:add:{network_id}")]
     ]
+    if groups:
+        buttons.append([
+            InlineKeyboardButton(
+                text="👮 Сетевые администраторы",
+                callback_data=f"gctl:network_admins:{groups[0].chat_id}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="🛡 Сетевая модерация",
+            callback_data=f"networks:moderation:{network_id}",
+        )
+    ])
     for row in groups:
         buttons.append(
             [
@@ -181,7 +194,6 @@ def create_networks_router(
     async def networks_menu(message: Message) -> None:
         if message.from_user is None:
             return
-        # Start with a normal message, then all navigation stays in one edited message.
         sent = await message.answer("🌐 Сетки групп")
         await _render_list(sent, session_factory, message.from_user.id)
 
@@ -237,6 +249,35 @@ def create_networks_router(
             return
         await _render_card(callback, session_factory, network_id)
 
+    @router.callback_query(F.data.startswith("networks:moderation:"))
+    async def network_moderation_info(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+        try:
+            network_id = int((callback.data or "").rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            return
+        async with session_factory() as session:
+            if await _owner_network(session, network_id, callback.from_user.id) is None:
+                await callback.answer("Сетка не найдена.", show_alert=True)
+                return
+        await callback.message.edit_text(
+            "🛡 <b>Сетевая модерация</b>\n\n"
+            "Команды выполняются в одной из групп этой сетки ответом на сообщение участника:\n\n"
+            "• <code>сбан причина</code> — бан во всех активных группах сетки;\n"
+            "• <code>сразбан</code> — разбан во всех активных группах сетки;\n"
+            "• <code>сбанлист</code> — активные баны по группам сетки.\n\n"
+            "Сетевые администраторы используют только выданные им права ban/unban. "
+            "Иммунитеты и действующие Telegram-администраторы сохраняют защиту.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад к сетке", callback_data=f"networks:open:{network_id}")]
+                ]
+            ),
+        )
+        await callback.answer()
+
     @router.callback_query(F.data.startswith("networks:add:"))
     async def add_group_screen(callback: CallbackQuery) -> None:
         if callback.message is None:
@@ -250,6 +291,18 @@ def create_networks_router(
             if await _owner_network(session, network_id, owner_id) is None:
                 await callback.answer("Сетка не найдена.", show_alert=True)
                 return
+            occupied = set(
+                (
+                    await session.execute(
+                        select(NetworkGroup.chat_id)
+                        .join(Network, Network.id == NetworkGroup.network_id)
+                        .where(
+                            Network.owner_user_id == owner_id,
+                            NetworkGroup.network_id != network_id,
+                        )
+                    )
+                ).scalars().all()
+            )
             existing = set(
                 (
                     await session.execute(
@@ -270,7 +323,7 @@ def create_networks_router(
                 )
             ).all()
 
-        candidates = [row for row in owned if row.chat_id not in existing]
+        candidates = [row for row in owned if row.chat_id not in existing and row.chat_id not in occupied]
         buttons = [
             [
                 InlineKeyboardButton(
@@ -284,9 +337,9 @@ def create_networks_router(
         text = (
             "➕ <b>Добавить группу в сетку</b>\n\n"
             + (
-                "Выберите одну из ваших активных групп:"
+                "Выберите одну из ваших активных групп, которая ещё не состоит в другой сетке:"
                 if candidates
-                else "Все доступные активные группы уже добавлены в эту сетку."
+                else "Нет доступных активных групп: они уже добавлены в эту или другую вашу сетку."
             )
         )
         await callback.message.edit_text(
@@ -326,6 +379,21 @@ def create_networks_router(
                 ).scalar_one_or_none()
                 if owns_group is None:
                     await callback.answer("Эта группа недоступна для вашей сетки.", show_alert=True)
+                    return
+                other_network = (
+                    await session.execute(
+                        select(NetworkGroup.id)
+                        .join(Network, Network.id == NetworkGroup.network_id)
+                        .where(
+                            NetworkGroup.chat_id == chat_id,
+                            Network.owner_user_id == owner_id,
+                            NetworkGroup.network_id != network_id,
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if other_network is not None:
+                    await callback.answer("Группа уже состоит в другой вашей сетке.", show_alert=True)
                     return
                 exists = (
                     await session.execute(
