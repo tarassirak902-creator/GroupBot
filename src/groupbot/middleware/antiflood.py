@@ -10,10 +10,10 @@ from aiogram.types import Message, TelegramObject
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, GroupSettings
+from groupbot.models import GroupSettings
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.manual_moderation import _execute_action, _group_ready
-from groupbot.services.permissions import is_group_owner
+from groupbot.services.protected_members import is_protected_member
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +23,6 @@ class AntiFloodMiddleware(BaseMiddleware):
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
-
-    async def _is_admin(self, session: AsyncSession, chat_id: int, user_id: int) -> bool:
-        if await is_group_owner(session, chat_id, user_id):
-            return True
-        assignment = (await session.execute(select(AdminAssignment.id).where(AdminAssignment.chat_id == chat_id, AdminAssignment.user_id == user_id))).scalar_one_or_none()
-        return assignment is not None
 
     async def __call__(self, handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]], event: TelegramObject, data: dict[str, Any]) -> Any:
         if not isinstance(event, Message) or event.chat.type not in {"group", "supergroup"}:
@@ -60,13 +54,7 @@ class AntiFloodMiddleware(BaseMiddleware):
                 return await handler(event, data)
             if action == "mute" and not mute_duration:
                 return await handler(event, data)
-
-            # Privileged roles are always immune; this is a bot invariant, not a user setting.
-            if await self._is_admin(session, event.chat.id, event.from_user.id):
-                return await handler(event, data)
-            special = dict(raw.get("special_statuses") or {})
-            protected_ids = {int(x) for x in (special.get("vip") or [])} | {int(x) for x in (special.get("nedotroga") or [])}
-            if event.from_user.id in protected_ids:
+            if await is_protected_member(session, chat_id=event.chat.id, user_id=event.from_user.id, moderation_config=raw):
                 return await handler(event, data)
 
             cutoff = now - timedelta(seconds=window_seconds)
