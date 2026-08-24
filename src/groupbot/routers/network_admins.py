@@ -27,6 +27,12 @@ async def _network_groups_count(session: AsyncSession, owner_id: int) -> int:
         select(func.count(func.distinct(NetworkGroup.chat_id)))
         .select_from(NetworkGroup)
         .join(Network, Network.id == NetworkGroup.network_id)
+        .join(
+            GroupOwner,
+            (GroupOwner.chat_id == NetworkGroup.chat_id)
+            & (GroupOwner.user_id == owner_id)
+            & (GroupOwner.is_current.is_(True)),
+        )
         .where(Network.owner_user_id == owner_id)
     )).scalar_one())
 
