@@ -161,6 +161,19 @@ class AdminAssignment(Base):
     assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class NetworkAdmin(Base):
+    __tablename__ = "network_admins"
+    __table_args__ = (UniqueConstraint("owner_user_id", "user_id", name="uq_network_admin_owner_user"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False, index=True)
+    permissions_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class Wallet(Base):
     __tablename__ = "wallets"
     __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_wallet_chat_user"),)
