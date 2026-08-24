@@ -34,4 +34,6 @@ The current uploaded MASTER document is the only functional/UX source of truth. 
 
 ## Current milestone
 
-Phase 1 foundation has started in `src/groupbot`. The old `app/` package and old Alembic chain are no longer used by the new Docker build and will be removed from this branch after the clean foundation is validated.
+Phases 1–6 are implemented in `src/groupbot`, including group lifecycle and owner management, moderation and protection, statistics, networks, network administrators, and network moderation. The next planned rebuild stage is Phase 7: tariffs, subscriptions, addons, and expiry lifecycle.
+
+The old `app/` package and old Alembic chain remain outside the active new Docker build and are not used by the rebuild runtime.
