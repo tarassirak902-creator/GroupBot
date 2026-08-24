@@ -54,8 +54,6 @@ class AntiSpamMiddleware(BaseMiddleware):
 
         action: str | None = None
         mute_duration: str | None = None
-        should_punish = False
-        cutoff: datetime | None = None
         repeated_message_ids: list[int] = []
 
         async with self.session_factory() as session:
@@ -127,24 +125,12 @@ class AntiSpamMiddleware(BaseMiddleware):
             if len(similar_rows) < repeat_count:
                 return await handler(event, data)
 
-            # The earliest matching message is the original. Every later match is a repeat.
+            # Keep the earliest matching message as the original. Every later
+            # match belongs to this violation batch and is removed. Because
+            # removed rows are excluded on the next update, a fresh batch of
+            # repeats can trigger another punishment inside the same time window.
             repeated_message_ids = [int(row.message_id) for row in similar_rows[1:]]
 
-            recent = (
-                await session.execute(
-                    select(ModerationAction.id).where(
-                        ModerationAction.chat_id == event.chat.id,
-                        ModerationAction.target_user_id == event.from_user.id,
-                        ModerationAction.action == action,
-                        ModerationAction.source == "antispam",
-                        ModerationAction.created_at >= cutoff,
-                    ).order_by(ModerationAction.id.desc()).limit(1)
-                )
-            ).scalar_one_or_none()
-            should_punish = recent is None
-
-        # Cleanup is independent from punishment cooldown: every newly detected
-        # repeat should disappear even when a punishment was already issued.
         deleted_ids: list[int] = []
         for message_id in repeated_message_ids:
             try:
@@ -169,7 +155,7 @@ class AntiSpamMiddleware(BaseMiddleware):
                         .values(deleted_at=datetime.now(timezone.utc))
                     )
 
-        if should_punish and action is not None:
+        if action is not None:
             try:
                 bot_user = await bot.me()
                 text = await _execute_action(
@@ -200,9 +186,11 @@ class AntiSpamMiddleware(BaseMiddleware):
                                 .where(ModerationAction.id == latest_id)
                                 .values(source="antispam")
                             )
-                cleanup_text = ""
-                if repeated_message_ids:
-                    cleanup_text = f"\n\n🧹 Повторные сообщения: удалено <b>{len(deleted_ids)}/{len(repeated_message_ids)}</b>."
+                cleanup_text = (
+                    f"\n\n🧹 Повторные сообщения: удалено <b>{len(deleted_ids)}/{len(repeated_message_ids)}</b>."
+                    if repeated_message_ids
+                    else ""
+                )
                 await bot.send_message(
                     event.chat.id,
                     text + cleanup_text,
