@@ -35,6 +35,9 @@ LIST_COMMANDS = {
     "преды": ("warning", False),
 }
 DURATION_RE = re.compile(r"^(\d+)(м|мин|ч|д)$", re.IGNORECASE)
+DEFAULT_WARNING_LIMIT = 5
+MIN_WARNING_LIMIT = 3
+MAX_WARNING_LIMIT = 20
 
 
 def _identity_from_tg(user) -> str:
@@ -96,6 +99,15 @@ async def _moderation_config(session: AsyncSession, chat_id: int) -> dict:
     return (
         await session.execute(select(GroupSettings.moderation_config).where(GroupSettings.chat_id == chat_id))
     ).scalar_one_or_none() or {}
+
+
+async def _warning_limit(session: AsyncSession, chat_id: int) -> int:
+    config = await _moderation_config(session, chat_id)
+    try:
+        value = int(config.get("warning_limit", DEFAULT_WARNING_LIMIT))
+    except (TypeError, ValueError):
+        value = DEFAULT_WARNING_LIMIT
+    return max(MIN_WARNING_LIMIT, min(MAX_WARNING_LIMIT, value))
 
 
 async def _command_mode(session: AsyncSession, chat_id: int) -> str:
@@ -191,6 +203,16 @@ def _unmuted_permissions() -> ChatPermissions:
     )
 
 
+def _warning_stage(count: int, limit: int) -> str | None:
+    if count >= limit:
+        return "ban"
+    if limit >= 4 and count == limit - 1:
+        return "mute_1h"
+    if limit >= 5 and count == limit - 2:
+        return "mute_15m"
+    return None
+
+
 async def _apply_warning_scale(
     bot: Bot,
     session: AsyncSession,
@@ -199,9 +221,11 @@ async def _apply_warning_scale(
     target_user_id: int,
     actor_user_id: int,
     count: int,
+    limit: int,
 ) -> str | None:
     now = datetime.now(timezone.utc)
-    if count == 3:
+    stage = _warning_stage(count, limit)
+    if stage == "mute_15m":
         until = now + timedelta(minutes=15)
         await bot.restrict_chat_member(chat_id, target_user_id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
         await _record_action(
@@ -210,12 +234,12 @@ async def _apply_warning_scale(
             target_user_id=target_user_id,
             actor_user_id=actor_user_id,
             action="mute",
-            reason="Автодействие шкалы предупреждений 3/5",
+            reason=f"Автодействие шкалы предупреждений {count}/{limit}",
             expires_at=until,
             source="warning_scale",
         )
-        return "мут на 15 минут 🔇"
-    if count == 4:
+        return "🔇 Автодействие: мут на 15 минут."
+    if stage == "mute_1h":
         until = now + timedelta(hours=1)
         await bot.restrict_chat_member(chat_id, target_user_id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
         await _record_action(
@@ -224,12 +248,12 @@ async def _apply_warning_scale(
             target_user_id=target_user_id,
             actor_user_id=actor_user_id,
             action="mute",
-            reason="Автодействие шкалы предупреждений 4/5",
+            reason=f"Автодействие шкалы предупреждений {count}/{limit}",
             expires_at=until,
             source="warning_scale",
         )
-        return "мут на 1 час 🔇"
-    if count >= 5:
+        return "🔇 Автодействие: мут на 1 час."
+    if stage == "ban":
         await bot.ban_chat_member(chat_id, target_user_id)
         await _record_action(
             session,
@@ -237,10 +261,10 @@ async def _apply_warning_scale(
             target_user_id=target_user_id,
             actor_user_id=actor_user_id,
             action="ban",
-            reason="Автодействие шкалы предупреждений 5/5",
+            reason=f"Автодействие шкалы предупреждений {count}/{limit}",
             source="warning_scale",
         )
-        return "бан ⛔"
+        return "⛔ Автодействие: бан."
     return None
 
 
@@ -306,7 +330,9 @@ async def _execute_action(
     if action == "warning":
         async with session_factory() as session:
             async with session.begin():
-                count = min(await _warning_count(session, chat_id, target.id) + 1, 5)
+                limit = await _warning_limit(session, chat_id)
+                count = min(await _warning_count(session, chat_id, target.id) + 1, limit)
+                actor_role = "владельца группы" if await is_group_owner(session, chat_id, actor.id) else "администратора"
                 await _record_action(
                     session,
                     chat_id=chat_id,
@@ -323,17 +349,16 @@ async def _execute_action(
                     target_user_id=target.id,
                     actor_user_id=actor.id,
                     count=count,
+                    limit=limit,
                 )
-        icon = "⛔" if count >= 5 else "🔇" if count in {3, 4} else "⚠️"
-        punishment_text = punishment or "предупреждение ⚠️"
-        return (
-            f"{icon} <b>Предупреждение</b>\n\n"
-            f"👤 {target_text}\n"
-            f"⚠️ Предупреждения: <b>{count}/5</b> {icon}\n"
-            f"Наказание: <b>{punishment_text}</b> 📌\n"
-            f"Причина: <b>{reason_text}</b>\n"
-            f"Администратор: {actor_text}"
+        text = (
+            f"⚠️ {target_text}, Вам выдано предупреждение <b>{count}/{limit}</b> "
+            f"от {actor_role} {actor_text} за <b>{reason_text}</b>.\n\n"
+            "Будьте аккуратнее!"
         )
+        if punishment:
+            text += f"\n\n{punishment}"
+        return text
 
     if action == "mute":
         if not duration_token:
@@ -359,11 +384,12 @@ async def _execute_action(
                     reason=reason,
                     expires_at=expires_at,
                 )
-                warnings = min(await _warning_count(session, chat_id, target.id), 5)
+                limit = await _warning_limit(session, chat_id)
+                warnings = min(await _warning_count(session, chat_id, target.id), limit)
         return (
             f"🔇 <b>Мут</b>\n\n"
             f"👤 {target_text}\n"
-            f"⚠️ Предупреждения: <b>{warnings}/5</b>\n"
+            f"⚠️ Предупреждения: <b>{warnings}/{limit}</b>\n"
             f"Наказание: <b>мут до {_format_expiry(expires_at)}</b> 📌\n"
             f"Причина: <b>{reason_text}</b>\n"
             f"Администратор: {actor_text}"
@@ -381,11 +407,12 @@ async def _execute_action(
                     action="ban",
                     reason=reason,
                 )
-                warnings = min(await _warning_count(session, chat_id, target.id), 5)
+                limit = await _warning_limit(session, chat_id)
+                warnings = min(await _warning_count(session, chat_id, target.id), limit)
         return (
             f"⛔ <b>Бан</b>\n\n"
             f"👤 {target_text}\n"
-            f"⚠️ Предупреждения: <b>{warnings}/5</b> ⛔\n"
+            f"⚠️ Предупреждения: <b>{warnings}/{limit}</b> ⛔\n"
             f"Наказание: <b>бан</b> 📌\n"
             f"Причина: <b>{reason_text}</b>\n"
             f"Администратор: {actor_text}"
@@ -502,6 +529,7 @@ def create_manual_moderation_router(session_factory: async_sessionmaker[AsyncSes
             async with session_factory() as session:
                 if not await _group_ready(session, message.chat.id) or not await _admin_access(session, message.chat.id, message.from_user.id):
                     return
+                warning_limit = await _warning_limit(session, message.chat.id)
                 now = datetime.now(timezone.utc)
                 conditions = [
                     ModerationAction.chat_id == message.chat.id,
@@ -532,7 +560,8 @@ def create_manual_moderation_router(session_factory: async_sessionmaker[AsyncSes
                 actor_text = clickable_user_display(users[row.actor_user_id]) if row.actor_user_id in users else "Администратор"
                 reason = escape(row.reason or "не указана")
                 if row.action == "warning":
-                    lines.append(f"• {target_text} — {row.warning_index or '?'} / 5; выдал: {actor_text}; причина: {reason}")
+                    index = min(int(row.warning_index or 0), warning_limit) if row.warning_index else "?"
+                    lines.append(f"• {target_text} — {index}/{warning_limit}; выдал: {actor_text}; причина: {reason}")
                 elif row.action == "mute":
                     lines.append(f"• {target_text} — до {_format_expiry(row.expires_at)}; выдал: {actor_text}; причина: {reason}")
                 else:
