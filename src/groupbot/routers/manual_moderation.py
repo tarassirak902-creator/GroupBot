@@ -214,7 +214,7 @@ async def _apply_warning_scale(
             expires_at=until,
             source="warning_scale",
         )
-        return "🔇 Автодействие: мут на 15 минут."
+        return "мут на 15 минут 🔇"
     if count == 4:
         until = now + timedelta(hours=1)
         await bot.restrict_chat_member(chat_id, target_user_id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
@@ -228,7 +228,7 @@ async def _apply_warning_scale(
             expires_at=until,
             source="warning_scale",
         )
-        return "🔇 Автодействие: мут на 1 час."
+        return "мут на 1 час 🔇"
     if count >= 5:
         await bot.ban_chat_member(chat_id, target_user_id)
         await _record_action(
@@ -240,7 +240,7 @@ async def _apply_warning_scale(
             reason="Автодействие шкалы предупреждений 5/5",
             source="warning_scale",
         )
-        return "⛔ Автодействие: бан."
+        return "бан ⛔"
     return None
 
 
@@ -301,11 +301,12 @@ async def _execute_action(
     await _upsert_pair(session_factory, actor, target)
     target_text = _identity_from_tg(target)
     actor_text = _identity_from_tg(actor)
+    reason_text = escape(reason or "не указана")
 
     if action == "warning":
         async with session_factory() as session:
             async with session.begin():
-                count = await _warning_count(session, chat_id, target.id) + 1
+                count = min(await _warning_count(session, chat_id, target.id) + 1, 5)
                 await _record_action(
                     session,
                     chat_id=chat_id,
@@ -315,7 +316,7 @@ async def _execute_action(
                     reason=reason,
                     warning_index=count,
                 )
-                auto_text = await _apply_warning_scale(
+                punishment = await _apply_warning_scale(
                     bot,
                     session,
                     chat_id=chat_id,
@@ -323,12 +324,16 @@ async def _execute_action(
                     actor_user_id=actor.id,
                     count=count,
                 )
-        text = (
-            f"⚠️ {target_text}, Вам выдано предупреждение <b>{count}/5</b> от администратора {actor_text} за нарушение правил.\n"
-            f"Причина: <b>{escape(reason or 'не указана')}</b>.\n"
-            "Будьте аккуратнее!"
+        icon = "⛔" if count >= 5 else "🔇" if count in {3, 4} else "⚠️"
+        punishment_text = punishment or "предупреждение ⚠️"
+        return (
+            f"{icon} <b>Предупреждение</b>\n\n"
+            f"👤 {target_text}\n"
+            f"⚠️ Предупреждения: <b>{count}/5</b> {icon}\n"
+            f"Наказание: <b>{punishment_text}</b> 📌\n"
+            f"Причина: <b>{reason_text}</b>\n"
+            f"Администратор: {actor_text}"
         )
-        return text + (("\n\n" + auto_text) if auto_text else "")
 
     if action == "mute":
         if not duration_token:
@@ -354,9 +359,14 @@ async def _execute_action(
                     reason=reason,
                     expires_at=expires_at,
                 )
+                warnings = min(await _warning_count(session, chat_id, target.id), 5)
         return (
-            f"🔇 {target_text} получил мут до <b>{_format_expiry(expires_at)}</b>.\n"
-            f"Администратор: {actor_text}\nПричина: <b>{escape(reason or 'не указана')}</b>"
+            f"🔇 <b>Мут</b>\n\n"
+            f"👤 {target_text}\n"
+            f"⚠️ Предупреждения: <b>{warnings}/5</b>\n"
+            f"Наказание: <b>мут до {_format_expiry(expires_at)}</b> 📌\n"
+            f"Причина: <b>{reason_text}</b>\n"
+            f"Администратор: {actor_text}"
         )
 
     if action == "ban":
@@ -371,7 +381,15 @@ async def _execute_action(
                     action="ban",
                     reason=reason,
                 )
-        return f"⛔ {target_text} забанен.\nАдминистратор: {actor_text}\nПричина: <b>{escape(reason or 'не указана')}</b>"
+                warnings = min(await _warning_count(session, chat_id, target.id), 5)
+        return (
+            f"⛔ <b>Бан</b>\n\n"
+            f"👤 {target_text}\n"
+            f"⚠️ Предупреждения: <b>{warnings}/5</b> ⛔\n"
+            f"Наказание: <b>бан</b> 📌\n"
+            f"Причина: <b>{reason_text}</b>\n"
+            f"Администратор: {actor_text}"
+        )
 
     if action == "unmute":
         await bot.restrict_chat_member(chat_id, target.id, permissions=_unmuted_permissions())
@@ -387,7 +405,7 @@ async def _execute_action(
                     target_id=str(target.id),
                     payload={"reason": reason},
                 )
-        return f"🔊 {target_text} размучен администратором {actor_text}."
+        return f"✅ <b>Мут снят</b>\n\n👤 {target_text}\nАдминистратор: {actor_text}"
 
     if action == "unban":
         await bot.unban_chat_member(chat_id, target.id, only_if_banned=True)
@@ -403,7 +421,7 @@ async def _execute_action(
                     target_id=str(target.id),
                     payload={"reason": reason},
                 )
-        return f"✅ {target_text} разбанен администратором {actor_text}."
+        return f"✅ <b>Разбан</b>\n\n👤 {target_text}\nАдминистратор: {actor_text}"
 
     raise ValueError("Неизвестное действие.")
 
