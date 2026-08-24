@@ -16,6 +16,7 @@ from groupbot.middleware.antispam import AntiSpamMiddleware
 from groupbot.middleware.content_filters import ContentFiltersMiddleware
 from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
+from groupbot.routers import ban_cleanup as ban_cleanup_module
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
 from groupbot.routers import manual_moderation as manual_moderation_module
@@ -64,6 +65,7 @@ async def main() -> None:
 
     # One formatter for manual moderation and every automatic protection module.
     manual_moderation_module._execute_action = unified_execute_action
+    ban_cleanup_module._execute_action = unified_execute_action
     antiflood_middleware_module._execute_action = unified_execute_action
     antispam_middleware_module._execute_action = unified_execute_action
     antilinks_middleware_module._execute_action = unified_execute_action
