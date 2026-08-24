@@ -22,6 +22,21 @@ async def _owner_id(session: AsyncSession, chat_id: int) -> int | None:
     )).scalar_one_or_none()
 
 
+async def _network_id_for_chat(session: AsyncSession, owner_id: int, chat_id: int) -> int | None:
+    return (
+        await session.execute(
+            select(Network.id)
+            .join(NetworkGroup, NetworkGroup.network_id == Network.id)
+            .where(
+                Network.owner_user_id == owner_id,
+                NetworkGroup.chat_id == chat_id,
+            )
+            .order_by(Network.id.asc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def _network_groups_count(session: AsyncSession, owner_id: int) -> int:
     return int((await session.execute(
         select(func.count(func.distinct(NetworkGroup.chat_id)))
@@ -37,6 +52,12 @@ async def _network_groups_count(session: AsyncSession, owner_id: int) -> int:
     )).scalar_one())
 
 
+def _back_button(chat_id: int, network_id: int | None, *, text: str = "◀️ Назад") -> InlineKeyboardButton:
+    if network_id is not None:
+        return InlineKeyboardButton(text=text, callback_data=f"networks:open:{network_id}")
+    return InlineKeyboardButton(text=text, callback_data=f"group:section:{chat_id}:administration")
+
+
 async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession], chat_id: int) -> None:
     async with session_factory() as session:
         if not await _owner_access(session, chat_id, callback.from_user.id):
@@ -46,18 +67,7 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         if owner_id is None:
             await callback.answer("Не удалось определить владельца группы.", show_alert=True)
             return
-        network_id = (
-            await session.execute(
-                select(Network.id)
-                .join(NetworkGroup, NetworkGroup.network_id == Network.id)
-                .where(
-                    Network.owner_user_id == owner_id,
-                    NetworkGroup.chat_id == chat_id,
-                )
-                .order_by(Network.id.asc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
+        network_id = await _network_id_for_chat(session, owner_id, chat_id)
         groups_count = await _network_groups_count(session, owner_id)
         rows = list((await session.execute(
             select(NetworkAdmin, User)
@@ -87,9 +97,7 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         text_lines.extend(["", "Назначений пока нет."])
 
     buttons.append([InlineKeyboardButton(text="➕ Добавить сетевого администратора", callback_data=f"network:add:{chat_id}")])
-    if network_id is not None:
-        buttons.append([InlineKeyboardButton(text="◀️ К сетке", callback_data=f"networks:open:{network_id}")])
-    buttons.append([InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")])
+    buttons.append([_back_button(chat_id, network_id, text="◀️ К сетке" if network_id is not None else "◀️ Администрация")])
     if callback.message:
         await callback.message.edit_text(
             "\n".join(text_lines),
@@ -108,6 +116,7 @@ async def _render_card(callback: CallbackQuery, session_factory: async_sessionma
         owner_id = await _owner_id(session, chat_id)
         if owner_id is None:
             return
+        network_id = await _network_id_for_chat(session, owner_id, chat_id)
         row = (await session.execute(select(NetworkAdmin).where(
             NetworkAdmin.owner_user_id == owner_id,
             NetworkAdmin.user_id == user_id,
@@ -125,7 +134,10 @@ async def _render_card(callback: CallbackQuery, session_factory: async_sessionma
         callback_data=f"network:perm:{chat_id}:{user_id}:{key}",
     )] for key, label in KNOWN_PERMISSIONS]
     buttons.append([InlineKeyboardButton(text="❌ Снять сетевого администратора", callback_data=f"network:remove:{chat_id}:{user_id}")])
-    buttons.append([InlineKeyboardButton(text="◀️ Сетевые администраторы", callback_data=f"gctl:network_admins:{chat_id}")])
+    if network_id is not None:
+        buttons.append([_back_button(chat_id, network_id, text="◀️ Назад к сетке")])
+    else:
+        buttons.append([InlineKeyboardButton(text="◀️ Сетевые администраторы", callback_data=f"gctl:network_admins:{chat_id}")])
     if callback.message:
         await callback.message.edit_text(
             "🌐 <b>Сетевой администратор</b>\n\n"
@@ -150,6 +162,7 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
     @router.callback_query(F.data.startswith("network:add:"))
     async def add_screen(callback: CallbackQuery, bot: Bot) -> None:
         chat_id = int((callback.data or "").rsplit(":", 1)[1])
+        network_id: int | None = None
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id):
                 await callback.answer("Недостаточно прав.", show_alert=True)
@@ -157,6 +170,7 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
             owner_id = await _owner_id(session, chat_id)
             if owner_id is None:
                 return
+            network_id = await _network_id_for_chat(session, owner_id, chat_id)
             existing = set((await session.execute(select(NetworkAdmin.user_id).where(
                 NetworkAdmin.owner_user_id == owner_id,
                 NetworkAdmin.is_active.is_(True),
@@ -184,7 +198,10 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
             if user.username:
                 label = f"{label} | @{user.username}"
             buttons.append([InlineKeyboardButton(text=label[:64], callback_data=f"network:set:{chat_id}:{user.id}")])
-        buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"gctl:network_admins:{chat_id}")])
+        if network_id is not None:
+            buttons.append([_back_button(chat_id, network_id, text="◀️ Назад к сетке")])
+        else:
+            buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"gctl:network_admins:{chat_id}")])
         if callback.message:
             await callback.message.edit_text(
                 "🌐 <b>Добавить сетевого администратора</b>\n\n"
