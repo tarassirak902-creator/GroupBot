@@ -133,10 +133,10 @@ def _captcha_challenge(chat_id: int, user_id: int, configured_mode: str) -> tupl
             answers.add(max(1, correct + random.randint(-5, 5)))
         choices = list(answers)
         random.shuffle(choices)
-        rows = [
-            [InlineKeyboardButton(text=str(value), callback_data=f"captcha:answer:{chat_id}:{user_id}:{value}")]
+        rows = [[
+            InlineKeyboardButton(text=str(value), callback_data=f"captcha:answer:{chat_id}:{user_id}:{value}")
             for value in choices
-        ]
+        ]]
         return f"Решите пример: <b>{left} + {right} = ?</b>", InlineKeyboardMarkup(inline_keyboard=rows), str(correct)
 
     if mode == "emoji":
@@ -197,7 +197,7 @@ async def _render_captcha(callback: CallbackQuery, session_factory: async_sessio
     action = "бан" if cfg["fail_action"] == "ban" else "удаление из группы"
     text = (
         "🧩 <b>Капча</b>\n\n"
-        f"Статус: <b>{'✅ включена' if cfg['enabled'] else '❌ выключена'}</b>\n"
+        f"Статус: <b>{'✅ включена' if cfg['enabled'] else '❌ выключлена'}</b>\n"
         f"Тип: <b>{CAPTCHA_MODES[cfg['mode']]}</b>\n"
         f"Время на прохождение: <b>{_seconds_label(cfg['timeout_seconds'])}</b>\n"
         f"Если не прошёл: <b>{action}</b>\n\n"
@@ -279,7 +279,6 @@ async def _notify_raid(
         try:
             await bot.send_message(user_id, private_text, parse_mode="HTML")
         except Exception:
-            # Telegram does not allow bots to initiate a private dialog until a user has started the bot.
             pass
 
 
@@ -467,14 +466,7 @@ def create_entry_protection_router(session_factory: async_sessionmaker[AsyncSess
             if len(events) >= raid["join_limit"] and not raid_active:
                 raid_active = True
                 _raid_until[message.chat.id] = now + timedelta(seconds=raid["lock_seconds"])
-                await _notify_raid(
-                    bot,
-                    session_factory,
-                    chat_id=message.chat.id,
-                    count=len(events),
-                    window_seconds=raid["window_seconds"],
-                    lock_seconds=raid["lock_seconds"],
-                )
+                await _notify_raid(bot, session_factory, chat_id=message.chat.id, count=len(events), window_seconds=raid["window_seconds"], lock_seconds=raid["lock_seconds"])
 
         for user in message.new_chat_members:
             if user.is_bot: continue
