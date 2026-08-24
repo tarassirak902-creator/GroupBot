@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from groupbot.config import get_settings
 from groupbot.models import Base
+from groupbot import network_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
