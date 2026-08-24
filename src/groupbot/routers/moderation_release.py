@@ -20,6 +20,10 @@ COMMAND_RE = re.compile(
     r"^(разбан|размут|снять\s+преды|снять\s+пред)(?:\s+(.+))?$",
     re.IGNORECASE,
 )
+RELEASE_FILTER_RE = re.compile(
+    r"^\s*(?:разбан|размут|снять\s+преды|снять\s+пред)(?:\s+.+)?\s*$",
+    re.IGNORECASE,
+)
 TG_ID_RE = re.compile(r"^tg://user\?id=(\d+)$", re.IGNORECASE)
 
 
@@ -104,7 +108,10 @@ def _actor_identity(user) -> str:
 def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="moderation_release")
 
-    @router.message(F.chat.type.in_({"group", "supergroup"}), F.text)
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(RELEASE_FILTER_RE),
+    )
     async def release_command(message: Message, bot: Bot) -> None:
         if message.from_user is None:
             return
