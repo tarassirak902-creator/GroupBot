@@ -14,6 +14,7 @@ from groupbot.models import GroupSettings
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.manual_moderation import _execute_action, _group_ready
 from groupbot.services.protected_members import is_protected_member
+from groupbot.services.protection_schedule import protection_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class AntiFloodMiddleware(BaseMiddleware):
                 return await handler(event, data)
             raw = (await session.execute(select(GroupSettings.moderation_config).where(GroupSettings.chat_id == event.chat.id))).scalar_one_or_none() or {}
             cfg = dict(raw.get("antiflood") or {})
-            if not cfg.get("enabled"):
+            if not protection_enabled(raw, "antiflood", bool(cfg.get("enabled"))):
                 return await handler(event, data)
             try:
                 message_limit = int(cfg.get("message_limit")); window_seconds = int(cfg.get("window_seconds"))
