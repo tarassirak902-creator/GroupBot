@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole, Group, GroupSettings
@@ -88,8 +88,16 @@ def _permission_editor_keyboard(
             callback_data=f"gctl:role_toggle:{chat_id}:{role_id}",
         )
     ])
+    rows.append([InlineKeyboardButton(text="🗑 Удалить ранг", callback_data=f"gctl:role_delete:{chat_id}:{role_id}")])
     rows.append([InlineKeyboardButton(text="◀️ Все ранги", callback_data=f"gctl:roles:{chat_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _role_delete_keyboard(chat_id: int, role_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"gctl:role_delete_confirm:{chat_id}:{role_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"gctl:role:{chat_id}:{role_id}")],
+    ])
 
 
 async def _load_role(
@@ -262,7 +270,7 @@ def create_group_control_ux_router(
                 )
             ).scalars().all()
             limit = await _trial_rank_limit(session, callback.from_user.id)
-        suffix = f"\nЛимит TEST: <b>{limit}</b> ранга." if limit is not None else ""
+        suffix = f"\nЛимит тарифа с дополнениями: <b>{limit}</b> ранга." if limit is not None else ""
         if callback.message is not None:
             await callback.message.edit_text(
                 "👑 <b>Ранги администрации</b>\n\n"
@@ -290,7 +298,7 @@ def create_group_control_ux_router(
                 )
             ).scalar_one()
         if limit is not None and count >= limit:
-            await callback.answer(f"На TEST доступно до {limit} админ-рангов.", show_alert=True)
+            await callback.answer(f"Достигнут лимит административных рангов: {limit}.", show_alert=True)
             return
         await state.set_state(AdminRoleState.waiting_name)
         await state.update_data(chat_id=chat_id)
@@ -314,6 +322,16 @@ def create_group_control_ux_router(
                 if not await _owner_access(session, chat_id, message.from_user.id):
                     await state.clear()
                     await message.answer("Недостаточно прав.")
+                    return
+                limit = await _trial_rank_limit(session, message.from_user.id)
+                count = (
+                    await session.execute(
+                        select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id)
+                    )
+                ).scalar_one()
+                if limit is not None and count >= limit:
+                    await state.clear()
+                    await message.answer(f"Достигнут лимит административных рангов: {limit}.")
                     return
                 exists = (
                     await session.execute(
@@ -349,6 +367,82 @@ def create_group_control_ux_router(
             f"✅ Ранг «{name}» создан.\n\nВыберите разрешения для этого ранга:",
             reply_markup=_permission_editor_keyboard(chat_id, role_id, draft, role_active=True),
         )
+
+    @router.callback_query(F.data.startswith("gctl:role_delete_confirm:"))
+    async def role_delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+        parts = (callback.data or "").split(":", 4)
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except (ValueError, IndexError):
+            return
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                role = (
+                    await session.execute(
+                        select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if role is None:
+                    await callback.answer("Ранг уже удалён.", show_alert=True)
+                    return
+                role_name = role.name
+                assignments = (
+                    await session.execute(
+                        select(func.count()).select_from(AdminAssignment).where(AdminAssignment.role_id == role_id)
+                    )
+                ).scalar_one()
+                await session.execute(delete(AdminRole).where(AdminRole.id == role_id))
+                await write_audit(
+                    session,
+                    "group.admin_role_deleted",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="admin_role",
+                    target_id=str(role_id),
+                    payload={"name": role_name, "assignments_detached": assignments},
+                )
+        await state.clear()
+        if callback.message is not None:
+            rows = []
+            async with session_factory() as session:
+                rows = list((await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))).scalars().all())
+            await callback.message.edit_text(
+                f"✅ Ранг «{role_name}» удалён.\n\nНазначения этого ранга сняты: <b>{assignments}</b>.",
+                parse_mode="HTML",
+                reply_markup=_roles_keyboard(chat_id, rows),
+            )
+        await callback.answer("Ранг удалён")
+
+    @router.callback_query(F.data.startswith("gctl:role_delete:"))
+    async def role_delete(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except (ValueError, IndexError):
+            return
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            role, _, assignments = await _load_role(session, chat_id, role_id)
+        if role is None:
+            await callback.answer("Ранг не найден.", show_alert=True)
+            return
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "⚠️ <b>Удалить административный ранг?</b>\n\n"
+                f"Ранг: <b>{role.name}</b>\n"
+                f"Назначено пользователей: <b>{assignments}</b>\n\n"
+                "После подтверждения ранг будет удалён. Пользователи с этим рангом потеряют его назначение.",
+                parse_mode="HTML",
+                reply_markup=_role_delete_keyboard(chat_id, role_id),
+            )
+        await callback.answer()
 
     @router.callback_query(F.data.startswith("gctl:role:"))
     async def role_card(callback: CallbackQuery, state: FSMContext) -> None:
