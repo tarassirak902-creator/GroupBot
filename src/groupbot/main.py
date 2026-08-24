@@ -31,6 +31,7 @@ from groupbot.routers.groups import create_group_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
 from groupbot.routers.manual_moderation import create_manual_moderation_router
 from groupbot.routers.message_operations import create_message_operations_router
+from groupbot.routers.moderation_release import create_moderation_release_router
 from groupbot.routers.private import create_private_router
 from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.user_display import clickable_user_display
@@ -67,6 +68,9 @@ async def main() -> None:
     dp.include_router(create_identity_privacy_router(session_factory, settings))
     dp.include_router(create_message_operations_router(session_factory))
     dp.include_router(create_ban_cleanup_router(session_factory))
+    # Release/clear commands support reply, @username, numeric ID and tg://user?id=...
+    # and are handled before generic manual moderation.
+    dp.include_router(create_moderation_release_router(session_factory))
     dp.include_router(create_manual_moderation_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
     dp.include_router(create_admin_hierarchy_router(session_factory))
