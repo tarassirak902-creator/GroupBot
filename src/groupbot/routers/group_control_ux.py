@@ -6,48 +6,15 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, AdminPermission, AdminRole, Group, GroupSettings
+from groupbot.models import AdminAssignment, AdminPermission, AdminRole
 from groupbot.routers.group_control import (
-    AdminRoleState,
     KNOWN_PERMISSIONS,
-    _ensure_group_settings,
+    STANDARD_ADMIN_ROLE_NAMES,
+    _custom_rank_count,
     _owner_access,
-    _trial_rank_limit,
+    _rank_limit,
 )
 from groupbot.services.audit import write_audit
-
-
-MODE_DESCRIPTIONS = (
-    "Текстовый — действие и причина пишутся ответом на сообщение.\n"
-    "Кнопки — после команды бот предлагает срок/причину.\n"
-    "Оба режима — работают оба варианта."
-)
-
-
-def _mode_keyboard(chat_id: int, current: str) -> InlineKeyboardMarkup:
-    def label(value: str, text: str) -> str:
-        return ("✅ " if current == value else "▫️ ") + text
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=label("text", "Текстовый"), callback_data=f"gctl:setmode:{chat_id}:text")],
-            [InlineKeyboardButton(text=label("buttons", "Кнопки"), callback_data=f"gctl:setmode:{chat_id}:buttons")],
-            [InlineKeyboardButton(text=label("both", "Оба режима"), callback_data=f"gctl:setmode:{chat_id}:both")],
-            [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")],
-        ]
-    )
-
-
-def _admin_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="👑 Ранги администрации", callback_data=f"gctl:roles:{chat_id}")],
-            [InlineKeyboardButton(text="👮 Администраторы", callback_data=f"gctl:admins:{chat_id}")],
-            [InlineKeyboardButton(text="🧯 Резервный администратор", callback_data=f"gctl:reserve:{chat_id}")],
-            [InlineKeyboardButton(text="🌐 Сетевые администраторы", callback_data=f"gctl:network_admins:{chat_id}")],
-            [InlineKeyboardButton(text="◀️ Управление группой", callback_data=f"group:open:{chat_id}")],
-        ]
-    )
 
 
 def _roles_keyboard(chat_id: int, roles: list[AdminRole]) -> InlineKeyboardMarkup:
@@ -60,7 +27,7 @@ def _roles_keyboard(chat_id: int, roles: list[AdminRole]) -> InlineKeyboardMarku
                 callback_data=f"gctl:role:{chat_id}:{role.id}",
             )
         ])
-    rows.append([InlineKeyboardButton(text="➕ Создать ранг", callback_data=f"gctl:role_create:{chat_id}")])
+    rows.append([InlineKeyboardButton(text="➕ Создать свой ранг", callback_data=f"gctl:role_create:{chat_id}")])
     rows.append([InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -128,19 +95,13 @@ async def _render_permission_editor(
     role: AdminRole,
     assignments: int,
     permissions: dict[str, bool],
-    created: bool = False,
 ) -> None:
-    intro = (
-        f"✅ Ранг «{role.name}» создан.\n\nТеперь выберите разрешения и нажмите <b>💾 Сохранить</b>."
-        if created
-        else "Выберите нужные разрешения. Изменения применятся только после нажатия <b>💾 Сохранить</b>."
-    )
     await target.edit_text(
         "👑 <b>Настройка админ-ранга</b>\n\n"
         f"Название: <b>{role.name}</b>\n"
         f"Статус: {'✅ включён' if role.is_active else '⛔ выключен'}\n"
         f"Назначено пользователей: <b>{assignments}</b>\n\n"
-        f"{intro}",
+        "Выберите нужные разрешения. Изменения применятся только после нажатия <b>💾 Сохранить</b>.",
         parse_mode="HTML",
         reply_markup=_permission_editor_keyboard(
             chat_id,
@@ -156,103 +117,6 @@ def create_group_control_ux_router(
 ) -> Router:
     router = Router(name="group_control_ux")
 
-    @router.callback_query(F.data.startswith("group:section:") & F.data.endswith(":administration"))
-    async def administration(callback: CallbackQuery) -> None:
-        parts = (callback.data or "").split(":", 3)
-        try:
-            chat_id = int(parts[2])
-        except (ValueError, IndexError):
-            return
-        async with session_factory() as session:
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
-                return
-            group = (
-                await session.execute(select(Group).where(Group.chat_id == chat_id))
-            ).scalar_one_or_none()
-            roles_count = (
-                await session.execute(
-                    select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id)
-                )
-            ).scalar_one()
-            assignments_count = (
-                await session.execute(
-                    select(func.count()).select_from(AdminAssignment).where(AdminAssignment.chat_id == chat_id)
-                )
-            ).scalar_one()
-        if callback.message is not None:
-            title = group.title if group and group.title else str(chat_id)
-            await callback.message.edit_text(
-                "👮 <b>Администрация</b>\n\n"
-                f"Группа: <b>{title}</b>\n"
-                f"Собственных рангов: <b>{roles_count}</b>\n"
-                f"Назначений в Mimorus: <b>{assignments_count}</b>\n\n"
-                "Владелец создаёт ранг, выбирает его разрешения и сохраняет настройки.",
-                parse_mode="HTML",
-                reply_markup=_admin_keyboard(chat_id),
-            )
-        await callback.answer()
-
-    @router.callback_query(F.data.startswith("gctl:mode:"))
-    async def mode_screen(callback: CallbackQuery) -> None:
-        try:
-            chat_id = int((callback.data or "").split(":", 2)[2])
-        except (ValueError, IndexError):
-            return
-        async with session_factory() as session:
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True)
-                return
-            settings = await _ensure_group_settings(session, chat_id)
-            current = (settings.moderation_config or {}).get("admin_command_mode", "both")
-        if callback.message is not None:
-            await callback.message.edit_text(
-                "🎚 <b>Режим админ-команд</b>\n\n"
-                f"{MODE_DESCRIPTIONS}",
-                parse_mode="HTML",
-                reply_markup=_mode_keyboard(chat_id, current),
-            )
-        await callback.answer()
-
-    @router.callback_query(F.data.startswith("gctl:setmode:"))
-    async def set_mode(callback: CallbackQuery) -> None:
-        parts = (callback.data or "").split(":", 3)
-        try:
-            chat_id = int(parts[2])
-            mode = parts[3]
-        except (ValueError, IndexError):
-            return
-        if mode not in {"text", "buttons", "both"}:
-            await callback.answer("Некорректный режим.", show_alert=True)
-            return
-        async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True)
-                    return
-                settings = await _ensure_group_settings(session, chat_id)
-                config = dict(settings.moderation_config or {})
-                config["admin_command_mode"] = mode
-                settings.moderation_config = config
-                await write_audit(
-                    session,
-                    "group.moderation_mode_changed",
-                    chat_id=chat_id,
-                    actor_user_id=callback.from_user.id,
-                    target_type="group",
-                    target_id=str(chat_id),
-                    payload={"mode": mode},
-                )
-        if callback.message is not None:
-            await callback.message.edit_text(
-                "🎚 <b>Режим админ-команд</b>\n\n"
-                f"{MODE_DESCRIPTIONS}\n\n"
-                "✅ Выбранный режим сохранён.",
-                parse_mode="HTML",
-                reply_markup=_mode_keyboard(chat_id, mode),
-            )
-        await callback.answer("Сохранено")
-
     @router.callback_query(F.data.startswith("gctl:roles:"))
     async def roles(callback: CallbackQuery, state: FSMContext) -> None:
         try:
@@ -264,109 +128,23 @@ def create_group_control_ux_router(
             if not await _owner_access(session, chat_id, callback.from_user.id):
                 await callback.answer("Недостаточно прав.", show_alert=True)
                 return
-            rows = (
+            rows = list((
                 await session.execute(
                     select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id)
                 )
-            ).scalars().all()
-            limit = await _trial_rank_limit(session, callback.from_user.id)
+            ).scalars().all())
+            limit = await _rank_limit(session, callback.from_user.id)
+            custom_count = await _custom_rank_count(session, chat_id)
         suffix = f"\nЛимит тарифа с дополнениями: <b>{limit}</b> ранга." if limit is not None else ""
         if callback.message is not None:
             await callback.message.edit_text(
                 "👑 <b>Ранги администрации</b>\n\n"
-                f"Создано: <b>{len(rows)}</b>.{suffix}\n"
-                "Выберите существующий ранг для изменения разрешений или создайте новый.",
+                f"Собственных рангов: <b>{custom_count}</b>.{suffix}\n"
+                "Стандартные ранги не входят в этот лимит. Выберите ранг для настройки или создайте свой.",
                 parse_mode="HTML",
-                reply_markup=_roles_keyboard(chat_id, list(rows)),
+                reply_markup=_roles_keyboard(chat_id, rows),
             )
         await callback.answer()
-
-    @router.callback_query(F.data.startswith("gctl:role_create:"))
-    async def role_create(callback: CallbackQuery, state: FSMContext) -> None:
-        try:
-            chat_id = int((callback.data or "").split(":", 2)[2])
-        except (ValueError, IndexError):
-            return
-        async with session_factory() as session:
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True)
-                return
-            limit = await _trial_rank_limit(session, callback.from_user.id)
-            count = (
-                await session.execute(
-                    select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id)
-                )
-            ).scalar_one()
-        if limit is not None and count >= limit:
-            await callback.answer(f"Достигнут лимит административных рангов: {limit}.", show_alert=True)
-            return
-        await state.set_state(AdminRoleState.waiting_name)
-        await state.update_data(chat_id=chat_id)
-        if callback.message is not None:
-            await callback.message.answer("Отправьте название нового административного ранга (1–128 символов).")
-        await callback.answer()
-
-    @router.message(AdminRoleState.waiting_name, F.chat.type == "private")
-    async def role_name(message: Message, state: FSMContext) -> None:
-        if message.from_user is None:
-            await state.clear()
-            return
-        name = (message.text or "").strip()
-        if not 1 <= len(name) <= 128:
-            await message.answer("Название должно быть длиной 1–128 символов.")
-            return
-        data = await state.get_data()
-        chat_id = int(data["chat_id"])
-        async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, message.from_user.id):
-                    await state.clear()
-                    await message.answer("Недостаточно прав.")
-                    return
-                limit = await _trial_rank_limit(session, message.from_user.id)
-                count = (
-                    await session.execute(
-                        select(func.count()).select_from(AdminRole).where(AdminRole.chat_id == chat_id)
-                    )
-                ).scalar_one()
-                if limit is not None and count >= limit:
-                    await state.clear()
-                    await message.answer(f"Достигнут лимит административных рангов: {limit}.")
-                    return
-                exists = (
-                    await session.execute(
-                        select(AdminRole.id).where(AdminRole.chat_id == chat_id, AdminRole.name == name)
-                    )
-                ).scalar_one_or_none()
-                if exists is not None:
-                    await message.answer("Ранг с таким названием уже существует.")
-                    return
-                role = AdminRole(chat_id=chat_id, name=name, is_active=True)
-                session.add(role)
-                await session.flush()
-                for key, _ in KNOWN_PERMISSIONS:
-                    session.add(AdminPermission(role_id=role.id, permission=key, allowed=False))
-                await write_audit(
-                    session,
-                    "group.admin_role_created",
-                    chat_id=chat_id,
-                    actor_user_id=message.from_user.id,
-                    target_type="admin_role",
-                    target_id=str(role.id),
-                    payload={"name": name},
-                )
-            role_id = role.id
-        draft = {key: False for key, _ in KNOWN_PERMISSIONS}
-        await state.clear()
-        await state.update_data(
-            permission_draft_chat_id=chat_id,
-            permission_draft_role_id=role_id,
-            permission_draft=draft,
-        )
-        await message.answer(
-            f"✅ Ранг «{name}» создан.\n\nВыберите разрешения для этого ранга:",
-            reply_markup=_permission_editor_keyboard(chat_id, role_id, draft, role_active=True),
-        )
 
     @router.callback_query(F.data.startswith("gctl:role_delete_confirm:"))
     async def role_delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
@@ -383,11 +161,16 @@ def create_group_control_ux_router(
                     return
                 role = (
                     await session.execute(
-                        select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update()
+                        select(AdminRole)
+                        .where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
+                        .with_for_update()
                     )
                 ).scalar_one_or_none()
                 if role is None:
                     await callback.answer("Ранг уже удалён.", show_alert=True)
+                    return
+                if role.name in STANDARD_ADMIN_ROLE_NAMES:
+                    await callback.answer("Стандартный ранг Mimorus удалить нельзя.", show_alert=True)
                     return
                 role_name = role.name
                 assignments = (
@@ -406,10 +189,13 @@ def create_group_control_ux_router(
                     payload={"name": role_name, "assignments_detached": assignments},
                 )
         await state.clear()
+        async with session_factory() as session:
+            rows = list((
+                await session.execute(
+                    select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id)
+                )
+            ).scalars().all())
         if callback.message is not None:
-            rows = []
-            async with session_factory() as session:
-                rows = list((await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))).scalars().all())
             await callback.message.edit_text(
                 f"✅ Ранг «{role_name}» удалён.\n\nНазначения этого ранга сняты: <b>{assignments}</b>.",
                 parse_mode="HTML",
@@ -433,9 +219,12 @@ def create_group_control_ux_router(
         if role is None:
             await callback.answer("Ранг не найден.", show_alert=True)
             return
+        if role.name in STANDARD_ADMIN_ROLE_NAMES:
+            await callback.answer("Стандартный ранг Mimorus удалить нельзя.", show_alert=True)
+            return
         if callback.message is not None:
             await callback.message.edit_text(
-                "⚠️ <b>Удалить административный ранг?</b>\n\n"
+                "⚠️ <b>Удалить дополнительный административный ранг?</b>\n\n"
                 f"Ранг: <b>{role.name}</b>\n"
                 f"Назначено пользователей: <b>{assignments}</b>\n\n"
                 "После подтверждения ранг будет удалён. Пользователи с этим рангом потеряют его назначение.",
@@ -496,7 +285,6 @@ def create_group_control_ux_router(
         if role is None:
             await callback.answer("Ранг не найден.", show_alert=True)
             return
-
         data = await state.get_data()
         if (
             data.get("permission_draft_chat_id") == chat_id
@@ -595,5 +383,54 @@ def create_group_control_ux_router(
                 ),
             )
         await callback.answer("Разрешения сохранены")
+
+    @router.callback_query(F.data.startswith("gctl:role_toggle:"))
+    async def role_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except (ValueError, IndexError):
+            return
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                role = (
+                    await session.execute(
+                        select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if role is None:
+                    await callback.answer("Ранг не найден.", show_alert=True)
+                    return
+                role.is_active = not role.is_active
+                await write_audit(
+                    session,
+                    "group.admin_role_toggled",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="admin_role",
+                    target_id=str(role_id),
+                    payload={"is_active": role.is_active},
+                )
+        await state.clear()
+        async with session_factory() as session:
+            role, permissions, assignments = await _load_role(session, chat_id, role_id)
+        if role is not None and callback.message is not None:
+            await state.update_data(
+                permission_draft_chat_id=chat_id,
+                permission_draft_role_id=role_id,
+                permission_draft=permissions,
+            )
+            await _render_permission_editor(
+                callback.message,
+                chat_id=chat_id,
+                role=role,
+                assignments=assignments,
+                permissions=permissions,
+            )
+        await callback.answer("Статус ранга обновлён")
 
     return router
