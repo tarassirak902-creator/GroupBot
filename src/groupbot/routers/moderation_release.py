@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import User
 from groupbot.moderation_models import ModerationAction
 from groupbot.routers.manual_moderation import _group_ready, _unmuted_permissions
-from groupbot.routers.user_display import clickable_identity, clickable_user_display
+from groupbot.routers.user_display import clickable_identity
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import has_permission, is_group_owner
 from groupbot.services.users import upsert_user
@@ -96,12 +96,21 @@ async def _active_warning_count(session: AsyncSession, *, chat_id: int, user_id:
     )).scalar_one())
 
 
-def _actor_identity(user) -> str:
+def _notification_identity_from_tg(user) -> str:
     return clickable_identity(
         telegram_user_id=user.id,
         first_name=user.first_name,
         last_name=user.last_name,
-        username=user.username,
+        username=None,
+    )
+
+
+def _notification_identity_from_db(user: User) -> str:
+    return clickable_identity(
+        telegram_user_id=user.telegram_user_id,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        username=None,
     )
 
 
@@ -109,7 +118,7 @@ async def _actor_title(session_factory: async_sessionmaker[AsyncSession], chat_i
     async with session_factory() as session:
         owner = await is_group_owner(session, chat_id, user.id)
     prefix = "Владелец группы" if owner else "Администратор"
-    return f"{prefix} {_actor_identity(user)}"
+    return f"{prefix} {_notification_identity_from_tg(user)}"
 
 
 def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
@@ -144,7 +153,7 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
                 await message.reply("Нельзя применить эту команду к себе.")
                 return
 
-        identity = clickable_user_display(target)
+        identity = _notification_identity_from_db(target)
         actor = await _actor_title(session_factory, message.chat.id, message.from_user)
         target_id = target.telegram_user_id
 
