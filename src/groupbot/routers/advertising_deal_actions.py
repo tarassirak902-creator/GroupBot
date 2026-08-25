@@ -32,6 +32,8 @@ def _after_action_keyboard(deal: AdvertisingDeal, viewer_id: int) -> InlineKeybo
     rows = [
         [InlineKeyboardButton(text="💬 Связаться", url=f"tg://user?id={other_id}")],
     ]
+    if viewer_id == deal.buyer_user_id and deal.status == "accepted":
+        rows.append([InlineKeyboardButton(text="📦 Передать материалы", callback_data=f"ads:materials:{deal.id}")])
     if viewer_id == deal.buyer_user_id:
         rows.append([InlineKeyboardButton(text="📋 Мои покупки", callback_data="ads:my_buys")])
     rows.append([InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")])
@@ -77,8 +79,6 @@ def create_advertising_deal_actions_router(
                     await callback.answer("Эта заявка уже обработана.", show_alert=True)
                     return
 
-                # Serialise acceptances for this advertising площадка so concurrent
-                # clicks cannot pass the daily capacity checks at the same time.
                 listing = (
                     await session.execute(
                         select(AdvertisingListing)
@@ -179,7 +179,7 @@ def create_advertising_deal_actions_router(
                 "✅ <b>Рекламодатель принял вашу заявку</b>\n\n"
                 f"🏠 Площадка: <b>{title}</b>\n"
                 f"📌 Формат: <b>{kind_label}</b>\n\n"
-                "Сделка принята. Следующий этап — передать материалы для запуска рекламы внутри Mimorus.",
+                "Теперь передайте материалы для запуска рекламы внутри Mimorus.",
                 parse_mode="HTML",
                 reply_markup=_after_action_keyboard(accepted_deal, buyer_id),
             )
