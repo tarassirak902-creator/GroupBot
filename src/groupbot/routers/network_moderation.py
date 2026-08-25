@@ -15,6 +15,7 @@ from groupbot.services.subscriptions import active_subscription_for_group
 
 
 NETWORK_COMMANDS = {"сбан", "сразбан", "сбанлист"}
+NETWORK_COMMAND_RE = r"(?i)^\s*(?:сбан|сразбан|сбанлист)(?:\s+.*)?$"
 
 
 def _command_parts(text: str | None) -> tuple[str | None, list[str]]:
@@ -215,7 +216,10 @@ def create_network_moderation_router(
 ) -> Router:
     router = Router(name="network_moderation")
 
-    @router.message(F.chat.type.in_({"group", "supergroup"}), F.text)
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(NETWORK_COMMAND_RE),
+    )
     async def network_command(message: Message, bot: Bot) -> None:
         if message.from_user is None:
             return
