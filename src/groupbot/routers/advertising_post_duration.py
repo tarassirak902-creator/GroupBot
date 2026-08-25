@@ -151,4 +151,11 @@ def create_advertising_post_duration_router(session_factory: async_sessionmaker[
                 pass
         await message.answer(text, parse_mode="HTML", reply_markup=editor_keyboard_with_duration(listing))
 
+    # The creation wizard uses the same duration semantics. Keep it as a child
+    # router here so it is always registered before the broad advertising router.
+    from groupbot.routers.advertising_duration_integration import (
+        create_advertising_duration_integration_router,
+    )
+    router.include_router(create_advertising_duration_integration_router(session_factory))
+
     return router
