@@ -30,6 +30,7 @@ from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admins_display import create_admins_display_router
 from groupbot.routers.advertising import create_advertising_router
 from groupbot.routers.advertising_deal_actions_v2 import create_advertising_deal_actions_v2_router
+from groupbot.routers.advertising_duration_integration import create_advertising_duration_integration_router
 from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
 from groupbot.routers.advertising_materials import create_advertising_materials_router
@@ -42,6 +43,7 @@ from groupbot.routers.advertising_post_duration import (
 )
 from groupbot.routers.advertising_post_request import create_advertising_post_request_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
+from groupbot.routers.advertising_sales_nav import create_advertising_sales_nav_router
 from groupbot.routers.antiflood import create_antiflood_router
 from groupbot.routers.antilinks import create_antilinks_router
 from groupbot.routers.antispam import create_antispam_router
@@ -174,11 +176,13 @@ async def main() -> None:
     dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
     dp.include_router(create_advertising_post_duration_router(session_factory))
+    dp.include_router(create_advertising_duration_integration_router(session_factory))
     dp.include_router(create_advertising_edit_types_router(session_factory))
     dp.include_router(create_advertising_edit_router(session_factory))
     dp.include_router(create_advertising_post_request_router(session_factory))
     dp.include_router(create_advertising_materials_router(session_factory))
     dp.include_router(create_advertising_deal_actions_v2_router(session_factory))
+    dp.include_router(create_advertising_sales_nav_router(session_factory))
     dp.include_router(create_advertising_requests_router(session_factory))
     dp.include_router(create_advertising_mimorus_post_router(session_factory))
     dp.include_router(create_advertising_router(session_factory, settings))
