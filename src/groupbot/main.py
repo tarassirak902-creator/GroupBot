@@ -27,6 +27,7 @@ from groupbot.routers.admins_display import create_admins_display_router
 from groupbot.routers.advertising import create_advertising_router
 from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
+from groupbot.routers.advertising_requests import create_advertising_requests_router
 from groupbot.routers.antiflood import create_antiflood_router
 from groupbot.routers.antilinks import create_antilinks_router
 from groupbot.routers.antispam import create_antispam_router
@@ -140,6 +141,8 @@ async def main() -> None:
     dp.include_router(create_advertising_edit_types_router(session_factory))
     # Listing editor owns listing-card callbacks before the base advertising router.
     dp.include_router(create_advertising_edit_router(session_factory))
+    # Requests must own ads:request / ads:my_buys before advertising placeholders.
+    dp.include_router(create_advertising_requests_router(session_factory))
     # Advertising owns the Phase 8 user/creator callbacks before the legacy placeholders.
     dp.include_router(create_advertising_router(session_factory, settings))
     dp.include_router(create_creator_router(session_factory, settings))
