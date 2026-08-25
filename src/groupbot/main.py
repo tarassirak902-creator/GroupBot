@@ -61,6 +61,7 @@ from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.default_punishment_reasons import configured_reasons_with_defaults
 from groupbot.services.entry_schedule_adapter import install_entry_schedule
 from groupbot.services.moderation_notifications import unified_execute_action
+from groupbot.workers.advertising_lifecycle import advertising_lifecycle_worker
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 from groupbot.workers.subscription_lifecycle import subscription_lifecycle_worker
 
@@ -144,11 +145,13 @@ async def main() -> None:
     await clear_global_group_commands(bot)
     lifecycle_task = asyncio.create_task(group_lifecycle_worker(bot, session_factory))
     subscription_lifecycle_task = asyncio.create_task(subscription_lifecycle_worker(session_factory))
+    advertising_lifecycle_task = asyncio.create_task(advertising_lifecycle_worker(session_factory))
     try:
         await dp.start_polling(bot)
     finally:
         lifecycle_task.cancel()
         subscription_lifecycle_task.cancel()
+        advertising_lifecycle_task.cancel()
         await bot.session.close()
 
 
