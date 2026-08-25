@@ -28,6 +28,7 @@ from groupbot.routers.advertising import create_advertising_router
 from groupbot.routers.advertising_deal_actions import create_advertising_deal_actions_router
 from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
+from groupbot.routers.advertising_materials import create_advertising_materials_router
 from groupbot.routers.advertising_mimorus_post import create_advertising_mimorus_post_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
 from groupbot.routers.antiflood import create_antiflood_router
@@ -112,7 +113,6 @@ async def main() -> None:
     dp.message.outer_middleware(AntiSpamMiddleware(session_factory))
     dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
 
-    # startgroup=connect must be handled before the general group router.
     dp.include_router(create_group_startgroup_router(session_factory))
     dp.include_router(create_group_router(session_factory))
     dp.include_router(create_admin_member_sync_router(session_factory))
@@ -159,13 +159,13 @@ async def main() -> None:
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
     dp.include_router(create_advertising_edit_types_router(session_factory))
     dp.include_router(create_advertising_edit_router(session_factory))
+    dp.include_router(create_advertising_materials_router(session_factory))
     dp.include_router(create_advertising_deal_actions_router(session_factory))
     dp.include_router(create_advertising_requests_router(session_factory))
     dp.include_router(create_advertising_mimorus_post_router(session_factory))
     dp.include_router(create_advertising_router(session_factory, settings))
     dp.include_router(create_creator_router(session_factory, settings))
     dp.include_router(create_subscription_payments_router(session_factory))
-    # Own My Groups / add / remove callbacks before the legacy private handlers.
     dp.include_router(create_group_cabinet_actions_router(session_factory))
     dp.include_router(create_private_router(session_factory, settings))
 
