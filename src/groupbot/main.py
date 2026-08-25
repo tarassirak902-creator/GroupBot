@@ -33,6 +33,7 @@ from groupbot.routers.advertising_deal_actions_v2 import create_advertising_deal
 from groupbot.routers.advertising_duration_integration import create_advertising_duration_integration_router
 from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
+from groupbot.routers.advertising_marketplace_catalog import create_advertising_marketplace_catalog_router
 from groupbot.routers.advertising_materials import create_advertising_materials_router
 from groupbot.routers.advertising_mimorus_post import create_advertising_mimorus_post_router
 from groupbot.routers.advertising_post_duration import (
@@ -185,6 +186,7 @@ async def main() -> None:
     dp.include_router(create_advertising_sales_nav_router(session_factory))
     dp.include_router(create_advertising_requests_router(session_factory))
     dp.include_router(create_advertising_mimorus_post_router(session_factory))
+    dp.include_router(create_advertising_marketplace_catalog_router(session_factory))
     dp.include_router(create_advertising_router(session_factory, settings))
     dp.include_router(create_creator_router(session_factory, settings))
     dp.include_router(create_subscription_payments_router(session_factory))
