@@ -91,6 +91,7 @@ async def main() -> None:
     content_filters_middleware_module._execute_action = unified_execute_action
 
     manual_moderation_module._configured_reasons = configured_reasons_with_defaults
+    manual_moderation_module.ACTION_ALIASES["варн"] = "warning"
     ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
 
     install_entry_schedule(entry_protection_module)
