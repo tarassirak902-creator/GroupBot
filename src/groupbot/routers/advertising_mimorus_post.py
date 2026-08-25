@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+def _advertising_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📣 Купить рекламный пост у Mimorus",
+                    callback_data="ads:mimorus_post",
+                )
+            ],
+            [
+                InlineKeyboardButton(text="🛒 Купить рекламу", callback_data="ads:buy"),
+                InlineKeyboardButton(text="💼 Продать рекламу", callback_data="ads:sell"),
+            ],
+            [
+                InlineKeyboardButton(text="📋 Мои покупки", callback_data="ads:my_buys"),
+                InlineKeyboardButton(text="📦 Мои продажи", callback_data="ads:my_sales"),
+            ],
+            [InlineKeyboardButton(text="⭐ Отзывы и споры", callback_data="ads:reviews")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
+
+
+def _mimorus_post_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
+        ]
+    )
+
+
+HOME_TEXT = (
+    "🟣 <b>Mimorus · Реклама</b>\n\n"
+    "Покупайте рекламные размещения или выставляйте свою подключённую группу как площадку."
+)
+
+MIMORUS_POST_TEXT = (
+    "📣 <b>Рекламный пост от Mimorus</b>\n\n"
+    "Это отдельный формат от рекламы у владельцев групп.\n\n"
+    "Покупатель собирает рекламный пост и отправляет его на проверку создателю Mimorus. "
+    "После одобрения бот выставляет счёт в Telegram Stars, а оплаченный пост автоматически "
+    "публикуется в активных группах Mimorus по установленным условиям размещения.\n\n"
+    "Следующим блоком здесь будет мастер создания поста, проверка создателем, счёт Stars и запуск публикации."
+)
+
+
+def create_advertising_mimorus_post_router(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> Router:
+    # session_factory is accepted to keep router construction consistent with the project.
+    del session_factory
+    router = Router(name="advertising_mimorus_post")
+
+    @router.message(F.chat.type == "private", F.text == "📢 Реклама")
+    async def advertising_home_message(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await message.answer(
+            HOME_TEXT,
+            parse_mode="HTML",
+            reply_markup=_advertising_keyboard(),
+        )
+
+    @router.callback_query(F.data == "ads:home")
+    async def advertising_home(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        if callback.message is not None:
+            await callback.message.edit_text(
+                HOME_TEXT,
+                parse_mode="HTML",
+                reply_markup=_advertising_keyboard(),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data == "ads:mimorus_post")
+    async def mimorus_post(callback: CallbackQuery) -> None:
+        if callback.message is not None:
+            await callback.message.edit_text(
+                MIMORUS_POST_TEXT,
+                parse_mode="HTML",
+                reply_markup=_mimorus_post_keyboard(),
+            )
+        await callback.answer()
+
+    return router
