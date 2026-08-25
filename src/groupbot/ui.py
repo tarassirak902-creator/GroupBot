@@ -58,9 +58,15 @@ def tariff_back_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def owned_groups_keyboard(groups: list[tuple[int, str | None, str]]) -> InlineKeyboardMarkup:
+def owned_groups_keyboard(
+    groups: list[tuple[int, str | None, str]],
+    *,
+    add_bot_url: str | None = None,
+) -> InlineKeyboardMarkup:
     icons = {"active": "✅", "pending": "⏳", "disabled": "⚠️", "left": "❌"}
     rows = []
+    if add_bot_url:
+        rows.append([InlineKeyboardButton(text="➕ Добавить бота в группу", url=add_bot_url)])
     for chat_id, title, status in groups:
         label = f"{icons.get(status, '•')} {title or chat_id}"
         rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"group:open:{chat_id}")])
@@ -74,6 +80,7 @@ def group_locked_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎁 Активировать TEST", callback_data="tariff:card:TEST")],
             [InlineKeyboardButton(text="💳 Тариф и подписка", callback_data="tariff:show")],
             [InlineKeyboardButton(text="🔎 Диагностика", callback_data=f"group:diagnostic:{chat_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group:delete_prompt:{chat_id}")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="group:list"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
         ]
     )
@@ -90,8 +97,9 @@ def group_management_keyboard(chat_id: int, *, active: bool) -> InlineKeyboardMa
         [InlineKeyboardButton(text="🔎 Диагностика", callback_data=f"group:diagnostic:{chat_id}")],
     ]
     if active:
-        rows.append([InlineKeyboardButton(text="⚠️ Отключить группу", callback_data=f"group:disable:{chat_id}")])
+        rows.append([InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group:delete_prompt:{chat_id}")])
     else:
         rows.append([InlineKeyboardButton(text="ℹ️ Как подключить", callback_data=f"group:reconnect:{chat_id}")])
+        rows.append([InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group:delete_prompt:{chat_id}")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="group:list"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
