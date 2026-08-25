@@ -24,6 +24,7 @@ from groupbot.routers import manual_moderation as manual_moderation_module
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admins_display import create_admins_display_router
+from groupbot.routers.advertising import create_advertising_router
 from groupbot.routers.antiflood import create_antiflood_router
 from groupbot.routers.antilinks import create_antilinks_router
 from groupbot.routers.antispam import create_antispam_router
@@ -132,6 +133,8 @@ async def main() -> None:
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
     dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
+    # Advertising owns the Phase 8 user/creator callbacks before the legacy placeholders.
+    dp.include_router(create_advertising_router(session_factory, settings))
     dp.include_router(create_creator_router(session_factory, settings))
     # Payment router owns tariff cards/selection. It must be registered before
     # the legacy private router handlers with the same callback prefixes.
