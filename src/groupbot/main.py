@@ -46,6 +46,7 @@ from groupbot.routers.group_control import create_group_control_router
 from groupbot.routers.group_control_role_actions import create_group_control_role_actions_router
 from groupbot.routers.group_control_ux import create_group_control_ux_router
 from groupbot.routers.group_profile_stats import create_group_profile_stats_router
+from groupbot.routers.group_sections_nav import create_group_sections_nav_router
 from groupbot.routers.group_text_aliases import create_group_text_aliases_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
@@ -117,9 +118,6 @@ async def main() -> None:
     dp.include_router(create_ban_cleanup_router(session_factory))
     dp.include_router(create_moderation_release_router(session_factory))
 
-    # Manual moderation used to match every group text and silently consume
-    # unrelated commands. Restrict the whole message observer to its own
-    # command vocabulary so later group routers can receive their updates.
     manual_router = create_manual_moderation_router(session_factory)
     manual_router.message.filter(
         F.chat.type.in_({"group", "supergroup"}),
@@ -147,25 +145,20 @@ async def main() -> None:
     dp.include_router(create_protection_schedule_router(session_factory))
     dp.include_router(create_reserve_admin_router(session_factory))
     dp.include_router(create_network_admins_router(session_factory))
+    # Specific owner-cabinet sections must run before the broad group:section handler.
+    dp.include_router(create_group_sections_nav_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
     dp.include_router(create_networks_router(session_factory))
     dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
     dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
-    # Type changes are handled first so enabling a format never invents prices/intervals.
     dp.include_router(create_advertising_edit_types_router(session_factory))
-    # Listing editor owns listing-card callbacks before the base advertising router.
     dp.include_router(create_advertising_edit_router(session_factory))
-    # Deal actions must be registered before the generic ads:deal:* request handler.
     dp.include_router(create_advertising_deal_actions_router(session_factory))
-    # Requests must own ads:request / ads:my_buys before advertising placeholders.
     dp.include_router(create_advertising_requests_router(session_factory))
-    # Advertising owns the Phase 8 user/creator callbacks before the legacy placeholders.
     dp.include_router(create_advertising_router(session_factory, settings))
     dp.include_router(create_creator_router(session_factory, settings))
-    # Payment router owns tariff cards/selection. It must be registered before
-    # the legacy private router handlers with the same callback prefixes.
     dp.include_router(create_subscription_payments_router(session_factory))
     dp.include_router(create_private_router(session_factory, settings))
 
