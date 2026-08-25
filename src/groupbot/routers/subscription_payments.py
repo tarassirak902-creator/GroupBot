@@ -11,6 +11,7 @@ from groupbot.models import Subscription, SubscriptionStatus, Tariff
 from groupbot.payment_models import TelegramStarsPayment
 from groupbot.services.audit import write_audit
 from groupbot.services.users import upsert_user
+from groupbot.ui import tariff_card_keyboard
 
 
 def _stars_price(tariff: Tariff) -> int | None:
@@ -48,6 +49,42 @@ def create_subscription_payments_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
     router = Router(name="subscription_payments")
+
+    @router.callback_query(F.data.regexp(r"^tariff:card:(?!TEST$).+"))
+    async def paid_tariff_card(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+        code = (callback.data or "").split(":", 2)[2].upper()
+        async with session_factory() as session:
+            tariff = (
+                await session.execute(
+                    select(Tariff).where(Tariff.code == code, Tariff.is_active.is_(True))
+                )
+            ).scalar_one_or_none()
+        if tariff is None or tariff.is_trial:
+            await callback.answer("Тариф сейчас недоступен.", show_alert=True)
+            return
+
+        stars = _stars_price(tariff)
+        members = (
+            f"до {tariff.max_members_per_group:,}".replace(",", " ")
+            if tariff.max_members_per_group is not None
+            else "настраивается"
+        )
+        groups = str(tariff.max_groups) if tariff.max_groups is not None else "настраивается"
+        duration = f"{tariff.duration_days} дн." if tariff.duration_days else "не настроен"
+        price = f"{stars} ⭐" if stars is not None else "не настроена"
+        await callback.message.edit_text(
+            f"💳 <b>{tariff.name}</b>\n\n"
+            f"👤 Участников в одной группе: <b>{members}</b>\n"
+            f"👥 Групп: <b>{groups}</b>\n"
+            f"⏳ Срок: <b>{duration}</b>\n"
+            f"⭐ Цена: <b>{price}</b>\n\n"
+            "Оплата платных тарифов производится через Telegram Stars.",
+            parse_mode="HTML",
+            reply_markup=tariff_card_keyboard(code, can_activate_test=False),
+        )
+        await callback.answer()
 
     @router.callback_query(F.data.startswith("tariff:choose:"))
     async def choose_paid_tariff(callback: CallbackQuery, bot: Bot) -> None:
