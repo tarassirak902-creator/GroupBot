@@ -28,6 +28,7 @@ from groupbot.routers.advertising import create_advertising_router
 from groupbot.routers.advertising_deal_actions import create_advertising_deal_actions_router
 from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
+from groupbot.routers.advertising_mimorus_post import create_advertising_mimorus_post_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
 from groupbot.routers.antiflood import create_antiflood_router
 from groupbot.routers.antilinks import create_antilinks_router
@@ -145,7 +146,6 @@ async def main() -> None:
     dp.include_router(create_protection_schedule_router(session_factory))
     dp.include_router(create_reserve_admin_router(session_factory))
     dp.include_router(create_network_admins_router(session_factory))
-    # Specific owner-cabinet sections must run before the broad group:section handler.
     dp.include_router(create_group_sections_nav_router(session_factory))
     dp.include_router(create_group_control_router(session_factory))
     dp.include_router(create_networks_router(session_factory))
@@ -157,6 +157,9 @@ async def main() -> None:
     dp.include_router(create_advertising_edit_router(session_factory))
     dp.include_router(create_advertising_deal_actions_router(session_factory))
     dp.include_router(create_advertising_requests_router(session_factory))
+    # Own the advertising home screen before the marketplace router so the
+    # approved Mimorus-post entry is always shown at the top.
+    dp.include_router(create_advertising_mimorus_post_router(session_factory))
     dp.include_router(create_advertising_router(session_factory, settings))
     dp.include_router(create_creator_router(session_factory, settings))
     dp.include_router(create_subscription_payments_router(session_factory))
