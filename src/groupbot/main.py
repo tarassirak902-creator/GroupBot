@@ -42,8 +42,8 @@ from groupbot.routers.advertising_post_duration import (
     create_advertising_post_duration_router,
     editor_keyboard_with_duration,
     listing_text_with_duration,
-    post_editor_keyboard_with_cancel,
 )
+from groupbot.routers.advertising_post_keyboard import post_editor_keyboard
 from groupbot.routers.advertising_post_request import create_advertising_post_request_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
 from groupbot.routers.advertising_sales_nav import create_advertising_sales_nav_router
@@ -122,7 +122,7 @@ async def main() -> None:
     advertising_edit_module._editor_keyboard = editor_keyboard_with_duration
     advertising_edit_types_module._listing_text = listing_text_with_duration
     advertising_edit_types_module._editor_keyboard = editor_keyboard_with_duration
-    advertising_post_request_module._editor_keyboard = post_editor_keyboard_with_cancel
+    advertising_post_request_module._editor_keyboard = post_editor_keyboard
 
     install_entry_schedule(entry_protection_module)
 
