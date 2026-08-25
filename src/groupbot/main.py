@@ -30,6 +30,7 @@ from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
 from groupbot.routers.advertising_materials import create_advertising_materials_router
 from groupbot.routers.advertising_mimorus_post import create_advertising_mimorus_post_router
+from groupbot.routers.advertising_post_request import create_advertising_post_request_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
 from groupbot.routers.antiflood import create_antiflood_router
 from groupbot.routers.antilinks import create_antilinks_router
@@ -126,9 +127,7 @@ async def main() -> None:
     manual_router = create_manual_moderation_router(session_factory)
     manual_router.message.filter(
         F.chat.type.in_({"group", "supergroup"}),
-        F.text.regexp(
-            r"(?i)^\s*(?:(?:пред|варн|мут|бан|размут|разбан)(?:\s+.*)?|мои\s+баны|мои\s+муты|выдал\s+пред|банлист|мутлист|преды)\s*$"
-        ),
+        F.text.regexp(r"(?i)^\s*(?:(?:пред|варн|мут|бан|размут|разбан)(?:\s+.*)?|мои\s+баны|мои\s+муты|выдал\s+пред|банлист|мутлист|преды)\s*$"),
     )
     dp.include_router(manual_router)
 
@@ -159,6 +158,8 @@ async def main() -> None:
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
     dp.include_router(create_advertising_edit_types_router(session_factory))
     dp.include_router(create_advertising_edit_router(session_factory))
+    # Post/both requests build and preview the post before the generic request router.
+    dp.include_router(create_advertising_post_request_router(session_factory))
     dp.include_router(create_advertising_materials_router(session_factory))
     dp.include_router(create_advertising_deal_actions_router(session_factory))
     dp.include_router(create_advertising_requests_router(session_factory))
@@ -172,7 +173,7 @@ async def main() -> None:
     await clear_global_group_commands(bot)
     lifecycle_task = asyncio.create_task(group_lifecycle_worker(bot, session_factory))
     subscription_lifecycle_task = asyncio.create_task(subscription_lifecycle_worker(session_factory))
-    advertising_lifecycle_task = asyncio.create_task(advertising_lifecycle_worker(session_factory))
+    advertising_lifecycle_task = asyncio.create_task(advertising_lifecycle_worker(bot, session_factory))
     try:
         await dp.start_polling(bot)
     finally:
