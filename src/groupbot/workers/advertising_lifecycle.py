@@ -66,15 +66,13 @@ async def publish_due_posts(bot: Bot, session_factory: async_sessionmaker[AsyncS
                 except Exception:
                     logger.exception("Failed to publish advertising post deal=%s chat=%s", deal.id, listing.chat_id)
                 finally:
-                    # Avoid retrying a broken post every minute; the next attempt follows
-                    # the seller's configured publication interval.
                     placement.last_published_at = now
     return published
 
 
 async def finish_expired_posts(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
     now = datetime.now(timezone.utc)
-    notifications: list[tuple[int, int, str, bool]] = []
+    notifications: list[tuple[int, int, str, bool, int]] = []
     finished = 0
     async with session_factory() as session:
         async with session.begin():
@@ -92,6 +90,11 @@ async def finish_expired_posts(bot: Bot, session_factory: async_sessionmaker[Asy
             for placement, deal, listing in rows:
                 placement.status = "finished"
                 finished += 1
+                cfg = dict(placement.config_json or {})
+                try:
+                    duration_days = max(int(cfg.get("duration_days") or 1), 1)
+                except (TypeError, ValueError):
+                    duration_days = 1
                 other_active = (await session.execute(
                     select(AdvertisingPlacement.id).where(
                         AdvertisingPlacement.deal_id == deal.id,
@@ -103,7 +106,7 @@ async def finish_expired_posts(bot: Bot, session_factory: async_sessionmaker[Asy
                 if deal_finished:
                     deal.status = "finished_waiting_confirmation"
                     deal.finished_at = now
-                notifications.append((deal.buyer_user_id, deal.seller_user_id, listing.group_title_snapshot, deal_finished))
+                notifications.append((deal.buyer_user_id, deal.seller_user_id, listing.group_title_snapshot, deal_finished, duration_days))
                 await write_audit(
                     session,
                     "advertising.post_finished",
@@ -111,18 +114,20 @@ async def finish_expired_posts(bot: Bot, session_factory: async_sessionmaker[Asy
                     chat_id=listing.chat_id,
                     target_type="advertising_deal",
                     target_id=str(deal.id),
-                    payload={"placement_id": placement.id},
+                    payload={"placement_id": placement.id, "duration_days": duration_days},
                 )
 
-    for buyer_id, seller_id, title, deal_finished in notifications:
+    for buyer_id, seller_id, title, deal_finished, duration_days in notifications:
         buyer_text = (
             "🏁 <b>Показ рекламного поста завершён</b>\n\n"
             f"🏠 Площадка: <b>{title}</b>\n"
-            "Рекламный пост показывался в течение оплаченных суток."
+            f"⏳ Срок размещения: <b>{duration_days} дн.</b>\n"
+            "Рекламная кампания завершена автоматически."
         )
         seller_text = (
             "🏁 <b>Размещение рекламного поста завершено</b>\n\n"
-            f"🏠 Площадка: <b>{title}</b>"
+            f"🏠 Площадка: <b>{title}</b>\n"
+            f"⏳ Срок: <b>{duration_days} дн.</b>"
         )
         if deal_finished:
             buyer_text += "\n\nТеперь сделку можно закрыть без претензий или открыть спор."
