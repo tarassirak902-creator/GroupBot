@@ -77,15 +77,31 @@ def _listing_created_keyboard(listing_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def _marketplace_listing_label(listing: AdvertisingListing) -> str:
+    offers: list[str] = []
+    if listing.offers_post:
+        offers.append(f"📣 Пост {listing.post_price_stars or 0}⭐/сут")
+    if listing.offers_mandatory:
+        terms = listing.mandatory_terms_json or {}
+        unit = "день" if terms.get("mode") == "days" else "подп."
+        offers.append(f"✅ ОП {listing.mandatory_price_stars or 0}⭐/{unit}")
+    details = " · ".join(offers)
+    return f"{listing.group_title_snapshot} · {details}"[:64]
+
+
 def _listings_keyboard(rows: list[AdvertisingListing], *, own: bool) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     for listing in rows:
-        kinds: list[str] = []
-        if listing.offers_post:
-            kinds.append("📣")
-        if listing.offers_mandatory:
-            kinds.append("✅")
-        buttons.append([InlineKeyboardButton(text=f"{''.join(kinds)} {listing.group_title_snapshot}"[:64], callback_data=f"ads:listing:{listing.id}")])
+        if own:
+            kinds: list[str] = []
+            if listing.offers_post:
+                kinds.append("📣")
+            if listing.offers_mandatory:
+                kinds.append("✅")
+            text = f"{''.join(kinds)} {listing.group_title_snapshot}"[:64]
+        else:
+            text = _marketplace_listing_label(listing)
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f"ads:listing:{listing.id}")])
     if own:
         buttons.append([InlineKeyboardButton(text="➕ Создать/изменить объявление", callback_data="ads:sell")])
     buttons.append([InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")])
@@ -324,7 +340,7 @@ def create_advertising_router(session_factory: async_sessionmaker[AsyncSession],
         if not rows:
             await callback.message.edit_text("🛒 <b>Купить рекламу</b>\n\nАктивных объявлений других рекламодателей пока нет.", parse_mode="HTML", reply_markup=_advertising_back_keyboard())
         else:
-            await callback.message.edit_text("🛒 <b>Купить рекламу</b>\n\nВыберите рекламную площадку:", parse_mode="HTML", reply_markup=_listings_keyboard(list(rows), own=False))
+            await callback.message.edit_text("🛒 <b>Купить рекламу</b>\n\nВыберите рекламную площадку:\n\nВ списке сразу указаны формат рекламы и цена.", parse_mode="HTML", reply_markup=_listings_keyboard(list(rows), own=False))
         await callback.answer()
 
     @router.callback_query(F.data == "ads:my_sales")
