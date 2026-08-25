@@ -55,6 +55,7 @@ from groupbot.routers.punishment_reasons import create_punishment_reasons_router
 from groupbot.routers.reserve_admin import create_reserve_admin_router
 from groupbot.routers.special_status_members import create_special_status_members_router
 from groupbot.routers.subscription_payments import create_subscription_payments_router
+from groupbot.routers.tariff_limits import create_tariff_limits_router
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.default_punishment_reasons import configured_reasons_with_defaults
 from groupbot.services.entry_schedule_adapter import install_entry_schedule
@@ -118,6 +119,7 @@ async def main() -> None:
     dp.include_router(create_group_control_ux_router(session_factory))
     dp.include_router(create_group_control_role_actions_router(session_factory))
     dp.include_router(create_punishment_reasons_router(session_factory))
+    dp.include_router(create_tariff_limits_router(session_factory))
     dp.include_router(create_antiflood_router(session_factory))
     dp.include_router(create_antispam_router(session_factory))
     dp.include_router(create_antilinks_router(session_factory))
