@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+from aiogram import F, Router
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingReview
+
+
+def _short_title(value: str, limit: int = 38) -> str:
+    text = (value or "Группа").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _rating_label(rating: float | None) -> str:
+    if rating is None:
+        return "⭐ Нет оценок"
+    return f"⭐ {rating:.1f}"
+
+
+def _offer_label(listing: AdvertisingListing) -> str:
+    parts: list[str] = []
+    if listing.offers_post:
+        parts.append(f"📣 Пост — {int(listing.post_price_stars or 0)} ⭐/сут")
+    if listing.offers_mandatory:
+        terms = listing.mandatory_terms_json or {}
+        if terms.get("mode") == "days":
+            unit = "день"
+        else:
+            unit = "подп."
+        parts.append(f"✅ ОП — {int(listing.mandatory_price_stars or 0)} ⭐/{unit}")
+    return " · ".join(parts)[:64]
+
+
+def _catalog_keyboard(rows: list[AdvertisingListing], ratings: dict[int, float]) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    for listing in rows:
+        target = f"ads:listing:{listing.id}"
+        buttons.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        text=f"🏷️ Объявление · {_rating_label(ratings.get(listing.id))} 👇"[:64],
+                        callback_data=target,
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=f"🏠 {_short_title(listing.group_title_snapshot)}"[:64],
+                        callback_data=target,
+                    )
+                ],
+                [InlineKeyboardButton(text=_offer_label(listing), callback_data=target)],
+            ]
+        )
+    buttons.append([InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def create_advertising_marketplace_catalog_router(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> Router:
+    router = Router(name="advertising_marketplace_catalog")
+
+    @router.callback_query(F.data == "ads:buy")
+    async def buy_advertising(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+
+        async with session_factory() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(AdvertisingListing)
+                        .where(
+                            AdvertisingListing.is_active.is_(True),
+                            AdvertisingListing.owner_user_id != callback.from_user.id,
+                        )
+                        .order_by(AdvertisingListing.updated_at.desc(), AdvertisingListing.id.desc())
+                        .limit(50)
+                    )
+                ).scalars().all()
+            )
+
+            ratings: dict[int, float] = {}
+            if rows:
+                listing_ids = [row.id for row in rows]
+                rating_rows = (
+                    await session.execute(
+                        select(
+                            AdvertisingDeal.listing_id,
+                            func.avg(AdvertisingReview.rating),
+                        )
+                        .join(AdvertisingReview, AdvertisingReview.deal_id == AdvertisingDeal.id)
+                        .where(
+                            AdvertisingDeal.listing_id.in_(listing_ids),
+                            AdvertisingReview.reviewed_user_id == AdvertisingDeal.seller_user_id,
+                        )
+                        .group_by(AdvertisingDeal.listing_id)
+                    )
+                ).all()
+                ratings = {
+                    int(listing_id): float(avg_rating)
+                    for listing_id, avg_rating in rating_rows
+                    if avg_rating is not None
+                }
+
+        if not rows:
+            await callback.message.edit_text(
+                "🛒 <b>Купить рекламу</b>\n\nАктивных объявлений других рекламодателей пока нет.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")]]
+                ),
+            )
+        else:
+            await callback.message.edit_text(
+                "🛒 <b>Купить рекламу</b>\n\n"
+                "Выберите рекламную площадку. Рейтинг считается по отзывам покупателей о рекламодателе именно на этой площадке:",
+                parse_mode="HTML",
+                reply_markup=_catalog_keyboard(rows, ratings),
+            )
+        await callback.answer()
+
+    return router
