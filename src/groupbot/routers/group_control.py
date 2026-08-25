@@ -177,12 +177,15 @@ def _role_keyboard(chat_id: int, role: AdminRole, permissions: dict[str, bool]) 
                 callback_data=f"gctl:perm:{chat_id}:{role.id}:{key}",
             )
         ])
+    rows.append([InlineKeyboardButton(text="💾 Сохранить", callback_data=f"gctl:perm_save:{chat_id}:{role.id}")])
     rows.append([
         InlineKeyboardButton(
             text="⛔ Выключить ранг" if role.is_active else "✅ Включить ранг",
             callback_data=f"gctl:role_toggle:{chat_id}:{role.id}",
         )
     ])
+    if role.name not in STANDARD_ADMIN_ROLE_NAMES:
+        rows.append([InlineKeyboardButton(text="🗑 Удалить ранг", callback_data=f"gctl:role_delete:{chat_id}:{role.id}")])
     rows.append([InlineKeyboardButton(text="◀️ Все ранги", callback_data=f"gctl:roles:{chat_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -538,7 +541,10 @@ def create_group_control_router(
         await state.set_state(AdminRoleState.waiting_name)
         await state.update_data(chat_id=chat_id)
         if callback.message is not None:
-            await callback.message.answer("Отправьте название нового дополнительного административного ранга (1–128 символов).")
+            prompt = await callback.message.answer(
+                "Отправьте название нового дополнительного административного ранга (1–128 символов)."
+            )
+            await state.update_data(prompt_message_id=prompt.message_id)
         await callback.answer()
 
     @router.message(AdminRoleState.waiting_name, F.chat.type == "private")
@@ -552,6 +558,7 @@ def create_group_control_router(
             return
         data = await state.get_data()
         chat_id = int(data["chat_id"])
+        prompt_message_id = data.get("prompt_message_id")
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, message.from_user.id):
@@ -573,24 +580,52 @@ def create_group_control_router(
                 role = AdminRole(chat_id=chat_id, name=name, is_active=True)
                 session.add(role)
                 await session.flush()
+                role_id = role.id
                 for key, _ in KNOWN_PERMISSIONS:
-                    session.add(AdminPermission(role_id=role.id, permission=key, allowed=False))
+                    session.add(AdminPermission(role_id=role_id, permission=key, allowed=False))
                 await write_audit(
                     session,
                     "group.admin_role_created",
                     chat_id=chat_id,
                     actor_user_id=message.from_user.id,
                     target_type="admin_role",
-                    target_id=str(role.id),
+                    target_id=str(role_id),
                     payload={"name": name},
                 )
+
+        permissions = {key: False for key, _ in KNOWN_PERMISSIONS}
         await state.clear()
-        await message.answer(
-            f"✅ Ранг «{name}» создан. По умолчанию все права выключены.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👑 Открыть ранги", callback_data=f"gctl:roles:{chat_id}")]
-            ]),
+        await state.update_data(
+            permission_draft_chat_id=chat_id,
+            permission_draft_role_id=role_id,
+            permission_draft=permissions,
         )
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        text = (
+            "👑 <b>Настройка админ-ранга</b>\n\n"
+            f"Название: <b>{name}</b>\n"
+            "Статус: ✅ включён\n"
+            "Назначено пользователей: <b>0</b>\n\n"
+            "✅ Ранг создан. Выберите нужные разрешения и нажмите <b>💾 Сохранить</b>."
+        )
+        keyboard = _role_keyboard(chat_id, role, permissions)
+        if prompt_message_id is not None:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=int(prompt_message_id),
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+                return
+            except Exception:
+                pass
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
     @router.callback_query(F.data.startswith("gctl:role:"))
     async def role_card(callback: CallbackQuery) -> None:
