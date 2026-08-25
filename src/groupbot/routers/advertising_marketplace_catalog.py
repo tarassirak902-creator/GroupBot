@@ -22,17 +22,12 @@ def _rating_label(rating: float | None) -> str:
 
 
 def _offer_label(listing: AdvertisingListing) -> str:
-    parts: list[str] = []
-    if listing.offers_post:
-        parts.append(f"📣 Пост — {int(listing.post_price_stars or 0)} ⭐/сут")
+    variants: list[str] = []
     if listing.offers_mandatory:
-        terms = listing.mandatory_terms_json or {}
-        if terms.get("mode") == "days":
-            unit = "день"
-        else:
-            unit = "подп."
-        parts.append(f"✅ ОП — {int(listing.mandatory_price_stars or 0)} ⭐/{unit}")
-    return " · ".join(parts)[:64]
+        variants.append("ОП")
+    if listing.offers_post:
+        variants.append("Пост")
+    return f"Варианты: {' / '.join(variants)}"[:64]
 
 
 def _catalog_keyboard(rows: list[AdvertisingListing], ratings: dict[int, float]) -> InlineKeyboardMarkup:
@@ -119,7 +114,7 @@ def create_advertising_marketplace_catalog_router(
         else:
             await callback.message.edit_text(
                 "🛒 <b>Купить рекламу</b>\n\n"
-                "Выберите рекламную площадку. Рейтинг считается по отзывам покупателей о рекламодателе именно на этой площадке:",
+                "Выберите рекламную площадку. Цена и подробные условия указаны внутри объявления:",
                 parse_mode="HTML",
                 reply_markup=_catalog_keyboard(rows, ratings),
             )
