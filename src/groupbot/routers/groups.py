@@ -137,11 +137,22 @@ def create_group_router(session_factory: async_sessionmaker[AsyncSession]) -> Ro
                 async with session.begin():
                     await connect_group(session, bot, message.chat.id, message.from_user)
         except PermissionError as exc:
-            if str(exc) == "only_chat_owner":
+            error = str(exc)
+            if error == "only_chat_owner":
                 await message.answer("Подключить группу может только её фактический владелец.")
                 return
-            if str(exc) == "bot_not_admin":
+            if error == "bot_not_admin":
                 await message.answer("Для подключения бот должен быть администратором группы.")
+                return
+            if error.startswith("group_limit_reached:"):
+                try:
+                    limit = int(error.rsplit(":", 1)[1])
+                except ValueError:
+                    limit = 0
+                await message.answer(
+                    "Достигнут лимит подключённых групп текущего тарифа"
+                    + (f": {limit}." if limit else ".")
+                )
                 return
             raise
 
