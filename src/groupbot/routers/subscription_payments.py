@@ -14,6 +14,15 @@ from groupbot.services.users import upsert_user
 from groupbot.ui import tariff_card_keyboard
 
 
+TARIFF_ICONS = {
+    "TEST": "🎁",
+    "BASIC": "🔹",
+    "STANDARD": "🔷",
+    "PRO": "💎",
+    "MAX": "👑",
+}
+
+
 def _stars_price(tariff: Tariff) -> int | None:
     config = tariff.limits_json or {}
     raw = config.get("stars_price")
@@ -45,13 +54,75 @@ def _parse_payload(payload: str) -> tuple[int, int, str, int] | None:
         return None
 
 
+def _limit(tariff: Tariff, key: str, fallback: str = "—") -> str:
+    value = (tariff.limits_json or {}).get(key)
+    if value is None:
+        return fallback
+    return str(value)
+
+
+def _tariff_card_text(tariff: Tariff) -> str:
+    icon = TARIFF_ICONS.get(tariff.code, "💳")
+    members = (
+        f"{tariff.max_members_per_group:,}".replace(",", " ")
+        if tariff.max_members_per_group is not None
+        else "до технического максимума Telegram"
+    )
+    duration = f"{tariff.duration_days} дней" if tariff.duration_days else "не настроен"
+
+    if tariff.code == "TEST":
+        return (
+            f"{icon} <b>TEST — 3 дня</b>\n\n"
+            "Пробный тариф нужен для проверки возможностей Mimorus на реальной группе любого размера.\n\n"
+            f"👤 Участников в группе: <b>до {members}</b>\n"
+            "👥 Основная группа: <b>1</b>\n"
+            "🧪 Доп. группа: <b>+1 только для теста сетки</b>\n"
+            f"🌐 Сетей: <b>{_limit(tariff, 'networks')}</b>\n"
+            f"🔗 Групп в одной сети: <b>{_limit(tariff, 'network_groups_per_network')}</b>\n"
+            f"🚫 Списков запрещённых слов: <b>{_limit(tariff, 'blocked_word_lists')}</b>\n"
+            f"🔤 Запрещённых слов всего: <b>{_limit(tariff, 'blocked_words')}</b>\n"
+            f"📝 Списков запрещённых фраз: <b>{_limit(tariff, 'blocked_phrase_lists')}</b>\n"
+            f"💬 Запрещённых фраз всего: <b>{_limit(tariff, 'blocked_phrases')}</b>\n"
+            f"⚖️ Своих причин: <b>{_limit(tariff, 'custom_reasons')}</b>\n"
+            f"👑 Доп. админ-рангов: <b>{_limit(tariff, 'admin_ranks')}</b>\n"
+            f"📤 Экспортов статистики: <b>{_limit(tariff, 'exports')} за TEST</b>\n"
+            "💎 VIP: <b>без лимита</b>\n"
+            f"🛡 Расписаний защиты: <b>{_limit(tariff, 'protection_schedules')}</b>\n\n"
+            "⭐ Цена: <b>бесплатно</b>"
+        )
+
+    stars = _stars_price(tariff)
+    price = f"{stars} ⭐" if stars is not None else "не настроена"
+    exports = _limit(tariff, "exports", "без лимита")
+    return (
+        f"{icon} <b>{tariff.name}</b>\n\n"
+        f"👤 Участников в одной группе: <b>до {members}</b>\n"
+        f"👥 Подключённых групп: <b>{tariff.max_groups or '—'}</b>\n"
+        f"🌐 Сетей: <b>{_limit(tariff, 'networks')}</b>\n"
+        f"🔗 Групп в одной сети: <b>{_limit(tariff, 'network_groups_per_network')}</b>\n\n"
+        f"🚫 Списков запрещённых слов: <b>{_limit(tariff, 'blocked_word_lists')}</b>\n"
+        f"🔤 Запрещённых слов всего: <b>{_limit(tariff, 'blocked_words')}</b>\n"
+        f"📝 Списков запрещённых фраз: <b>{_limit(tariff, 'blocked_phrase_lists')}</b>\n"
+        f"💬 Запрещённых фраз всего: <b>{_limit(tariff, 'blocked_phrases')}</b>\n"
+        f"⚖️ Своих причин: <b>{_limit(tariff, 'custom_reasons')}</b>\n"
+        f"👑 Доп. админ-рангов: <b>{_limit(tariff, 'admin_ranks')}</b>\n"
+        f"👮 Резервных администраторов: <b>{_limit(tariff, 'reserve_admins')}</b>\n"
+        f"📤 Экспортов статистики: <b>{exports}{'/мес' if exports != 'без лимита' else ''}</b>\n"
+        "💎 VIP: <b>без лимита</b>\n"
+        f"🛡 Расписаний защиты: <b>{_limit(tariff, 'protection_schedules')}</b>\n\n"
+        f"⏳ Срок: <b>{duration}</b>\n"
+        f"⭐ Цена: <b>{price}</b>\n\n"
+        "Оплата платных тарифов производится через Telegram Stars."
+    )
+
+
 def create_subscription_payments_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
     router = Router(name="subscription_payments")
 
-    @router.callback_query(F.data.regexp(r"^tariff:card:(?!TEST$).+"))
-    async def paid_tariff_card(callback: CallbackQuery) -> None:
+    @router.callback_query(F.data.startswith("tariff:card:"))
+    async def tariff_card(callback: CallbackQuery) -> None:
         if callback.message is None:
             return
         code = (callback.data or "").split(":", 2)[2].upper()
@@ -61,28 +132,33 @@ def create_subscription_payments_router(
                     select(Tariff).where(Tariff.code == code, Tariff.is_active.is_(True))
                 )
             ).scalar_one_or_none()
-        if tariff is None or tariff.is_trial:
+            active = (
+                await session.execute(
+                    select(Subscription.id).where(
+                        Subscription.owner_user_id == callback.from_user.id,
+                        Subscription.status == SubscriptionStatus.active.value,
+                        Subscription.ends_at > datetime.now(timezone.utc),
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            previous_trial = None
+            if code == "TEST":
+                previous_trial = (
+                    await session.execute(
+                        select(Subscription.id).where(
+                            Subscription.owner_user_id == callback.from_user.id,
+                            Subscription.is_trial.is_(True),
+                        ).limit(1)
+                    )
+                ).scalar_one_or_none()
+        if tariff is None:
             await callback.answer("Тариф сейчас недоступен.", show_alert=True)
             return
-
-        stars = _stars_price(tariff)
-        members = (
-            f"до {tariff.max_members_per_group:,}".replace(",", " ")
-            if tariff.max_members_per_group is not None
-            else "настраивается"
-        )
-        groups = str(tariff.max_groups) if tariff.max_groups is not None else "настраивается"
-        duration = f"{tariff.duration_days} дн." if tariff.duration_days else "не настроен"
-        price = f"{stars} ⭐" if stars is not None else "не настроена"
+        can_activate_test = code == "TEST" and active is None and previous_trial is None
         await callback.message.edit_text(
-            f"💳 <b>{tariff.name}</b>\n\n"
-            f"👤 Участников в одной группе: <b>{members}</b>\n"
-            f"👥 Групп: <b>{groups}</b>\n"
-            f"⏳ Срок: <b>{duration}</b>\n"
-            f"⭐ Цена: <b>{price}</b>\n\n"
-            "Оплата платных тарифов производится через Telegram Stars.",
+            _tariff_card_text(tariff),
             parse_mode="HTML",
-            reply_markup=tariff_card_keyboard(code, can_activate_test=False),
+            reply_markup=tariff_card_keyboard(code, can_activate_test=can_activate_test),
         )
         await callback.answer()
 
