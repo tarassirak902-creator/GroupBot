@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import BotCommandScopeAllGroupChats
 
 from groupbot.config import get_settings
@@ -45,6 +45,7 @@ from groupbot.routers.group_control import create_group_control_router
 from groupbot.routers.group_control_role_actions import create_group_control_role_actions_router
 from groupbot.routers.group_control_ux import create_group_control_ux_router
 from groupbot.routers.group_profile_stats import create_group_profile_stats_router
+from groupbot.routers.group_text_aliases import create_group_text_aliases_router
 from groupbot.routers.groups import create_group_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
 from groupbot.routers.manual_moderation import create_manual_moderation_router
@@ -114,7 +115,20 @@ async def main() -> None:
     dp.include_router(create_message_operations_router(session_factory))
     dp.include_router(create_ban_cleanup_router(session_factory))
     dp.include_router(create_moderation_release_router(session_factory))
-    dp.include_router(create_manual_moderation_router(session_factory))
+
+    # Manual moderation used to match every group text and silently consume
+    # unrelated commands. Restrict the whole message observer to its own
+    # command vocabulary so later group routers can receive their updates.
+    manual_router = create_manual_moderation_router(session_factory)
+    manual_router.message.filter(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(
+            r"(?i)^\s*(?:(?:пред|варн|мут|бан|размут|разбан)(?:\s+.*)?|мои\s+баны|мои\s+муты|выдал\s+пред|банлист|мутлист|преды)\s*$"
+        ),
+    )
+    dp.include_router(manual_router)
+
+    dp.include_router(create_group_text_aliases_router(session_factory))
     dp.include_router(create_group_profile_stats_router(session_factory))
     dp.include_router(create_group_analytics_router(session_factory))
     dp.include_router(create_group_commands_router(session_factory))
