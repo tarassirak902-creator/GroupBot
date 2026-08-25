@@ -16,6 +16,10 @@ from groupbot.middleware.antispam import AntiSpamMiddleware
 from groupbot.middleware.content_filters import ContentFiltersMiddleware
 from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
+from groupbot.routers import advertising as advertising_module
+from groupbot.routers import advertising_edit as advertising_edit_module
+from groupbot.routers import advertising_edit_types as advertising_edit_types_module
+from groupbot.routers import advertising_post_request as advertising_post_request_module
 from groupbot.routers import ban_cleanup as ban_cleanup_module
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
@@ -25,11 +29,17 @@ from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admins_display import create_admins_display_router
 from groupbot.routers.advertising import create_advertising_router
-from groupbot.routers.advertising_deal_actions import create_advertising_deal_actions_router
+from groupbot.routers.advertising_deal_actions_v2 import create_advertising_deal_actions_v2_router
 from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
 from groupbot.routers.advertising_materials import create_advertising_materials_router
 from groupbot.routers.advertising_mimorus_post import create_advertising_mimorus_post_router
+from groupbot.routers.advertising_post_duration import (
+    create_advertising_post_duration_router,
+    editor_keyboard_with_duration,
+    listing_text_with_duration,
+    post_editor_keyboard_with_cancel,
+)
 from groupbot.routers.advertising_post_request import create_advertising_post_request_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
 from groupbot.routers.antiflood import create_antiflood_router
@@ -102,6 +112,13 @@ async def main() -> None:
     manual_moderation_module.ACTION_ALIASES["варн"] = "warning"
     ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
 
+    advertising_module._listing_text = listing_text_with_duration
+    advertising_edit_module._listing_text = listing_text_with_duration
+    advertising_edit_module._editor_keyboard = editor_keyboard_with_duration
+    advertising_edit_types_module._listing_text = listing_text_with_duration
+    advertising_edit_types_module._editor_keyboard = editor_keyboard_with_duration
+    advertising_post_request_module._editor_keyboard = post_editor_keyboard_with_cancel
+
     install_entry_schedule(entry_protection_module)
 
     bot = Bot(settings.bot_token)
@@ -156,12 +173,12 @@ async def main() -> None:
     dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
     dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
+    dp.include_router(create_advertising_post_duration_router(session_factory))
     dp.include_router(create_advertising_edit_types_router(session_factory))
     dp.include_router(create_advertising_edit_router(session_factory))
-    # Post/both requests build and preview the post before the generic request router.
     dp.include_router(create_advertising_post_request_router(session_factory))
     dp.include_router(create_advertising_materials_router(session_factory))
-    dp.include_router(create_advertising_deal_actions_router(session_factory))
+    dp.include_router(create_advertising_deal_actions_v2_router(session_factory))
     dp.include_router(create_advertising_requests_router(session_factory))
     dp.include_router(create_advertising_mimorus_post_router(session_factory))
     dp.include_router(create_advertising_router(session_factory, settings))
