@@ -6,7 +6,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing
-from groupbot.models import User
 
 
 def _request_type_keyboard(listing: AdvertisingListing) -> InlineKeyboardMarkup:
@@ -37,6 +36,8 @@ def _deal_keyboard(deal: AdvertisingDeal, viewer_id: int) -> InlineKeyboardMarku
             InlineKeyboardButton(text="✅ Принять", callback_data=f"ads:deal:accept:{deal.id}"),
             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"ads:deal:reject:{deal.id}"),
         ])
+    if viewer_id == deal.buyer_user_id and deal.status == "accepted":
+        rows.append([InlineKeyboardButton(text="📦 Передать материалы", callback_data=f"ads:materials:{deal.id}")])
     rows.append([InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -52,7 +53,7 @@ def _kind_text(deal: AdvertisingDeal) -> str:
 def _deal_text(deal: AdvertisingDeal, listing: AdvertisingListing) -> str:
     status = {
         "pending": "⏳ Ожидает решения рекламодателя",
-        "accepted": "✅ Принята",
+        "accepted": "✅ Принята — ожидает материалов/запуска",
         "rejected": "❌ Отклонена",
     }.get(deal.status, deal.status)
     return (
@@ -234,8 +235,6 @@ def create_advertising_requests_router(session_factory: async_sessionmaker[Async
 
     @router.callback_query(F.data == "ads:my_sales")
     async def my_sales_requests(callback: CallbackQuery) -> None:
-        # Base advertising router still owns the listing catalogue. This handler intentionally
-        # does not intercept that screen; incoming requests are opened from seller notifications.
         return
 
     return router
