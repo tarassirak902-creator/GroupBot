@@ -10,6 +10,7 @@ from groupbot.middleware import antiflood as antiflood_middleware_module
 from groupbot.middleware import antilinks as antilinks_middleware_module
 from groupbot.middleware import antispam as antispam_middleware_module
 from groupbot.middleware import content_filters as content_filters_middleware_module
+from groupbot.middleware.advertising_mandatory import AdvertisingMandatoryMiddleware
 from groupbot.middleware.antiflood import AntiFloodMiddleware
 from groupbot.middleware.antilinks import AntiLinksMiddleware
 from groupbot.middleware.antispam import AntiSpamMiddleware
@@ -33,6 +34,7 @@ from groupbot.routers.advertising_deal_actions_v2 import create_advertising_deal
 from groupbot.routers.advertising_duration_integration import create_advertising_duration_integration_router
 from groupbot.routers.advertising_edit import create_advertising_edit_router
 from groupbot.routers.advertising_edit_types import create_advertising_edit_types_router
+from groupbot.routers.advertising_mandatory_request import create_advertising_mandatory_request_router
 from groupbot.routers.advertising_marketplace_catalog import create_advertising_marketplace_catalog_router
 from groupbot.routers.advertising_materials import create_advertising_materials_router
 from groupbot.routers.advertising_mimorus_post import create_advertising_mimorus_post_router
@@ -129,6 +131,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
+    dp.message.outer_middleware(AdvertisingMandatoryMiddleware(session_factory))
     dp.message.outer_middleware(ContentFiltersMiddleware(session_factory))
     dp.message.outer_middleware(AntiFloodMiddleware(session_factory))
     dp.message.outer_middleware(AntiSpamMiddleware(session_factory))
@@ -180,6 +183,7 @@ async def main() -> None:
     dp.include_router(create_advertising_duration_integration_router(session_factory))
     dp.include_router(create_advertising_edit_types_router(session_factory))
     dp.include_router(create_advertising_edit_router(session_factory))
+    dp.include_router(create_advertising_mandatory_request_router(session_factory))
     dp.include_router(create_advertising_post_request_router(session_factory))
     dp.include_router(create_advertising_materials_router(session_factory))
     dp.include_router(create_advertising_deal_actions_v2_router(session_factory))
