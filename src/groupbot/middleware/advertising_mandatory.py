@@ -11,10 +11,41 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingPlacement
-from groupbot.models import GroupSettings
-from groupbot.services.protected_members import is_protected_member
+from groupbot.models import AdminAssignment, GroupOwner, GroupSettings
 
 logger = logging.getLogger(__name__)
+
+
+async def _is_op_exempt(session: AsyncSession, chat_id: int, user_id: int) -> bool:
+    owner = (await session.execute(
+        select(GroupOwner.id).where(
+            GroupOwner.chat_id == chat_id,
+            GroupOwner.user_id == user_id,
+            GroupOwner.is_current.is_(True),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if owner is not None:
+        return True
+
+    admin = (await session.execute(
+        select(AdminAssignment.id).where(
+            AdminAssignment.chat_id == chat_id,
+            AdminAssignment.user_id == user_id,
+        ).limit(1)
+    )).scalar_one_or_none()
+    if admin is not None:
+        return True
+
+    moderation_config = (await session.execute(
+        select(GroupSettings.moderation_config).where(GroupSettings.chat_id == chat_id)
+    )).scalar_one_or_none() or {}
+    special = dict(moderation_config.get("special_statuses") or {})
+    vip_ids = {
+        int(value)
+        for value in (special.get("vip") or [])
+        if str(value).lstrip("-").isdigit()
+    }
+    return user_id in vip_ids
 
 
 class AdvertisingMandatoryMiddleware(BaseMiddleware):
@@ -51,16 +82,7 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
             )).scalars().all())
             if not placements:
                 return await handler(event, data)
-
-            moderation_config = (await session.execute(
-                select(GroupSettings.moderation_config).where(GroupSettings.chat_id == event.chat.id)
-            )).scalar_one_or_none() or {}
-            if await is_protected_member(
-                session,
-                chat_id=event.chat.id,
-                user_id=event.from_user.id,
-                moderation_config=moderation_config,
-            ):
+            if await _is_op_exempt(session, event.chat.id, event.from_user.id):
                 return await handler(event, data)
 
         missing: dict | None = None
@@ -74,8 +96,6 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
             try:
                 member = await bot.get_chat_member(target_chat_id, event.from_user.id)
             except Exception:
-                # Do not lock the advertiser's group if Telegram temporarily cannot
-                # verify the sponsor chat or the bot lost access there.
                 logger.exception(
                     "Could not verify advertising OP membership target_chat_id=%s user_id=%s",
                     target_chat_id,
@@ -83,16 +103,10 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
                 )
                 continue
             if member.status not in {"member", "administrator", "creator", "restricted"}:
-                missing = {
-                    "url": target_url,
-                    "username": target_username,
-                }
+                missing = {"url": target_url, "username": target_username}
                 break
             if member.status == "restricted" and not getattr(member, "is_member", True):
-                missing = {
-                    "url": target_url,
-                    "username": target_username,
-                }
+                missing = {"url": target_url, "username": target_username}
                 break
 
         if missing is None:
