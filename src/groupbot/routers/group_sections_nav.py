@@ -4,6 +4,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from groupbot.routers.advertising import _advertising_keyboard
 from groupbot.routers.group_control import _owner_access
 
 
@@ -49,16 +50,14 @@ def create_group_sections_nav_router(
             return
 
         if section_key == "advertising":
+            # Do not introduce a second advertising UX here. The group-management
+            # button opens the same advertising home that was approved for the
+            # private main menu, so every entry point stays consistent.
             await callback.message.edit_text(
-                "📢 <b>Реклама группы</b>\n\n"
-                "Рекламные объявления и сделки управляются через общий рекламный раздел Mimorus.\n\n"
-                "Там можно создать или изменить объявление этой группы, принимать заявки и следить за рекламными сделками.",
+                "🟣 <b>Mimorus · Реклама</b>\n\n"
+                "Покупайте рекламные размещения или выставляйте свою подключённую группу как площадку.",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📢 Открыть рекламу", callback_data="ads:home")],
-                    [InlineKeyboardButton(text="📦 Мои продажи", callback_data="ads:my_sales")],
-                    [InlineKeyboardButton(text="◀️ Управление группой", callback_data=f"group:open:{chat_id}")],
-                ]),
+                reply_markup=_advertising_keyboard(),
             )
         elif section_key == "automation":
             await callback.message.edit_text(
