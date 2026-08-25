@@ -86,7 +86,6 @@ def group_management_keyboard(chat_id: int, *, active: bool) -> InlineKeyboardMa
         [InlineKeyboardButton(text="🤖 Автоматизация", callback_data=f"group:section:{chat_id}:automation")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data=f"group:section:{chat_id}:statistics")],
         [InlineKeyboardButton(text="🎮 Настройки развлечений", callback_data=f"group:section:{chat_id}:games")],
-        [InlineKeyboardButton(text="📢 Реклама группы", callback_data=f"group:section:{chat_id}:advertising")],
         [InlineKeyboardButton(text="⚙️ Настройки группы", callback_data=f"group:section:{chat_id}:settings")],
         [InlineKeyboardButton(text="🔎 Диагностика", callback_data=f"group:diagnostic:{chat_id}")],
     ]
