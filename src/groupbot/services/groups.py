@@ -2,12 +2,13 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.types import Chat
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.models import Group, GroupOwner, GroupSettings, GroupStatus
 from groupbot.services.audit import write_audit
+from groupbot.services.subscriptions import active_subscription_for_owner, effective_limit_for_owner
 from groupbot.services.users import upsert_user
 
 
@@ -47,6 +48,24 @@ async def register_pending_group(session: AsyncSession, chat: Chat) -> Group:
     return (await session.execute(select(Group).where(Group.chat_id == chat.id))).scalar_one()
 
 
+async def _connected_group_limit(session: AsyncSession, owner_user_id: int) -> int:
+    subscription = await active_subscription_for_owner(session, owner_user_id)
+    if subscription is None:
+        # The first group may be connected before a tariff is activated so the
+        # owner can reach the private cabinet and choose TEST or a paid tariff.
+        return 1
+
+    main_limit = await effective_limit_for_owner(session, owner_user_id, "main_groups")
+    if main_limit is None:
+        return 1
+    network_test_extra = await effective_limit_for_owner(
+        session,
+        owner_user_id,
+        "network_test_groups",
+    )
+    return max(int(main_limit), 0) + max(int(network_test_extra or 0), 0)
+
+
 async def connect_group(session: AsyncSession, bot: Bot, chat_id: int, owner_user) -> Group:
     member = await bot.get_chat_member(chat_id, owner_user.id)
     if member.status != "creator":
@@ -58,6 +77,26 @@ async def connect_group(session: AsyncSession, bot: Bot, chat_id: int, owner_use
         raise PermissionError("bot_not_admin")
 
     await upsert_user(session, owner_user)
+
+    current_owned = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(GroupOwner)
+                .join(Group, Group.chat_id == GroupOwner.chat_id)
+                .where(
+                    GroupOwner.user_id == owner_user.id,
+                    GroupOwner.is_current.is_(True),
+                    Group.status == GroupStatus.active.value,
+                    Group.chat_id != chat_id,
+                )
+            )
+        ).scalar_one()
+    )
+    group_limit = await _connected_group_limit(session, owner_user.id)
+    if current_owned >= group_limit:
+        raise PermissionError(f"group_limit_reached:{group_limit}")
+
     group = (await session.execute(select(Group).where(Group.chat_id == chat_id).with_for_update())).scalar_one_or_none()
     if group is None:
         chat = await bot.get_chat(chat_id)
