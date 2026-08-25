@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing
+from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingPlacement
 
 
 def _request_type_keyboard(listing: AdvertisingListing) -> InlineKeyboardMarkup:
@@ -27,6 +29,10 @@ def _seller_request_keyboard(deal_id: int, buyer_user_id: int) -> InlineKeyboard
     ])
 
 
+def _can_buyer_cancel(deal: AdvertisingDeal) -> bool:
+    return deal.status in {"pending", "accepted"} and deal.started_at is None
+
+
 def _deal_keyboard(deal: AdvertisingDeal, viewer_id: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     other_id = deal.buyer_user_id if viewer_id == deal.seller_user_id else deal.seller_user_id
@@ -38,6 +44,8 @@ def _deal_keyboard(deal: AdvertisingDeal, viewer_id: int) -> InlineKeyboardMarku
         ])
     if viewer_id == deal.buyer_user_id and deal.status == "accepted":
         rows.append([InlineKeyboardButton(text="📦 Передать материалы", callback_data=f"ads:materials:{deal.id}")])
+    if viewer_id == deal.buyer_user_id and _can_buyer_cancel(deal):
+        rows.append([InlineKeyboardButton(text="❌ Отменить заявку", callback_data=f"ads:deal:cancel_ask:{deal.id}")])
     rows.append([InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -55,6 +63,7 @@ def _deal_text(deal: AdvertisingDeal, listing: AdvertisingListing) -> str:
         "pending": "⏳ Ожидает решения рекламодателя",
         "accepted": "✅ Принята — ожидает материалов/запуска",
         "rejected": "❌ Отклонена",
+        "cancelled": "🚫 Отменена покупателем",
     }.get(deal.status, deal.status)
     return (
         "📨 <b>Рекламная заявка</b>\n\n"
@@ -186,13 +195,100 @@ def create_advertising_requests_router(session_factory: async_sessionmaker[Async
         await callback.message.edit_text(
             "✅ <b>Заявка отправлена</b>\n\n" + _deal_text(deal, listing),
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💬 Связаться с рекламодателем", url=f"tg://user?id={deal.seller_user_id}")],
-                [InlineKeyboardButton(text="📋 Мои покупки", callback_data="ads:my_buys")],
-                [InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")],
-            ]),
+            reply_markup=_deal_keyboard(deal, callback.from_user.id),
         )
         await callback.answer("Заявка отправлена")
+
+    @router.callback_query(F.data.startswith("ads:deal:cancel_ask:"))
+    async def ask_cancel_deal(callback: CallbackQuery) -> None:
+        try:
+            deal_id = int((callback.data or "").rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректная заявка.", show_alert=True)
+            return
+        loaded = await _load_deal(deal_id)
+        if loaded is None:
+            await callback.answer("Заявка не найдена.", show_alert=True)
+            return
+        deal, listing = loaded
+        if callback.from_user.id != deal.buyer_user_id:
+            await callback.answer("Отменить заявку может только покупатель.", show_alert=True)
+            return
+        if not _can_buyer_cancel(deal):
+            await callback.answer("Эту заявку уже нельзя отменить: реклама запущена или сделка завершена.", show_alert=True)
+            return
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "⚠️ <b>Отменить рекламную заявку?</b>\n\n" + _deal_text(deal, listing) +
+                "\n\nПосле отмены заявка останется в истории, но больше не будет активной.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Да, отменить", callback_data=f"ads:deal:cancel:{deal.id}")],
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data=f"ads:deal:{deal.id}")],
+                ]),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("ads:deal:cancel:"))
+    async def cancel_deal(callback: CallbackQuery, bot: Bot) -> None:
+        try:
+            deal_id = int((callback.data or "").rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректная заявка.", show_alert=True)
+            return
+        seller_id = None
+        title = ""
+        kind_label = ""
+        async with session_factory() as session:
+            async with session.begin():
+                deal = (await session.execute(select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update())).scalar_one_or_none()
+                if deal is None:
+                    await callback.answer("Заявка не найдена.", show_alert=True)
+                    return
+                if callback.from_user.id != deal.buyer_user_id:
+                    await callback.answer("Отменить заявку может только покупатель.", show_alert=True)
+                    return
+                if not _can_buyer_cancel(deal):
+                    await callback.answer("Эту заявку уже нельзя отменить: реклама запущена или сделка завершена.", show_alert=True)
+                    return
+                listing = (await session.execute(select(AdvertisingListing).where(AdvertisingListing.id == deal.listing_id))).scalar_one_or_none()
+                if listing is None:
+                    await callback.answer("Объявление не найдено.", show_alert=True)
+                    return
+                deal.status = "cancelled"
+                # Preserve the deal row for history/audit. Only unfinished placements are cancelled.
+                placements = (await session.execute(select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal.id).with_for_update())).scalars().all()
+                for placement in placements:
+                    if placement.status in {"draft", "ready", "pending"}:
+                        placement.status = "cancelled"
+                terms = dict(deal.agreed_terms_json or {})
+                terms["cancelled_by"] = "buyer"
+                terms["cancelled_at"] = datetime.now(timezone.utc).isoformat()
+                deal.agreed_terms_json = terms
+                seller_id = deal.seller_user_id
+                title = listing.group_title_snapshot
+                kind_label = _kind_text(deal)
+        if seller_id is not None:
+            try:
+                await bot.send_message(
+                    seller_id,
+                    "🚫 <b>Покупатель отменил рекламную заявку</b>\n\n"
+                    f"🏠 Площадка: <b>{title}</b>\n"
+                    f"📌 Формат: <b>{kind_label}</b>\n\n"
+                    "Реклама не была запущена. Заявка сохранена в истории.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        loaded = await _load_deal(deal_id)
+        if loaded is not None and callback.message is not None:
+            deal, listing = loaded
+            await callback.message.edit_text(
+                _deal_text(deal, listing) + "\n\nЗаявка отменена. Реклама не будет запущена.",
+                parse_mode="HTML",
+                reply_markup=_deal_keyboard(deal, callback.from_user.id),
+            )
+        await callback.answer("Заявка отменена")
 
     @router.callback_query(F.data.startswith("ads:deal:"))
     async def open_deal(callback: CallbackQuery) -> None:
