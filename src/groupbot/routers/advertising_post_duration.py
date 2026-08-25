@@ -93,6 +93,42 @@ def post_editor_keyboard_with_cancel(deal_id: int, *, has_photo: bool, has_butto
 def create_advertising_post_duration_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="advertising_post_duration")
 
+    @router.callback_query(F.data.regexp(r"^ads:listing:\d+$"))
+    async def open_listing_with_contact(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+        listing_id = int((callback.data or "").rsplit(":", 1)[1])
+        async with session_factory() as session:
+            listing = (
+                await session.execute(
+                    select(AdvertisingListing).where(AdvertisingListing.id == listing_id)
+                )
+            ).scalar_one_or_none()
+        if listing is None or (not listing.is_active and listing.owner_user_id != callback.from_user.id):
+            await callback.answer("Объявление недоступно.", show_alert=True)
+            return
+
+        if listing.owner_user_id == callback.from_user.id:
+            rows = [
+                [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"ads:edit:{listing.id}")],
+                [InlineKeyboardButton(text="◀️ Мои продажи", callback_data="ads:my_sales")],
+                [InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")],
+            ]
+        else:
+            rows = [
+                [InlineKeyboardButton(text="📨 Отправить запрос", callback_data=f"ads:request:{listing.id}")],
+                [InlineKeyboardButton(text="💬 Связаться с рекламодателем", url=f"tg://user?id={listing.owner_user_id}")],
+                [InlineKeyboardButton(text="◀️ Вернуться к списку", callback_data="ads:buy")],
+                [InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")],
+            ]
+
+        await callback.message.edit_text(
+            listing_text_with_duration(listing),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        await callback.answer()
+
     @router.callback_query(F.data.regexp(r"^ads:edit:post_duration:\d+$"))
     async def start_duration(callback: CallbackQuery, state: FSMContext) -> None:
         if callback.message is None:
