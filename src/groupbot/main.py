@@ -88,8 +88,6 @@ async def main() -> None:
     manual_moderation_module._configured_reasons = configured_reasons_with_defaults
     ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
 
-    # Make captcha and anti-raid use the same temporary schedule policy as the
-    # message protection middleware without changing their ordinary settings.
     install_entry_schedule(entry_protection_module)
 
     bot = Bot(settings.bot_token)
@@ -135,6 +133,8 @@ async def main() -> None:
     dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
     dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
     dp.include_router(create_creator_router(session_factory, settings))
+    # Payment router owns tariff cards/selection. It must be registered before
+    # the legacy private router handlers with the same callback prefixes.
     dp.include_router(create_subscription_payments_router(session_factory))
     dp.include_router(create_private_router(session_factory, settings))
 
