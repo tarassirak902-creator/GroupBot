@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
-from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -59,6 +66,20 @@ def _limit(tariff: Tariff, key: str, fallback: str = "—") -> str:
     if value is None:
         return fallback
     return str(value)
+
+
+def _invoice_keyboard(owner_user_id: int, stars: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"⭐ Оплатить {stars}", pay=True)],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить оплату",
+                    callback_data=f"tariff:cancel_invoice:{owner_user_id}",
+                )
+            ],
+        ]
+    )
 
 
 def _tariff_card_text(tariff: Tariff) -> str:
@@ -195,8 +216,28 @@ def create_subscription_payments_router(
             currency="XTR",
             prices=[LabeledPrice(label=tariff.name, amount=stars)],
             provider_token="",
+            reply_markup=_invoice_keyboard(callback.from_user.id, stars),
         )
         await callback.answer()
+
+    @router.callback_query(F.data.startswith("tariff:cancel_invoice:"))
+    async def cancel_invoice(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+        try:
+            owner_user_id = int((callback.data or "").rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный счёт.", show_alert=True)
+            return
+        if callback.from_user.id != owner_user_id:
+            await callback.answer("Этот счёт создан не для вас.", show_alert=True)
+            return
+        try:
+            await callback.message.delete()
+        except Exception:
+            await callback.answer("Не удалось удалить счёт.", show_alert=True)
+            return
+        await callback.answer("Оплата отменена")
 
     @router.pre_checkout_query()
     async def pre_checkout(query: PreCheckoutQuery) -> None:
