@@ -12,7 +12,7 @@ from groupbot.services.audit import write_audit
 from groupbot.ui import owned_groups_keyboard
 
 
-ADD_ADMIN_RIGHTS = "manage_chat+delete_messages+restrict_members+pin_messages+invite_users"
+ADD_ADMIN_RIGHTS = "manage_chat+delete_messages+restrict_members+pin_messages+invite_users+promote_members"
 
 
 def _add_bot_url(username: str) -> str:
