@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingPlacement
 from groupbot.services.audit import write_audit
+from groupbot.workers.advertising_mutual_lifecycle import process_mutual_op
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,7 @@ async def advertising_lifecycle_worker(bot: Bot, session_factory: async_sessionm
             published = await publish_due_posts(bot, session_factory)
             finished_posts = await finish_expired_posts(bot, session_factory)
             finished_op = await finish_due_mandatory(bot, session_factory)
+            finished_mutual = await process_mutual_op(bot, session_factory)
             closed = await close_expired_no_claims_windows(bot, session_factory)
             if published:
                 logger.info("Published %s advertising posts", published)
@@ -280,10 +282,12 @@ async def advertising_lifecycle_worker(bot: Bot, session_factory: async_sessionm
                 logger.info("Finished %s advertising post placements", finished_posts)
             if finished_op:
                 logger.info("Finished %s advertising OP placements", finished_op)
+            if finished_mutual:
+                logger.info("Finished %s mutual OP directions", finished_mutual)
             if closed:
                 logger.info("Closed %s advertising deals after no-claims timeout", closed)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Advertising lifecycle iteration failed")
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
