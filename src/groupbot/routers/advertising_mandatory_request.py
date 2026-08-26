@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingPlacement
+from groupbot.models import Group, GroupOwner, GroupStatus
 
 MANDATORY_DAILY_LIMIT = 3
 POST_DAILY_LIMIT = 1
@@ -79,8 +80,144 @@ async def _set_target_state(state: FSMContext, *, listing_id: int | None = None,
     await state.update_data(**payload)
 
 
+async def _owned_active_groups(
+    session_factory: async_sessionmaker[AsyncSession], user_id: int
+) -> list[tuple[int, str]]:
+    async with session_factory() as session:
+        rows = (await session.execute(
+            select(Group.chat_id, Group.title)
+            .join(GroupOwner, GroupOwner.chat_id == Group.chat_id)
+            .where(
+                GroupOwner.user_id == user_id,
+                GroupOwner.is_current.is_(True),
+                Group.status == GroupStatus.active.value,
+            )
+            .order_by(Group.title, Group.chat_id)
+        )).all()
+    return [(int(chat_id), title or "Группа") for chat_id, title in rows]
+
+
+def _target_picker_keyboard(groups: list[tuple[int, str]], *, cancel_callback: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for chat_id, title in groups[:25]:
+        short = title.strip()
+        if len(short) > 45:
+            short = short[:44].rstrip() + "…"
+        rows.append([
+            InlineKeyboardButton(text=f"🏠 {short}", callback_data=f"ads:mandatory:own:{chat_id}")
+        ])
+    rows.append([InlineKeyboardButton(text="✍️ Указать другую группу вручную", callback_data="ads:mandatory:manual")])
+    rows.append([InlineKeyboardButton(text="❌ Отменить", callback_data=cancel_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _target_picker_text(*, after_post: bool = False) -> str:
+    prefix = "✅ <b>Рекламный пост готов</b>\n\n" if after_post else "✅ <b>Покупка обязательной подписки</b>\n\n"
+    return (
+        prefix
+        + "Выберите свою группу/канал, куда должна идти обязательная подписка.\n\n"
+        + "Ниже показаны ваши активные группы, подключённые к Mimorus. "
+        + "Также можно указать другую площадку вручную."
+    )
+
+
 def create_advertising_mandatory_request_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="advertising_mandatory_request")
+
+    async def _show_target_picker(
+        callback: CallbackQuery,
+        state: FSMContext,
+        *,
+        listing_id: int | None = None,
+        deal_id: int | None = None,
+        after_post: bool = False,
+    ) -> None:
+        await state.clear()
+        await _set_target_state(state, listing_id=listing_id, deal_id=deal_id)
+        groups = await _owned_active_groups(session_factory, callback.from_user.id)
+        cancel_callback = f"ads:mandatory:cancel:{deal_id}" if deal_id is not None else "ads:buy"
+        if callback.message is not None:
+            await callback.message.edit_text(
+                _target_picker_text(after_post=after_post),
+                parse_mode="HTML",
+                reply_markup=_target_picker_keyboard(groups, cancel_callback=cancel_callback),
+            )
+
+    async def _context_listing(state: FSMContext, user_id: int) -> tuple[AdvertisingListing | None, int | None]:
+        data = await state.get_data()
+        listing_id = data.get("mandatory_listing_id")
+        existing_deal_id = data.get("mandatory_existing_deal_id")
+        async with session_factory() as session:
+            if isinstance(existing_deal_id, int):
+                row = (await session.execute(
+                    select(AdvertisingDeal, AdvertisingListing)
+                    .join(AdvertisingListing, AdvertisingListing.id == AdvertisingDeal.listing_id)
+                    .where(
+                        AdvertisingDeal.id == existing_deal_id,
+                        AdvertisingDeal.buyer_user_id == user_id,
+                        AdvertisingDeal.status == "draft_mandatory",
+                        AdvertisingDeal.requested_mandatory.is_(True),
+                    )
+                )).first()
+                return (row[1], existing_deal_id) if row is not None else (None, existing_deal_id)
+            if isinstance(listing_id, int):
+                listing = (await session.execute(select(AdvertisingListing).where(
+                    AdvertisingListing.id == listing_id,
+                    AdvertisingListing.is_active.is_(True),
+                    AdvertisingListing.offers_mandatory.is_(True),
+                ))).scalar_one_or_none()
+                if listing is not None and listing.owner_user_id == user_id:
+                    return None, None
+                return listing, None
+        return None, None
+
+    async def _prepare_quantity(
+        *,
+        state: FSMContext,
+        user_id: int,
+        target_chat_id: int,
+        target_title: str,
+        target_username: str,
+        target_url: str,
+        member_count: int,
+    ) -> tuple[str | None, str | None]:
+        listing, existing_deal_id = await _context_listing(state, user_id)
+        if listing is None:
+            await state.clear()
+            return None, "Черновик заявки или объявление больше недоступны."
+        mode = _mandatory_mode(listing)
+        price = int(listing.mandatory_price_stars or 0)
+        await state.set_state(MandatoryRequestState.waiting_quantity)
+        await state.update_data(
+            mandatory_listing_id=listing.id,
+            mandatory_existing_deal_id=existing_deal_id,
+            mandatory_target_chat_id=target_chat_id,
+            mandatory_target_title=target_title,
+            mandatory_target_username=target_username,
+            mandatory_target_url=target_url,
+            mandatory_target_member_count=member_count,
+            mandatory_mode=mode,
+            mandatory_price_stars=price,
+        )
+        title_safe = escape(target_title)
+        if mode == "days":
+            prompt = (
+                "✅ <b>Группа для ОП проверена</b>\n\n"
+                f"🏠 <a href=\"{target_url}\">{title_safe}</a>\n"
+                f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ")
+                + f"⭐ Цена рекламодателя: <b>{price} ⭐ за день</b>\n\n"
+                + "Введите количество дней ОП, например: <code>3</code>."
+            )
+        else:
+            prompt = (
+                "✅ <b>Группа для ОП проверена</b>\n\n"
+                f"🏠 <a href=\"{target_url}\">{title_safe}</a>\n"
+                f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ")
+                + f"⭐ Цена рекламодателя: <b>{price} ⭐ за подписчика</b>\n\n"
+                + "Введите количество новых подписчиков, которое хотите получить, например: <code>100</code>."
+            )
+        cancel_callback = f"ads:mandatory:cancel:{existing_deal_id}" if existing_deal_id is not None else "ads:buy"
+        return prompt, cancel_callback
 
     @router.callback_query(F.data.regexp(r"^ads:req:type:\d+:mandatory$"))
     async def start(callback: CallbackQuery, state: FSMContext) -> None:
@@ -96,17 +233,106 @@ def create_advertising_mandatory_request_router(session_factory: async_sessionma
         if listing is None or listing.owner_user_id == callback.from_user.id:
             await callback.answer("Объявление недоступно.", show_alert=True)
             return
-        await state.clear()
-        await _set_target_state(state, listing_id=listing_id)
+        await _show_target_picker(callback, state, listing_id=listing_id)
+        await callback.answer()
+
+    @router.callback_query(F.data == "ads:mandatory:manual")
+    async def manual_target(callback: CallbackQuery, state: FSMContext) -> None:
+        if callback.message is None:
+            return
+        current = await state.get_state()
+        if current != MandatoryRequestState.waiting_target.state:
+            await callback.answer("Мастер заявки устарел. Начните заново.", show_alert=True)
+            return
         await callback.message.edit_text(
-            "✅ <b>Покупка обязательной подписки</b>\n\n"
-            "Укажите группу или канал, на который должны подписываться участники площадки рекламодателя.\n\n"
+            "✅ <b>Укажите группу вручную</b>\n\n"
             "Отправьте публичный <b>@username</b> или ссылку <b>https://t.me/...</b>.\n\n"
             "⚠️ Mimorus должен быть администратором в этой группе/канале, чтобы проверять подписку.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить", callback_data="ads:buy")]]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Выбрать из моих групп", callback_data="ads:mandatory:picker")]
+            ]),
         )
         await callback.answer()
+
+    @router.callback_query(F.data == "ads:mandatory:picker")
+    async def reopen_picker(callback: CallbackQuery, state: FSMContext) -> None:
+        if callback.message is None:
+            return
+        data = await state.get_data()
+        listing_id = data.get("mandatory_listing_id")
+        deal_id = data.get("mandatory_existing_deal_id")
+        groups = await _owned_active_groups(session_factory, callback.from_user.id)
+        cancel_callback = f"ads:mandatory:cancel:{deal_id}" if isinstance(deal_id, int) else "ads:buy"
+        await callback.message.edit_text(
+            _target_picker_text(after_post=isinstance(deal_id, int)),
+            parse_mode="HTML",
+            reply_markup=_target_picker_keyboard(groups, cancel_callback=cancel_callback),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.regexp(r"^ads:mandatory:own:-?\d+$"))
+    async def select_own_target(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+        if callback.message is None:
+            return
+        try:
+            chat_id = int((callback.data or "").rsplit(":", 1)[1])
+        except (TypeError, ValueError):
+            await callback.answer("Некорректная группа.", show_alert=True)
+            return
+        async with session_factory() as session:
+            owned = (await session.execute(
+                select(Group.chat_id).join(GroupOwner, GroupOwner.chat_id == Group.chat_id).where(
+                    Group.chat_id == chat_id,
+                    Group.status == GroupStatus.active.value,
+                    GroupOwner.user_id == callback.from_user.id,
+                    GroupOwner.is_current.is_(True),
+                )
+            )).scalar_one_or_none()
+        if owned is None:
+            await callback.answer("Эта группа больше не подключена к вашему аккаунту.", show_alert=True)
+            return
+        try:
+            target_chat = await bot.get_chat(chat_id)
+            bot_info = await bot.get_me()
+            bot_member = await bot.get_chat_member(chat_id, bot_info.id)
+            if bot_member.status not in {"administrator", "creator"}:
+                raise RuntimeError("bot is not admin")
+            member_count = await bot.get_chat_member_count(chat_id)
+        except Exception:
+            await callback.answer("Mimorus не может проверить эту группу или больше не является её администратором.", show_alert=True)
+            return
+        username = str(getattr(target_chat, "username", None) or "")
+        invite_link = str(getattr(target_chat, "invite_link", None) or "")
+        target_url = f"https://t.me/{username}" if username else invite_link
+        if not target_url:
+            await callback.answer(
+                "Для этой закрытой группы нет доступной ссылки входа. Добавьте публичный @username или доступную invite-ссылку и попробуйте снова.",
+                show_alert=True,
+            )
+            return
+        title = target_chat.title or (f"@{username}" if username else "Группа")
+        prompt, cancel_callback = await _prepare_quantity(
+            state=state,
+            user_id=callback.from_user.id,
+            target_chat_id=chat_id,
+            target_title=title,
+            target_username=username,
+            target_url=target_url,
+            member_count=member_count,
+        )
+        if prompt is None or cancel_callback is None:
+            await callback.answer("Заявка больше недоступна.", show_alert=True)
+            return
+        await callback.message.edit_text(
+            prompt,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить", callback_data=cancel_callback)]
+            ]),
+        )
+        await callback.answer("Группа выбрана")
 
     @router.callback_query(F.data.regexp(r"^ads:post:submit2:\d+$"))
     async def submit_post_or_continue_op(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
@@ -142,16 +368,14 @@ def create_advertising_mandatory_request_router(session_factory: async_sessionma
 
         await state.clear()
         if requested_mandatory:
+            groups = await _owned_active_groups(session_factory, callback.from_user.id)
             await _set_target_state(state, deal_id=deal_id)
             await callback.message.answer(
-                "✅ <b>Рекламный пост готов</b>\n\n"
-                "Теперь укажите группу или канал для обязательной подписки.\n"
-                "Отправьте публичный @username или ссылку https://t.me/...\n\n"
-                "Mimorus должен быть администратором в этой группе/канале.",
+                _target_picker_text(after_post=True),
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить заявку", callback_data=f"ads:mandatory:cancel:{deal_id}")]]),
+                reply_markup=_target_picker_keyboard(groups, cancel_callback=f"ads:mandatory:cancel:{deal_id}"),
             )
-            await callback.answer("Теперь укажите площадку для ОП")
+            await callback.answer("Теперь выберите площадку для ОП")
             return
 
         await callback.message.answer(
@@ -178,15 +402,12 @@ def create_advertising_mandatory_request_router(session_factory: async_sessionma
     async def target(message: Message, state: FSMContext, bot: Bot) -> None:
         if message.from_user is None or not message.text:
             return
-        data = await state.get_data()
-        listing_id = data.get("mandatory_listing_id")
-        existing_deal_id = data.get("mandatory_existing_deal_id")
         ref = _target_ref(message.text)
         try:
             await message.delete()
         except Exception:
             pass
-        if ref is None or (not isinstance(listing_id, int) and not isinstance(existing_deal_id, int)):
+        if ref is None:
             await message.answer("Укажите публичный @username или ссылку вида https://t.me/example.")
             return
         try:
@@ -199,72 +420,31 @@ def create_advertising_mandatory_request_router(session_factory: async_sessionma
         except Exception:
             await message.answer("Не удалось проверить эту группу/канал. Убедитесь, что ссылка публичная и Mimorus добавлен туда администратором.")
             return
-        username = getattr(target_chat, "username", None)
-        if not username:
-            await message.answer("Для ОП сейчас нужна публичная группа/канал с @username.")
+        username = str(getattr(target_chat, "username", None) or "")
+        target_url = f"https://t.me/{username}" if username else str(getattr(target_chat, "invite_link", None) or "")
+        if not target_url:
+            await message.answer("Не удалось получить ссылку входа в эту группу/канал.")
             return
-
-        async with session_factory() as session:
-            if isinstance(existing_deal_id, int):
-                row = (await session.execute(
-                    select(AdvertisingDeal, AdvertisingListing)
-                    .join(AdvertisingListing, AdvertisingListing.id == AdvertisingDeal.listing_id)
-                    .where(
-                        AdvertisingDeal.id == existing_deal_id,
-                        AdvertisingDeal.buyer_user_id == message.from_user.id,
-                        AdvertisingDeal.status == "draft_mandatory",
-                        AdvertisingDeal.requested_mandatory.is_(True),
-                    )
-                )).first()
-                if row is None:
-                    await state.clear()
-                    await message.answer("Черновик заявки больше недоступен.")
-                    return
-                deal, listing = row
-            else:
-                listing = (await session.execute(select(AdvertisingListing).where(
-                    AdvertisingListing.id == listing_id,
-                    AdvertisingListing.is_active.is_(True),
-                    AdvertisingListing.offers_mandatory.is_(True),
-                ))).scalar_one_or_none()
-                if listing is None or listing.owner_user_id == message.from_user.id:
-                    await state.clear()
-                    await message.answer("Объявление больше недоступно.")
-                    return
-
-        mode = _mandatory_mode(listing)
-        price = int(listing.mandatory_price_stars or 0)
-        await state.set_state(MandatoryRequestState.waiting_quantity)
-        await state.update_data(
-            mandatory_listing_id=listing.id,
-            mandatory_existing_deal_id=existing_deal_id if isinstance(existing_deal_id, int) else None,
-            mandatory_target_chat_id=target_chat.id,
-            mandatory_target_title=target_chat.title or f"@{username}",
-            mandatory_target_username=username,
-            mandatory_target_url=f"https://t.me/{username}",
-            mandatory_target_member_count=member_count,
-            mandatory_mode=mode,
-            mandatory_price_stars=price,
+        prompt, cancel_callback = await _prepare_quantity(
+            state=state,
+            user_id=message.from_user.id,
+            target_chat_id=target_chat.id,
+            target_title=target_chat.title or (f"@{username}" if username else "Группа"),
+            target_username=username,
+            target_url=target_url,
+            member_count=member_count,
         )
-        if mode == "days":
-            prompt = (
-                "✅ <b>Группа для ОП проверена</b>\n\n"
-                f"🏠 <b>{escape(target_chat.title or '@' + username)}</b>\n"
-                f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ") +
-                f"⭐ Цена рекламодателя: <b>{price} ⭐ за день</b>\n\n"
-                "Введите количество дней ОП, например: <code>3</code>."
-            )
-        else:
-            prompt = (
-                "✅ <b>Группа для ОП проверена</b>\n\n"
-                f"🏠 <b>{escape(target_chat.title or '@' + username)}</b>\n"
-                f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ") +
-                f"⭐ Цена рекламодателя: <b>{price} ⭐ за подписчика</b>\n\n"
-                "Введите количество новых подписчиков, которое хотите получить, например: <code>100</code>."
-            )
-        await message.answer(prompt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"ads:mandatory:cancel:{existing_deal_id}" if isinstance(existing_deal_id, int) else "ads:buy")]
-        ]))
+        if prompt is None or cancel_callback is None:
+            await message.answer("Черновик заявки или объявление больше недоступны.")
+            return
+        await message.answer(
+            prompt,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить", callback_data=cancel_callback)]
+            ]),
+        )
 
     @router.message(MandatoryRequestState.waiting_quantity, F.chat.type == "private")
     async def quantity(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -383,17 +563,18 @@ def create_advertising_mandatory_request_router(session_factory: async_sessionma
         buyer_name = escape(message.from_user.full_name)
         request_label = "Пост + ОП" if has_post else "ОП"
         volume_text = f"{qty} дн." if mode == "days" else f"{qty} подписчиков"
+        username_line = f"🔗 @{escape(target_username)}\n" if target_username else ""
         seller_text = (
             f"📥 <b>Новая заявка: {request_label}</b>\n\n"
             f"🏠 Ваша площадка: <b>{escape(seller_group)}</b>\n"
             f"👤 Покупатель: <b>{buyer_name}</b>\n\n"
             "🎯 <b>Куда вести обязательную подписку:</b>\n"
             f"🏠 <a href=\"{target_url}\">{escape(target_title)}</a>\n"
-            f"🔗 @{escape(target_username)}\n"
-            f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ") +
-            f"📐 Объём ОП: <b>{volume_text}</b>\n"
-            f"⭐ Стоимость: <b>{total_price} ⭐</b>\n\n"
-            "После одобрения ОП включится автоматически в вашей группе."
+            f"{username_line}"
+            f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ")
+            + f"📐 Объём ОП: <b>{volume_text}</b>\n"
+            + f"⭐ Стоимость: <b>{total_price} ⭐</b>\n\n"
+            + "После одобрения ОП включится автоматически в вашей группе."
         )
         try:
             await bot.send_message(seller_id, seller_text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=_seller_keyboard(deal_id, message.from_user.id, has_post=has_post))
