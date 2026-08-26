@@ -18,6 +18,7 @@ POST_DAILY_LIMIT = 1
 
 class MandatoryRequestState(StatesGroup):
     waiting_target = State()
+    waiting_quantity = State()
 
 
 def _target_ref(text: str) -> str | None:
@@ -38,6 +39,11 @@ def _duration_days(deal: AdvertisingDeal) -> int:
         return max(int(terms.get("duration_days") or 1), 1)
     except (TypeError, ValueError):
         return 1
+
+
+def _mandatory_mode(listing: AdvertisingListing) -> str:
+    mode = str((listing.mandatory_terms_json or {}).get("mode") or "days")
+    return mode if mode in {"days", "subscribers"} else "days"
 
 
 def _seller_keyboard(deal_id: int, buyer_id: int, *, has_post: bool) -> InlineKeyboardMarkup:
@@ -63,12 +69,7 @@ def _post_only_seller_keyboard(deal_id: int, buyer_id: int) -> InlineKeyboardMar
     ])
 
 
-async def _set_target_state(
-    state: FSMContext,
-    *,
-    listing_id: int | None = None,
-    deal_id: int | None = None,
-) -> None:
+async def _set_target_state(state: FSMContext, *, listing_id: int | None = None, deal_id: int | None = None) -> None:
     await state.set_state(MandatoryRequestState.waiting_target)
     payload: dict[str, int] = {}
     if listing_id is not None:
@@ -78,9 +79,7 @@ async def _set_target_state(
     await state.update_data(**payload)
 
 
-def create_advertising_mandatory_request_router(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> Router:
+def create_advertising_mandatory_request_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="advertising_mandatory_request")
 
     @router.callback_query(F.data.regexp(r"^ads:req:type:\d+:mandatory$"))
@@ -89,13 +88,11 @@ def create_advertising_mandatory_request_router(
             return
         listing_id = int((callback.data or "").split(":")[3])
         async with session_factory() as session:
-            listing = (await session.execute(
-                select(AdvertisingListing).where(
-                    AdvertisingListing.id == listing_id,
-                    AdvertisingListing.is_active.is_(True),
-                    AdvertisingListing.offers_mandatory.is_(True),
-                )
-            )).scalar_one_or_none()
+            listing = (await session.execute(select(AdvertisingListing).where(
+                AdvertisingListing.id == listing_id,
+                AdvertisingListing.is_active.is_(True),
+                AdvertisingListing.offers_mandatory.is_(True),
+            ))).scalar_one_or_none()
         if listing is None or listing.owner_user_id == callback.from_user.id:
             await callback.answer("Объявление недоступно.", show_alert=True)
             return
@@ -103,13 +100,11 @@ def create_advertising_mandatory_request_router(
         await _set_target_state(state, listing_id=listing_id)
         await callback.message.edit_text(
             "✅ <b>Покупка обязательной подписки</b>\n\n"
-            "Сначала укажите группу или канал, на который должны подписываться участники площадки рекламодателя.\n\n"
+            "Укажите группу или канал, на который должны подписываться участники площадки рекламодателя.\n\n"
             "Отправьте публичный <b>@username</b> или ссылку <b>https://t.me/...</b>.\n\n"
-            "⚠️ Mimorus должен быть администратором в этой группе/канале, чтобы проверять подписку пользователей.",
+            "⚠️ Mimorus должен быть администратором в этой группе/канале, чтобы проверять подписку.",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Отменить", callback_data="ads:buy")]
-            ]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить", callback_data="ads:buy")]]),
         )
         await callback.answer()
 
@@ -123,21 +118,15 @@ def create_advertising_mandatory_request_router(
         requested_mandatory = False
         async with session_factory() as session:
             async with session.begin():
-                deal = (await session.execute(
-                    select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update()
-                )).scalar_one_or_none()
+                deal = (await session.execute(select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update())).scalar_one_or_none()
                 if deal is None or deal.buyer_user_id != callback.from_user.id or deal.status != "draft_post":
                     await callback.answer("Черновик недоступен.", show_alert=True)
                     return
-                listing = (await session.execute(
-                    select(AdvertisingListing).where(AdvertisingListing.id == deal.listing_id)
-                )).scalar_one_or_none()
-                post = (await session.execute(
-                    select(AdvertisingPlacement).where(
-                        AdvertisingPlacement.deal_id == deal.id,
-                        AdvertisingPlacement.kind == "post",
-                    ).with_for_update()
-                )).scalar_one_or_none()
+                listing = (await session.execute(select(AdvertisingListing).where(AdvertisingListing.id == deal.listing_id))).scalar_one_or_none()
+                post = (await session.execute(select(AdvertisingPlacement).where(
+                    AdvertisingPlacement.deal_id == deal.id,
+                    AdvertisingPlacement.kind == "post",
+                ).with_for_update())).scalar_one_or_none()
                 if listing is None or post is None:
                     await callback.answer("Не удалось подготовить заявку.", show_alert=True)
                     return
@@ -149,10 +138,7 @@ def create_advertising_mandatory_request_router(
                 requested_mandatory = bool(deal.requested_mandatory)
                 seller_id = deal.seller_user_id
                 title = listing.group_title_snapshot
-                if requested_mandatory:
-                    deal.status = "draft_mandatory"
-                else:
-                    deal.status = "pending"
+                deal.status = "draft_mandatory" if requested_mandatory else "pending"
 
         await state.clear()
         if requested_mandatory:
@@ -163,9 +149,7 @@ def create_advertising_mandatory_request_router(
                 "Отправьте публичный @username или ссылку https://t.me/...\n\n"
                 "Mimorus должен быть администратором в этой группе/канале.",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="❌ Отменить заявку", callback_data=f"ads:deal:cancel_ask:{deal_id}")]
-                ]),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отменить заявку", callback_data=f"ads:mandatory:cancel:{deal_id}")]]),
             )
             await callback.answer("Теперь укажите площадку для ОП")
             return
@@ -174,9 +158,7 @@ def create_advertising_mandatory_request_router(
             "✅ <b>Рекламный пост отправлен рекламодателю на рассмотрение</b>\n\n"
             f"🏠 Площадка: <b>{escape(title)}</b>",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Мои покупки", callback_data="ads:my_buys")]
-            ]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Мои покупки", callback_data="ads:my_buys")]]),
         )
         if seller_id is not None:
             try:
@@ -215,70 +197,142 @@ def create_advertising_mandatory_request_router(
                 raise RuntimeError("bot is not admin")
             member_count = await bot.get_chat_member_count(target_chat.id)
         except Exception:
-            await message.answer(
-                "Не удалось проверить эту группу/канал. Убедитесь, что ссылка публичная и Mimorus добавлен туда администратором."
-            )
+            await message.answer("Не удалось проверить эту группу/канал. Убедитесь, что ссылка публичная и Mimorus добавлен туда администратором.")
             return
-
         username = getattr(target_chat, "username", None)
         if not username:
             await message.answer("Для ОП сейчас нужна публичная группа/канал с @username.")
             return
-        target_url = f"https://t.me/{username}"
-        target_title = target_chat.title or f"@{username}"
+
+        async with session_factory() as session:
+            if isinstance(existing_deal_id, int):
+                row = (await session.execute(
+                    select(AdvertisingDeal, AdvertisingListing)
+                    .join(AdvertisingListing, AdvertisingListing.id == AdvertisingDeal.listing_id)
+                    .where(
+                        AdvertisingDeal.id == existing_deal_id,
+                        AdvertisingDeal.buyer_user_id == message.from_user.id,
+                        AdvertisingDeal.status == "draft_mandatory",
+                        AdvertisingDeal.requested_mandatory.is_(True),
+                    )
+                )).first()
+                if row is None:
+                    await state.clear()
+                    await message.answer("Черновик заявки больше недоступен.")
+                    return
+                deal, listing = row
+            else:
+                listing = (await session.execute(select(AdvertisingListing).where(
+                    AdvertisingListing.id == listing_id,
+                    AdvertisingListing.is_active.is_(True),
+                    AdvertisingListing.offers_mandatory.is_(True),
+                ))).scalar_one_or_none()
+                if listing is None or listing.owner_user_id == message.from_user.id:
+                    await state.clear()
+                    await message.answer("Объявление больше недоступно.")
+                    return
+
+        mode = _mandatory_mode(listing)
+        price = int(listing.mandatory_price_stars or 0)
+        await state.set_state(MandatoryRequestState.waiting_quantity)
+        await state.update_data(
+            mandatory_listing_id=listing.id,
+            mandatory_existing_deal_id=existing_deal_id if isinstance(existing_deal_id, int) else None,
+            mandatory_target_chat_id=target_chat.id,
+            mandatory_target_title=target_chat.title or f"@{username}",
+            mandatory_target_username=username,
+            mandatory_target_url=f"https://t.me/{username}",
+            mandatory_target_member_count=member_count,
+            mandatory_mode=mode,
+            mandatory_price_stars=price,
+        )
+        if mode == "days":
+            prompt = (
+                "✅ <b>Группа для ОП проверена</b>\n\n"
+                f"🏠 <b>{escape(target_chat.title or '@' + username)}</b>\n"
+                f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ") +
+                f"⭐ Цена рекламодателя: <b>{price} ⭐ за день</b>\n\n"
+                "Введите количество дней ОП, например: <code>3</code>."
+            )
+        else:
+            prompt = (
+                "✅ <b>Группа для ОП проверена</b>\n\n"
+                f"🏠 <b>{escape(target_chat.title or '@' + username)}</b>\n"
+                f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ") +
+                f"⭐ Цена рекламодателя: <b>{price} ⭐ за подписчика</b>\n\n"
+                "Введите количество новых подписчиков, которое хотите получить, например: <code>100</code>."
+            )
+        await message.answer(prompt, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"ads:mandatory:cancel:{existing_deal_id}" if isinstance(existing_deal_id, int) else "ads:buy")]
+        ]))
+
+    @router.message(MandatoryRequestState.waiting_quantity, F.chat.type == "private")
+    async def quantity(message: Message, state: FSMContext, bot: Bot) -> None:
+        if message.from_user is None:
+            return
+        try:
+            qty = int((message.text or "").strip())
+        except ValueError:
+            qty = 0
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        if qty <= 0 or qty > 1_000_000:
+            await message.answer("Введите целое положительное число от 1 до 1 000 000.")
+            return
+        data = await state.get_data()
+        listing_id = data.get("mandatory_listing_id")
+        existing_deal_id = data.get("mandatory_existing_deal_id")
+        target_chat_id = data.get("mandatory_target_chat_id")
+        target_title = str(data.get("mandatory_target_title") or "Группа")
+        target_username = str(data.get("mandatory_target_username") or "")
+        target_url = str(data.get("mandatory_target_url") or "")
+        member_count = int(data.get("mandatory_target_member_count") or 0)
+        mode = str(data.get("mandatory_mode") or "days")
+        price = int(data.get("mandatory_price_stars") or 0)
+        if not isinstance(listing_id, int) or not isinstance(target_chat_id, int) or mode not in {"days", "subscribers"}:
+            await state.clear()
+            await message.answer("Мастер заявки устарел. Начните заново.")
+            return
+        total_price = price * qty
 
         async with session_factory() as session:
             async with session.begin():
+                listing = (await session.execute(select(AdvertisingListing).where(
+                    AdvertisingListing.id == listing_id,
+                    AdvertisingListing.is_active.is_(True),
+                    AdvertisingListing.offers_mandatory.is_(True),
+                ).with_for_update())).scalar_one_or_none()
+                if listing is None or listing.owner_user_id == message.from_user.id:
+                    await state.clear()
+                    await message.answer("Объявление больше недоступно.")
+                    return
                 if isinstance(existing_deal_id, int):
-                    deal = (await session.execute(
-                        select(AdvertisingDeal).where(
-                            AdvertisingDeal.id == existing_deal_id,
-                            AdvertisingDeal.buyer_user_id == message.from_user.id,
-                            AdvertisingDeal.status == "draft_mandatory",
-                            AdvertisingDeal.requested_mandatory.is_(True),
-                        ).with_for_update()
-                    )).scalar_one_or_none()
+                    deal = (await session.execute(select(AdvertisingDeal).where(
+                        AdvertisingDeal.id == existing_deal_id,
+                        AdvertisingDeal.buyer_user_id == message.from_user.id,
+                        AdvertisingDeal.status == "draft_mandatory",
+                        AdvertisingDeal.requested_mandatory.is_(True),
+                    ).with_for_update())).scalar_one_or_none()
                     if deal is None:
                         await state.clear()
                         await message.answer("Черновик заявки больше недоступен.")
                         return
-                    listing = (await session.execute(
-                        select(AdvertisingListing).where(AdvertisingListing.id == deal.listing_id)
-                    )).scalar_one_or_none()
-                    if listing is None:
-                        await state.clear()
-                        await message.answer("Объявление больше недоступно.")
-                        return
-                    placement = (await session.execute(
-                        select(AdvertisingPlacement).where(
-                            AdvertisingPlacement.deal_id == deal.id,
-                            AdvertisingPlacement.kind == "mandatory",
-                        ).with_for_update()
-                    )).scalar_one_or_none()
+                    placement = (await session.execute(select(AdvertisingPlacement).where(
+                        AdvertisingPlacement.deal_id == deal.id,
+                        AdvertisingPlacement.kind == "mandatory",
+                    ).with_for_update())).scalar_one_or_none()
                     if placement is None:
                         placement = AdvertisingPlacement(deal_id=deal.id, kind="mandatory", status="ready", config_json={})
                         session.add(placement)
-                    deal.status = "pending"
                 else:
-                    listing = (await session.execute(
-                        select(AdvertisingListing).where(
-                            AdvertisingListing.id == listing_id,
-                            AdvertisingListing.is_active.is_(True),
-                            AdvertisingListing.offers_mandatory.is_(True),
-                        ).with_for_update()
-                    )).scalar_one_or_none()
-                    if listing is None or listing.owner_user_id == message.from_user.id:
-                        await state.clear()
-                        await message.answer("Объявление больше недоступно.")
-                        return
-                    existing = (await session.execute(
-                        select(AdvertisingDeal.id).where(
-                            AdvertisingDeal.listing_id == listing.id,
-                            AdvertisingDeal.buyer_user_id == message.from_user.id,
-                            AdvertisingDeal.status == "pending",
-                            AdvertisingDeal.requested_mandatory.is_(True),
-                        ).limit(1)
-                    )).scalar_one_or_none()
+                    existing = (await session.execute(select(AdvertisingDeal.id).where(
+                        AdvertisingDeal.listing_id == listing.id,
+                        AdvertisingDeal.buyer_user_id == message.from_user.id,
+                        AdvertisingDeal.status == "pending",
+                        AdvertisingDeal.requested_mandatory.is_(True),
+                    ).limit(1))).scalar_one_or_none()
                     if existing is not None:
                         await state.clear()
                         await message.answer("У вас уже есть заявка на ОП по этой площадке, ожидающая решения.")
@@ -289,26 +343,36 @@ def create_advertising_mandatory_request_router(
                         buyer_user_id=message.from_user.id,
                         requested_post=False,
                         requested_mandatory=True,
-                        status="pending",
-                        agreed_terms_json={
-                            "mandatory_price_stars": listing.mandatory_price_stars,
-                            "mandatory_terms": listing.mandatory_terms_json,
-                        },
+                        status="draft_mandatory",
+                        agreed_terms_json={},
                     )
                     session.add(deal)
                     await session.flush()
                     placement = AdvertisingPlacement(deal_id=deal.id, kind="mandatory", status="ready", config_json={})
                     session.add(placement)
 
+                terms = dict(deal.agreed_terms_json or {})
+                terms.update({
+                    "mandatory_price_stars": price,
+                    "mandatory_terms": listing.mandatory_terms_json,
+                    "mandatory_mode": mode,
+                    "mandatory_quantity": qty,
+                    "mandatory_total_price_stars": total_price,
+                })
+                deal.agreed_terms_json = terms
+                deal.status = "pending"
                 placement.status = "ready"
                 placement.config_json = {
-                    "price_stars": listing.mandatory_price_stars,
+                    "price_stars": price,
                     "terms": listing.mandatory_terms_json,
-                    "target_chat_id": target_chat.id,
+                    "mode": mode,
+                    "quantity": qty,
+                    "total_price_stars": total_price,
+                    "target_chat_id": target_chat_id,
                     "target_title": target_title,
-                    "target_username": username,
+                    "target_username": target_username,
                     "target_url": target_url,
-                    "target_member_count": member_count,
+                    "target_member_count_at_request": member_count,
                 }
                 deal_id = deal.id
                 seller_id = deal.seller_user_id
@@ -318,31 +382,29 @@ def create_advertising_mandatory_request_router(
         await state.clear()
         buyer_name = escape(message.from_user.full_name)
         request_label = "Пост + ОП" if has_post else "ОП"
+        volume_text = f"{qty} дн." if mode == "days" else f"{qty} подписчиков"
         seller_text = (
             f"📥 <b>Новая заявка: {request_label}</b>\n\n"
             f"🏠 Ваша площадка: <b>{escape(seller_group)}</b>\n"
             f"👤 Покупатель: <b>{buyer_name}</b>\n\n"
             "🎯 <b>Куда вести обязательную подписку:</b>\n"
             f"🏠 <a href=\"{target_url}\">{escape(target_title)}</a>\n"
-            f"🔗 @{escape(username)}\n"
+            f"🔗 @{escape(target_username)}\n"
             f"👥 Участников: <b>{member_count:,}</b>\n\n".replace(",", " ") +
+            f"📐 Объём ОП: <b>{volume_text}</b>\n"
+            f"⭐ Стоимость: <b>{total_price} ⭐</b>\n\n"
             "После одобрения ОП включится автоматически в вашей группе."
         )
         try:
-            await bot.send_message(
-                seller_id,
-                seller_text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=_seller_keyboard(deal_id, message.from_user.id, has_post=has_post),
-            )
+            await bot.send_message(seller_id, seller_text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=_seller_keyboard(deal_id, message.from_user.id, has_post=has_post))
         except Exception:
             pass
         await message.answer(
             "✅ <b>Заявка отправлена рекламодателю</b>\n\n"
             f"📌 Формат: <b>{request_label}</b>\n"
             f"🎯 Группа/канал: <a href=\"{target_url}\">{escape(target_title)}</a>\n"
-            f"👥 Участников: <b>{member_count:,}</b>".replace(",", " "),
+            f"📐 Объём: <b>{volume_text}</b>\n"
+            f"⭐ Итоговая стоимость: <b>{total_price} ⭐</b>",
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -351,73 +413,97 @@ def create_advertising_mandatory_request_router(
             ]),
         )
 
+    @router.callback_query(F.data.regexp(r"^ads:mandatory:cancel:\d+$"))
+    async def cancel_draft(callback: CallbackQuery, state: FSMContext) -> None:
+        deal_id = int((callback.data or "").rsplit(":", 1)[1])
+        async with session_factory() as session:
+            async with session.begin():
+                deal = (await session.execute(select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update())).scalar_one_or_none()
+                if deal is not None and deal.buyer_user_id == callback.from_user.id and deal.status in {"draft_post", "draft_mandatory"}:
+                    deal.status = "cancelled"
+                    for placement in (await session.execute(select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal.id).with_for_update())).scalars().all():
+                        if placement.status in {"draft", "ready", "pending"}:
+                            placement.status = "cancelled"
+        await state.clear()
+        if callback.message is not None:
+            await callback.message.edit_text("❌ Рекламная заявка отменена.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")]]))
+        await callback.answer("Заявка отменена")
+
     @router.callback_query(F.data.regexp(r"^ads:mandatory:accept:\d+$"))
     async def accept(callback: CallbackQuery, bot: Bot) -> None:
         deal_id = int((callback.data or "").rsplit(":", 1)[1])
         now = datetime.now(timezone.utc)
         day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-        buyer_id = None
+        buyer_id: int | None = None
         target_title = ""
         target_url = ""
         seller_group = ""
         post_started = False
         duration_days = 1
+        mode = "days"
+        quantity = 1
+        total_price = 0
         async with session_factory() as session:
             async with session.begin():
-                deal = (await session.execute(
-                    select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update()
-                )).scalar_one_or_none()
+                deal = (await session.execute(select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update())).scalar_one_or_none()
                 if deal is None or deal.seller_user_id != callback.from_user.id or deal.status != "pending":
                     await callback.answer("Заявка недоступна или уже обработана.", show_alert=True)
                     return
-                used_op = int((await session.execute(
-                    select(func.count()).select_from(AdvertisingDeal).where(
-                        AdvertisingDeal.listing_id == deal.listing_id,
-                        AdvertisingDeal.accepted_at >= day_start,
-                        AdvertisingDeal.requested_mandatory.is_(True),
-                    )
-                )).scalar_one())
+                used_op = int((await session.execute(select(func.count()).select_from(AdvertisingDeal).where(
+                    AdvertisingDeal.listing_id == deal.listing_id,
+                    AdvertisingDeal.accepted_at >= day_start,
+                    AdvertisingDeal.requested_mandatory.is_(True),
+                ))).scalar_one())
                 if used_op >= MANDATORY_DAILY_LIMIT:
                     await callback.answer("Лимит ОП на сегодня уже использован: 3 из 3.", show_alert=True)
                     return
                 if deal.requested_post:
-                    used_post = int((await session.execute(
-                        select(func.count()).select_from(AdvertisingDeal).where(
-                            AdvertisingDeal.listing_id == deal.listing_id,
-                            AdvertisingDeal.accepted_at >= day_start,
-                            AdvertisingDeal.requested_post.is_(True),
-                        )
-                    )).scalar_one())
+                    used_post = int((await session.execute(select(func.count()).select_from(AdvertisingDeal).where(
+                        AdvertisingDeal.listing_id == deal.listing_id,
+                        AdvertisingDeal.accepted_at >= day_start,
+                        AdvertisingDeal.requested_post.is_(True),
+                    ))).scalar_one())
                     if used_post >= POST_DAILY_LIMIT:
                         await callback.answer("Лимит рекламных постов на сегодня уже использован: 1 из 1.", show_alert=True)
                         return
-
-                mandatory = (await session.execute(
-                    select(AdvertisingPlacement).where(
-                        AdvertisingPlacement.deal_id == deal.id,
-                        AdvertisingPlacement.kind == "mandatory",
-                    ).with_for_update()
-                )).scalar_one_or_none()
-                listing = (await session.execute(
-                    select(AdvertisingListing).where(AdvertisingListing.id == deal.listing_id)
-                )).scalar_one_or_none()
+                mandatory = (await session.execute(select(AdvertisingPlacement).where(
+                    AdvertisingPlacement.deal_id == deal.id,
+                    AdvertisingPlacement.kind == "mandatory",
+                ).with_for_update())).scalar_one_or_none()
+                listing = (await session.execute(select(AdvertisingListing).where(AdvertisingListing.id == deal.listing_id))).scalar_one_or_none()
                 if mandatory is None or mandatory.status != "ready" or listing is None:
                     await callback.answer("Данные ОП не готовы.", show_alert=True)
                     return
-
-                mandatory.status = "active"
-                mandatory.starts_at = now
                 cfg = dict(mandatory.config_json or {})
+                target_chat_id = cfg.get("target_chat_id")
+                if not isinstance(target_chat_id, int):
+                    await callback.answer("Группа ОП не определена.", show_alert=True)
+                    return
+                mode = str(cfg.get("mode") or "days")
+                quantity = max(int(cfg.get("quantity") or 1), 1)
+                total_price = int(cfg.get("total_price_stars") or 0)
                 target_title = str(cfg.get("target_title") or "Группа")
                 target_url = str(cfg.get("target_url") or "")
+                if mode == "days":
+                    mandatory.ends_at = now + timedelta(days=quantity)
+                else:
+                    try:
+                        baseline = await bot.get_chat_member_count(target_chat_id)
+                    except Exception:
+                        baseline = int(cfg.get("target_member_count_at_request") or 0)
+                    cfg["baseline_member_count"] = baseline
+                    cfg["target_member_count"] = baseline + quantity
+                    mandatory.ends_at = None
+                cfg["started_at"] = now.isoformat()
+                mandatory.config_json = cfg
+                mandatory.status = "active"
+                mandatory.starts_at = now
 
                 if deal.requested_post:
-                    post = (await session.execute(
-                        select(AdvertisingPlacement).where(
-                            AdvertisingPlacement.deal_id == deal.id,
-                            AdvertisingPlacement.kind == "post",
-                        ).with_for_update()
-                    )).scalar_one_or_none()
+                    post = (await session.execute(select(AdvertisingPlacement).where(
+                        AdvertisingPlacement.deal_id == deal.id,
+                        AdvertisingPlacement.kind == "post",
+                    ).with_for_update())).scalar_one_or_none()
                     if post is None or post.status != "ready":
                         await callback.answer("Рекламный пост не готов.", show_alert=True)
                         return
@@ -436,6 +522,7 @@ def create_advertising_mandatory_request_router(
                 buyer_id = deal.buyer_user_id
                 seller_group = listing.group_title_snapshot
 
+        volume_text = f"{quantity} дн." if mode == "days" else f"{quantity} подписчиков"
         if buyer_id is not None:
             try:
                 extra = f"\n📣 Рекламный пост также запущен на <b>{duration_days} дн.</b>" if post_started else ""
@@ -443,7 +530,9 @@ def create_advertising_mandatory_request_router(
                     buyer_id,
                     "✅ <b>Рекламодатель одобрил вашу заявку</b>\n\n"
                     f"🏠 Площадка: <b>{escape(seller_group)}</b>\n"
-                    f"🎯 ОП на: <a href=\"{target_url}\">{escape(target_title)}</a>\n\n"
+                    f"🎯 ОП на: <a href=\"{target_url}\">{escape(target_title)}</a>\n"
+                    f"📐 Объём ОП: <b>{volume_text}</b>\n"
+                    f"⭐ Стоимость ОП: <b>{total_price} ⭐</b>\n\n"
                     f"🚀 Обязательная подписка включена автоматически.{extra}",
                     parse_mode="HTML",
                     disable_web_page_preview=True,
@@ -454,7 +543,8 @@ def create_advertising_mandatory_request_router(
             extra = f"\n📣 Пост: <b>запущен на {duration_days} дн.</b>" if post_started else ""
             await callback.message.edit_text(
                 "✅ <b>Заявка одобрена и запущена</b>\n\n"
-                f"🎯 ОП: <a href=\"{target_url}\">{escape(target_title)}</a>{extra}\n\n"
+                f"🎯 ОП: <a href=\"{target_url}\">{escape(target_title)}</a>\n"
+                f"📐 Объём: <b>{volume_text}</b>{extra}\n\n"
                 "Обычные участники вашей группы должны быть подписаны на указанную площадку, чтобы писать сообщения.",
                 parse_mode="HTML",
                 disable_web_page_preview=True,
@@ -467,17 +557,13 @@ def create_advertising_mandatory_request_router(
         buyer_id = None
         async with session_factory() as session:
             async with session.begin():
-                deal = (await session.execute(
-                    select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update()
-                )).scalar_one_or_none()
+                deal = (await session.execute(select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update())).scalar_one_or_none()
                 if deal is None or deal.seller_user_id != callback.from_user.id or deal.status != "pending":
                     await callback.answer("Заявка недоступна или уже обработана.", show_alert=True)
                     return
                 deal.status = "rejected"
                 deal.rejected_at = datetime.now(timezone.utc)
-                placements = (await session.execute(
-                    select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal.id).with_for_update()
-                )).scalars().all()
+                placements = (await session.execute(select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal.id).with_for_update())).scalars().all()
                 for placement in placements:
                     if placement.status in {"draft", "ready", "pending"}:
                         placement.status = "rejected"
