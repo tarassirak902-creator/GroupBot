@@ -94,11 +94,16 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
                 # Fail open if Telegram cannot verify the sponsor temporarily.
                 logger.exception("Could not verify advertising OP membership target_chat_id=%s user_id=%s", target_chat_id, event.from_user.id)
                 continue
-            if member.status not in {"member", "administrator", "creator", "restricted"}:
-                missing = {"url": target_url, "username": target_username}
-                break
-            if member.status == "restricted" and not getattr(member, "is_member", True):
-                missing = {"url": target_url, "username": target_username}
+            if member.status not in {"member", "administrator", "creator", "restricted"} or (
+                member.status == "restricted" and not getattr(member, "is_member", True)
+            ):
+                try:
+                    target_chat = await bot.get_chat(target_chat_id)
+                    target_title = target_chat.title or target_chat.full_name or target_username or "Перейти"
+                except Exception:
+                    logger.info("Could not get OP target title target_chat_id=%s", target_chat_id)
+                    target_title = target_username or "Перейти"
+                missing = {"url": target_url, "title": target_title}
                 break
 
         if missing is None:
@@ -109,15 +114,22 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
         except Exception:
             logger.info("Could not delete message blocked by advertising OP chat_id=%s message_id=%s", event.chat.id, event.message_id)
 
-        username = f"@{event.from_user.username}" if event.from_user.username else event.from_user.full_name
-        sponsor = f"@{missing['username']}" if missing.get("username") else missing["url"]
-        text = f"{escape(username)}, чтобы писать в группе, Вам необходимо подписаться на :\n{escape(sponsor)}"
+        user_name = event.from_user.full_name or event.from_user.username or "Пользователь"
+        user_link = f'<a href="tg://user?id={event.from_user.id}">{escape(user_name)}</a>'
+        text = f"👤 {user_link}, чтобы писать в группе, Вам необходимо подписаться на:"
+        button_title = str(missing["title"]).strip() or "Перейти"
+        if len(button_title) > 48:
+            button_title = button_title[:47].rstrip() + "…"
         try:
             await bot.send_message(
                 event.chat.id,
                 text,
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подписаться", url=missing["url"])]]),
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(text=f"🏠 {button_title}", url=missing["url"])
+                    ]]
+                ),
             )
         except Exception:
             logger.exception("Could not send advertising OP notice chat_id=%s", event.chat.id)
