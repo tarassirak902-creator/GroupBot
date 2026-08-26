@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,87 +35,55 @@ def _catalog_keyboard(rows: list[AdvertisingListing], ratings: dict[int, float])
     buttons: list[list[InlineKeyboardButton]] = []
     for listing in rows:
         target = f"ads:listing:{listing.id}"
-        buttons.extend(
-            [
-                [
-                    InlineKeyboardButton(
-                        text=f"🏷️ Объявление · {_rating_label(ratings.get(listing.id))} 👇"[:64],
-                        callback_data=target,
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"🏠 {_short_title(listing.group_title_snapshot)}"[:64],
-                        callback_data=target,
-                    )
-                ],
-                [InlineKeyboardButton(text=_offer_label(listing), callback_data=target)],
-            ]
-        )
+        buttons.extend([
+            [InlineKeyboardButton(text=f"🏷️ Объявление · {_rating_label(ratings.get(listing.id))} 👇"[:64], callback_data=target)],
+            [InlineKeyboardButton(text=f"🏠 {_short_title(listing.group_title_snapshot)}"[:64], callback_data=target)],
+            [InlineKeyboardButton(text=_offer_label(listing), callback_data=target)],
+        ])
     buttons.append([InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def create_advertising_marketplace_catalog_router(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> Router:
+def create_advertising_marketplace_catalog_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="advertising_marketplace_catalog")
 
     @router.callback_query(F.data == "ads:buy")
-    async def buy_advertising(callback: CallbackQuery) -> None:
+    async def buy_advertising(callback: CallbackQuery, state: FSMContext) -> None:
         if callback.message is None:
             return
-
+        await state.clear()
         async with session_factory() as session:
-            rows = list(
-                (
-                    await session.execute(
-                        select(AdvertisingListing)
-                        .where(
-                            AdvertisingListing.is_active.is_(True),
-                            AdvertisingListing.owner_user_id != callback.from_user.id,
-                        )
-                        .order_by(AdvertisingListing.updated_at.desc(), AdvertisingListing.id.desc())
-                        .limit(50)
-                    )
-                ).scalars().all()
-            )
-
+            rows = list((await session.execute(
+                select(AdvertisingListing)
+                .where(
+                    AdvertisingListing.is_active.is_(True),
+                    AdvertisingListing.owner_user_id != callback.from_user.id,
+                )
+                .order_by(AdvertisingListing.updated_at.desc(), AdvertisingListing.id.desc())
+                .limit(50)
+            )).scalars().all())
             ratings: dict[int, float] = {}
             if rows:
                 listing_ids = [row.id for row in rows]
-                rating_rows = (
-                    await session.execute(
-                        select(
-                            AdvertisingDeal.listing_id,
-                            func.avg(AdvertisingReview.rating),
-                        )
-                        .join(AdvertisingReview, AdvertisingReview.deal_id == AdvertisingDeal.id)
-                        .where(
-                            AdvertisingDeal.listing_id.in_(listing_ids),
-                            AdvertisingReview.reviewed_user_id == AdvertisingDeal.seller_user_id,
-                        )
-                        .group_by(AdvertisingDeal.listing_id)
+                rating_rows = (await session.execute(
+                    select(AdvertisingDeal.listing_id, func.avg(AdvertisingReview.rating))
+                    .join(AdvertisingReview, AdvertisingReview.deal_id == AdvertisingDeal.id)
+                    .where(
+                        AdvertisingDeal.listing_id.in_(listing_ids),
+                        AdvertisingReview.reviewed_user_id == AdvertisingDeal.seller_user_id,
                     )
-                ).all()
-                ratings = {
-                    int(listing_id): float(avg_rating)
-                    for listing_id, avg_rating in rating_rows
-                    if avg_rating is not None
-                }
-
+                    .group_by(AdvertisingDeal.listing_id)
+                )).all()
+                ratings = {int(listing_id): float(avg_rating) for listing_id, avg_rating in rating_rows if avg_rating is not None}
         if not rows:
             await callback.message.edit_text(
                 "🛒 <b>Купить рекламу</b>\n\nАктивных объявлений других рекламодателей пока нет.",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[[InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")]]
-                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")]]),
             )
         else:
             await callback.message.edit_text(
-                "🛒 <b>Купить рекламу</b>\n\n"
-                "Выберите рекламную площадку. Цена и подробные условия указаны внутри объявления:",
+                "🛒 <b>Купить рекламу</b>\n\nВыберите рекламную площадку. Цена и подробные условия указаны внутри объявления:",
                 parse_mode="HTML",
                 reply_markup=_catalog_keyboard(rows, ratings),
             )
