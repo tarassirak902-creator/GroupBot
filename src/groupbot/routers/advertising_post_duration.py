@@ -85,7 +85,7 @@ def post_editor_keyboard_with_cancel(deal_id: int, *, has_photo: bool, has_butto
         if has_button:
             extra.append(InlineKeyboardButton(text="🗑 Кнопку", callback_data=f"ads:post:remove_button:{deal_id}"))
         rows.append(extra)
-    rows.append([InlineKeyboardButton(text="✅ Подтвердить и отправить", callback_data=f"ads:post:submit:{deal_id}")])
+    rows.append([InlineKeyboardButton(text="✅ Подтвердить и продолжить", callback_data=f"ads:post:submit2:{deal_id}")])
     rows.append([InlineKeyboardButton(text="❌ Отменить рекламный пост", callback_data=f"ads:post:cancel:{deal_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -99,15 +99,10 @@ def create_advertising_post_duration_router(session_factory: async_sessionmaker[
             return
         listing_id = int((callback.data or "").rsplit(":", 1)[1])
         async with session_factory() as session:
-            listing = (
-                await session.execute(
-                    select(AdvertisingListing).where(AdvertisingListing.id == listing_id)
-                )
-            ).scalar_one_or_none()
+            listing = (await session.execute(select(AdvertisingListing).where(AdvertisingListing.id == listing_id))).scalar_one_or_none()
         if listing is None or (not listing.is_active and listing.owner_user_id != callback.from_user.id):
             await callback.answer("Объявление недоступно.", show_alert=True)
             return
-
         if listing.owner_user_id == callback.from_user.id:
             rows = [
                 [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"ads:edit:{listing.id}")],
@@ -121,12 +116,7 @@ def create_advertising_post_duration_router(session_factory: async_sessionmaker[
                 [InlineKeyboardButton(text="◀️ Вернуться к списку", callback_data="ads:buy")],
                 [InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")],
             ]
-
-        await callback.message.edit_text(
-            listing_text_with_duration(listing),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
+        await callback.message.edit_text(listing_text_with_duration(listing), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await callback.answer()
 
     @router.callback_query(F.data.regexp(r"^ads:edit:post_duration:\d+$"))
@@ -187,11 +177,6 @@ def create_advertising_post_duration_router(session_factory: async_sessionmaker[
                 pass
         await message.answer(text, parse_mode="HTML", reply_markup=editor_keyboard_with_duration(listing))
 
-    # The creation wizard uses the same duration semantics. Keep it as a child
-    # router here so it is always registered before the broad advertising router.
-    from groupbot.routers.advertising_duration_integration import (
-        create_advertising_duration_integration_router,
-    )
+    from groupbot.routers.advertising_duration_integration import create_advertising_duration_integration_router
     router.include_router(create_advertising_duration_integration_router(session_factory))
-
     return router
