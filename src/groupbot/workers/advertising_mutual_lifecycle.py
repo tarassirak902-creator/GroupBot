@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 async def process_mutual_op(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
     now = datetime.now(timezone.utc)
-    completed: list[tuple[int, int, int, str, str, str, int, int, bool]] = []
+    completed: list[tuple[int, int, int, int, int, str | None, str, str, str, int, int, bool]] = []
     count = 0
     async with session_factory() as session:
         async with session.begin():
@@ -62,9 +62,12 @@ async def process_mutual_op(bot: Bot, session_factory: async_sessionmaker[AsyncS
                     deal.status = "finished_waiting_confirmation"
                     deal.finished_at = now
                 completed.append((
+                    direction.id,
+                    direction.target_chat_id,
                     deal.id,
                     deal.buyer_user_id,
                     deal.seller_user_id,
+                    direction.invite_link,
                     direction.source_title,
                     direction.target_title,
                     direction.mode,
@@ -73,25 +76,14 @@ async def process_mutual_op(bot: Bot, session_factory: async_sessionmaker[AsyncS
                     deal_finished,
                 ))
 
-    for deal_id, buyer_id, seller_id, source_title, target_title, mode, quantity, progress, deal_finished in completed:
-        try:
-            # Once a direction is fulfilled, do not restart it later if somebody leaves.
-            async with session_factory() as session:
-                direction = (await session.execute(select(AdvertisingMutualOpDirection).where(
-                    AdvertisingMutualOpDirection.deal_id == deal_id,
-                    AdvertisingMutualOpDirection.source_title == source_title,
-                    AdvertisingMutualOpDirection.target_title == target_title,
-                    AdvertisingMutualOpDirection.status == "completed",
-                ).order_by(AdvertisingMutualOpDirection.id.desc()).limit(1))).scalar_one_or_none()
-            if direction is not None and direction.invite_link:
-                try:
-                    await bot.revoke_chat_invite_link(direction.target_chat_id, direction.invite_link)
-                except Exception:
-                    logger.info("Could not revoke completed mutual OP invite link direction=%s", direction.id)
-        except Exception:
-            logger.exception("Failed mutual OP invite cleanup deal=%s", deal_id)
+    for direction_id, target_chat_id, deal_id, buyer_id, seller_id, invite_link, source_title, target_title, mode, quantity, progress, deal_finished in completed:
+        if invite_link:
+            try:
+                await bot.revoke_chat_invite_link(target_chat_id, invite_link)
+            except Exception:
+                logger.info("Could not revoke completed mutual OP invite link direction=%s", direction_id)
 
-        result = f"{quantity} дн." if mode == "days" else f"{max(progress, quantity)}/{quantity} участников"
+        result = f"{quantity} дн." if mode == "days" else f"{progress}/{quantity} участников"
         text = (
             "✅ <b>Одно направление взаимного ОП выполнено</b>\n\n"
             f"🏠 {source_title} → {target_title}\n"
