@@ -47,6 +47,7 @@ from groupbot.routers.advertising_post_keyboard import post_editor_keyboard
 from groupbot.routers.advertising_post_request import create_advertising_post_request_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
 from groupbot.routers.advertising_sales_nav import create_advertising_sales_nav_router
+from groupbot.routers.advertising_settlement import create_advertising_settlement_router
 from groupbot.routers.antiflood import create_antiflood_router
 from groupbot.routers.antilinks import create_antilinks_router
 from groupbot.routers.antispam import create_antispam_router
@@ -187,6 +188,7 @@ async def main() -> None:
     dp.include_router(create_advertising_post_request_router(session_factory))
     dp.include_router(create_advertising_materials_router(session_factory))
     dp.include_router(create_advertising_deal_actions_v2_router(session_factory))
+    dp.include_router(create_advertising_settlement_router(session_factory))
     dp.include_router(create_advertising_sales_nav_router(session_factory))
     dp.include_router(create_advertising_requests_router(session_factory))
     dp.include_router(create_advertising_mimorus_post_router(session_factory))
