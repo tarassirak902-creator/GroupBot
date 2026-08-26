@@ -45,6 +45,10 @@ async def _is_op_exempt_in_db(session: AsyncSession, chat_id: int, user_id: int)
 class AdvertisingMandatoryMiddleware(BaseMiddleware):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
+        # All advertising modules are imported before middleware instances are created
+        # in main.py, so this is a safe point to replace legacy deal labels/buttons.
+        from groupbot.routers.advertising_mutual_patches import install_mutual_ui_patches
+        install_mutual_ui_patches()
 
     async def __call__(self, handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]], event: TelegramObject, data: dict[str, Any]) -> Any:
         if not isinstance(event, Message) or event.chat.type not in {"group", "supergroup"}:
