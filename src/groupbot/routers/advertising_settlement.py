@@ -15,6 +15,12 @@ from groupbot.advertising_models import (
     AdvertisingNoClaimsConfirmation,
     AdvertisingReview,
 )
+from groupbot.routers import advertising_requests as advertising_requests_module
+from groupbot.routers.advertising_mutual_op import (
+    create_advertising_mutual_op_router,
+    request_type_keyboard_with_mutual,
+)
+from groupbot.routers.advertising_mutual_tracking import create_advertising_mutual_tracking_router
 
 
 class AdvertisingSettlementState(StatesGroup):
@@ -39,6 +45,10 @@ def _rating_keyboard(deal_id: int) -> InlineKeyboardMarkup:
 
 def create_advertising_settlement_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="advertising_settlement")
+    # Keep mutual OP ahead of the legacy generic advertising request router.
+    advertising_requests_module._request_type_keyboard = request_type_keyboard_with_mutual
+    router.include_router(create_advertising_mutual_op_router(session_factory))
+    router.include_router(create_advertising_mutual_tracking_router(session_factory))
 
     async def _load(deal_id: int) -> AdvertisingDeal | None:
         async with session_factory() as session:
