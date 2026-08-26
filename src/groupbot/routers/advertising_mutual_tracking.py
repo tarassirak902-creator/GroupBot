@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.types import ChatMemberUpdated
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -33,6 +33,27 @@ def create_advertising_mutual_tracking_router(session_factory: async_sessionmake
             async with session.begin():
                 await upsert_user(session, user)
                 if new_is_member:
+                    # A previously credited user counts again after rejoining, even if
+                    # the second join was not made through the advertising invite link.
+                    previous = list((await session.execute(
+                        select(AdvertisingMutualOpMember)
+                        .join(AdvertisingMutualOpDirection, AdvertisingMutualOpDirection.id == AdvertisingMutualOpMember.direction_id)
+                        .where(
+                            AdvertisingMutualOpDirection.target_chat_id == event.chat.id,
+                            AdvertisingMutualOpDirection.status == "active",
+                            AdvertisingMutualOpMember.user_id == user.id,
+                            AdvertisingMutualOpMember.is_active.is_(False),
+                        )
+                        .with_for_update()
+                    )).scalars().all())
+                    if previous:
+                        for member in previous:
+                            member.is_active = True
+                            member.left_at = None
+                        return
+
+                    # First credit is strict: the user must join using the unique
+                    # invite link created for this mutual OP direction.
                     invite = event.invite_link.invite_link if event.invite_link is not None else None
                     if not invite:
                         return
