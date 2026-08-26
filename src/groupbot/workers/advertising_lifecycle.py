@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,6 +22,21 @@ def _post_keyboard(cfg: dict) -> InlineKeyboardMarkup | None:
     if not text or not url:
         return None
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text[:64], url=url)]])
+
+
+async def _finish_deal_if_no_other_active(session: AsyncSession, deal: AdvertisingDeal, placement_id: int, now: datetime) -> bool:
+    other_active = (await session.execute(
+        select(AdvertisingPlacement.id).where(
+            AdvertisingPlacement.deal_id == deal.id,
+            AdvertisingPlacement.id != placement_id,
+            AdvertisingPlacement.status.in_(["pending", "ready", "active"]),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if other_active is not None:
+        return False
+    deal.status = "finished_waiting_confirmation"
+    deal.finished_at = now
+    return True
 
 
 async def publish_due_posts(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
@@ -54,15 +70,7 @@ async def publish_due_posts(bot: Bot, session_factory: async_sessionmaker[AsyncS
                     else:
                         await bot.send_message(listing.chat_id, text, reply_markup=markup)
                     published += 1
-                    await write_audit(
-                        session,
-                        "advertising.post_published",
-                        actor_user_id=None,
-                        chat_id=listing.chat_id,
-                        target_type="advertising_deal",
-                        target_id=str(deal.id),
-                        payload={"placement_id": placement.id},
-                    )
+                    await write_audit(session, "advertising.post_published", actor_user_id=None, chat_id=listing.chat_id, target_type="advertising_deal", target_id=str(deal.id), payload={"placement_id": placement.id})
                 except Exception:
                     logger.exception("Failed to publish advertising post deal=%s chat=%s", deal.id, listing.chat_id)
                 finally:
@@ -95,39 +103,108 @@ async def finish_expired_posts(bot: Bot, session_factory: async_sessionmaker[Asy
                     duration_days = max(int(cfg.get("duration_days") or 1), 1)
                 except (TypeError, ValueError):
                     duration_days = 1
-                other_active = (await session.execute(
-                    select(AdvertisingPlacement.id).where(
-                        AdvertisingPlacement.deal_id == deal.id,
-                        AdvertisingPlacement.id != placement.id,
-                        AdvertisingPlacement.status.in_(["pending", "ready", "active"]),
-                    ).limit(1)
-                )).scalar_one_or_none()
-                deal_finished = other_active is None
-                if deal_finished:
-                    deal.status = "finished_waiting_confirmation"
-                    deal.finished_at = now
+                deal_finished = await _finish_deal_if_no_other_active(session, deal, placement.id, now)
                 notifications.append((deal.buyer_user_id, deal.seller_user_id, listing.group_title_snapshot, deal_finished, duration_days))
-                await write_audit(
-                    session,
-                    "advertising.post_finished",
-                    actor_user_id=None,
-                    chat_id=listing.chat_id,
-                    target_type="advertising_deal",
-                    target_id=str(deal.id),
-                    payload={"placement_id": placement.id, "duration_days": duration_days},
-                )
+                await write_audit(session, "advertising.post_finished", actor_user_id=None, chat_id=listing.chat_id, target_type="advertising_deal", target_id=str(deal.id), payload={"placement_id": placement.id, "duration_days": duration_days})
 
     for buyer_id, seller_id, title, deal_finished, duration_days in notifications:
         buyer_text = (
             "🏁 <b>Показ рекламного поста завершён</b>\n\n"
-            f"🏠 Площадка: <b>{title}</b>\n"
+            f"🏠 Площадка: <b>{escape(title)}</b>\n"
             f"⏳ Срок размещения: <b>{duration_days} дн.</b>\n"
             "Рекламная кампания завершена автоматически."
         )
         seller_text = (
             "🏁 <b>Размещение рекламного поста завершено</b>\n\n"
-            f"🏠 Площадка: <b>{title}</b>\n"
+            f"🏠 Площадка: <b>{escape(title)}</b>\n"
             f"⏳ Срок: <b>{duration_days} дн.</b>"
+        )
+        if deal_finished:
+            buyer_text += "\n\nТеперь сделку можно закрыть без претензий или открыть спор."
+            seller_text += "\n\nТеперь сделку можно закрыть без претензий или открыть спор."
+        for user_id, text in ((buyer_id, buyer_text), (seller_id, seller_text)):
+            try:
+                await bot.send_message(user_id, text, parse_mode="HTML")
+            except Exception:
+                pass
+    return finished
+
+
+async def finish_due_mandatory(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
+    now = datetime.now(timezone.utc)
+    notifications: list[tuple[int, int, str, str, int, bool, str]] = []
+    finished = 0
+    async with session_factory() as session:
+        async with session.begin():
+            rows = (await session.execute(
+                select(AdvertisingPlacement, AdvertisingDeal, AdvertisingListing)
+                .join(AdvertisingDeal, AdvertisingDeal.id == AdvertisingPlacement.deal_id)
+                .join(AdvertisingListing, AdvertisingListing.id == AdvertisingDeal.listing_id)
+                .where(
+                    AdvertisingPlacement.kind == "mandatory",
+                    AdvertisingPlacement.status == "active",
+                )
+                .with_for_update(skip_locked=True)
+            )).all()
+            for placement, deal, listing in rows:
+                cfg = dict(placement.config_json or {})
+                mode = str(cfg.get("mode") or "days")
+                try:
+                    quantity = max(int(cfg.get("quantity") or 1), 1)
+                except (TypeError, ValueError):
+                    quantity = 1
+                should_finish = False
+                result_text = ""
+                if mode == "days":
+                    should_finish = placement.ends_at is not None and placement.ends_at <= now
+                    result_text = f"{quantity} дн."
+                elif mode == "subscribers":
+                    target_chat_id = cfg.get("target_chat_id")
+                    target_count = cfg.get("target_member_count")
+                    baseline = cfg.get("baseline_member_count")
+                    if not isinstance(target_chat_id, int) or not isinstance(target_count, int):
+                        continue
+                    try:
+                        current_count = await bot.get_chat_member_count(target_chat_id)
+                    except Exception:
+                        logger.exception("Could not check OP subscriber target deal=%s target_chat=%s", deal.id, target_chat_id)
+                        continue
+                    cfg["last_member_count"] = current_count
+                    placement.config_json = cfg
+                    should_finish = current_count >= target_count
+                    gained = max(current_count - int(baseline or current_count), 0)
+                    result_text = f"{gained}/{quantity} подписчиков"
+                if not should_finish:
+                    continue
+
+                placement.status = "finished"
+                finished += 1
+                deal_finished = await _finish_deal_if_no_other_active(session, deal, placement.id, now)
+                target_title = str(cfg.get("target_title") or "Группа")
+                notifications.append((deal.buyer_user_id, deal.seller_user_id, listing.group_title_snapshot, mode, quantity, deal_finished, target_title))
+                await write_audit(
+                    session,
+                    "advertising.mandatory_finished",
+                    actor_user_id=None,
+                    chat_id=listing.chat_id,
+                    target_type="advertising_deal",
+                    target_id=str(deal.id),
+                    payload={"placement_id": placement.id, "mode": mode, "quantity": quantity, "result": result_text},
+                )
+
+    for buyer_id, seller_id, seller_group, mode, quantity, deal_finished, target_title in notifications:
+        volume = f"{quantity} дн." if mode == "days" else f"{quantity} подписчиков"
+        buyer_text = (
+            "🏁 <b>Обязательная подписка завершена</b>\n\n"
+            f"🏠 Площадка рекламодателя: <b>{escape(seller_group)}</b>\n"
+            f"🎯 Ваша площадка: <b>{escape(target_title)}</b>\n"
+            f"📐 Выполненный объём: <b>{volume}</b>"
+        )
+        seller_text = (
+            "🏁 <b>Размещение ОП завершено</b>\n\n"
+            f"🏠 Ваша площадка: <b>{escape(seller_group)}</b>\n"
+            f"🎯 ОП на: <b>{escape(target_title)}</b>\n"
+            f"📐 Объём: <b>{volume}</b>"
         )
         if deal_finished:
             buyer_text += "\n\nТеперь сделку можно закрыть без претензий или открыть спор."
@@ -145,34 +222,23 @@ async def close_expired_no_claims_windows(session_factory: async_sessionmaker[As
     closed = 0
     async with session_factory() as session:
         async with session.begin():
-            deals = (
-                await session.execute(
-                    select(AdvertisingDeal)
-                    .where(
-                        AdvertisingDeal.status == "finished_waiting_confirmation",
-                        AdvertisingDeal.first_no_claims_at.is_not(None),
-                        AdvertisingDeal.no_claims_deadline_at.is_not(None),
-                        AdvertisingDeal.no_claims_deadline_at <= now,
-                    )
-                    .with_for_update(skip_locked=True)
-                )
-            ).scalars().all()
+            deals = (await session.execute(
+                select(AdvertisingDeal).where(
+                    AdvertisingDeal.status == "finished_waiting_confirmation",
+                    AdvertisingDeal.first_no_claims_at.is_not(None),
+                    AdvertisingDeal.no_claims_deadline_at.is_not(None),
+                    AdvertisingDeal.no_claims_deadline_at <= now,
+                ).with_for_update(skip_locked=True)
+            )).scalars().all()
             for deal in deals:
                 deal.status = "completed_timeout"
                 deal.completed_at = now
-                await write_audit(
-                    session,
-                    "advertising.deal_completed_timeout",
-                    actor_user_id=None,
-                    target_type="advertising_deal",
-                    target_id=str(deal.id),
-                    payload={
-                        "seller_user_id": deal.seller_user_id,
-                        "buyer_user_id": deal.buyer_user_id,
-                        "first_no_claims_at": deal.first_no_claims_at.isoformat() if deal.first_no_claims_at else None,
-                        "deadline_at": deal.no_claims_deadline_at.isoformat() if deal.no_claims_deadline_at else None,
-                    },
-                )
+                await write_audit(session, "advertising.deal_completed_timeout", actor_user_id=None, target_type="advertising_deal", target_id=str(deal.id), payload={
+                    "seller_user_id": deal.seller_user_id,
+                    "buyer_user_id": deal.buyer_user_id,
+                    "first_no_claims_at": deal.first_no_claims_at.isoformat() if deal.first_no_claims_at else None,
+                    "deadline_at": deal.no_claims_deadline_at.isoformat() if deal.no_claims_deadline_at else None,
+                })
                 closed += 1
     return closed
 
@@ -181,12 +247,15 @@ async def advertising_lifecycle_worker(bot: Bot, session_factory: async_sessionm
     while True:
         try:
             published = await publish_due_posts(bot, session_factory)
-            finished = await finish_expired_posts(bot, session_factory)
+            finished_posts = await finish_expired_posts(bot, session_factory)
+            finished_op = await finish_due_mandatory(bot, session_factory)
             closed = await close_expired_no_claims_windows(session_factory)
             if published:
                 logger.info("Published %s advertising posts", published)
-            if finished:
-                logger.info("Finished %s advertising post placements", finished)
+            if finished_posts:
+                logger.info("Finished %s advertising post placements", finished_posts)
+            if finished_op:
+                logger.info("Finished %s advertising OP placements", finished_op)
             if closed:
                 logger.info("Closed %s advertising deals after no-claims timeout", closed)
         except asyncio.CancelledError:
