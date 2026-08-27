@@ -208,3 +208,82 @@ async def remember_assignment_actor(
             actor_id=actor_id,
             reason="mentor_became_helper",
         )
+
+
+# Install removal wrappers when this policy module is loaded by group_commands.
+# At that point the rank routers are already imported by main.py, so their copied
+# function references can be replaced safely. group_control_ux is imported later and
+# will pick up the patched admin_member_sync function automatically.
+from groupbot.routers import admin_member_sync as _member_sync_module  # noqa: E402
+from groupbot.routers import admin_rank_audit_actions as _audit_actions_module  # noqa: E402
+from groupbot.routers import admin_rank_compact_actions as _compact_actions_module  # noqa: E402
+from groupbot.routers import admin_rank_group_notifications as _group_notifications_module  # noqa: E402
+
+_original_remove_assignment = _audit_actions_module._remove_assignment
+_original_remove_role_and_managed_telegram_admin = _member_sync_module._remove_role_and_managed_telegram_admin
+
+
+async def _remove_assignment_with_helper_cascade(
+    bot,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    assignment: AdminAssignment,
+    role: AdminRole,
+    actor_id: int,
+):
+    mentor_id = assignment.user_id
+    result = await _original_remove_assignment(
+        bot,
+        session,
+        chat_id=chat_id,
+        assignment=assignment,
+        role=role,
+        actor_id=actor_id,
+    )
+    telegram_demoted, error = result
+    if error is None and role.name != HELPER_ROLE:
+        await detach_helpers_from_mentor(
+            session,
+            chat_id=chat_id,
+            mentor_id=mentor_id,
+            actor_id=actor_id,
+            reason="mentor_removed_from_administration",
+        )
+    return telegram_demoted, error
+
+
+async def _remove_role_with_helper_cascade(
+    callback,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    assignment: AdminAssignment,
+    role_id: int,
+):
+    mentor_id = assignment.user_id
+    role = (
+        await session.execute(select(AdminRole).where(AdminRole.id == role_id))
+    ).scalar_one_or_none()
+    error = await _original_remove_role_and_managed_telegram_admin(
+        callback,
+        session,
+        chat_id=chat_id,
+        assignment=assignment,
+        role_id=role_id,
+    )
+    if error is None and role is not None and role.name != HELPER_ROLE:
+        await detach_helpers_from_mentor(
+            session,
+            chat_id=chat_id,
+            mentor_id=mentor_id,
+            actor_id=callback.from_user.id,
+            reason="mentor_removed_from_administration",
+        )
+    return error
+
+
+_audit_actions_module._remove_assignment = _remove_assignment_with_helper_cascade
+_compact_actions_module._remove_assignment = _remove_assignment_with_helper_cascade
+_group_notifications_module._remove_assignment = _remove_assignment_with_helper_cascade
+_member_sync_module._remove_role_and_managed_telegram_admin = _remove_role_with_helper_cascade
