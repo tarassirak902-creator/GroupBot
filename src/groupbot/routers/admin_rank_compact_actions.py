@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from html import escape
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole, GroupMember, MemberStatus, User
+from groupbot.routers.admin_hierarchy import STANDARD_NAMES, _ensure_standard_roles
 from groupbot.routers.admin_member_sync import (
     _assign_role,
     _assignment_limit_error,
@@ -15,9 +17,15 @@ from groupbot.routers.admin_member_sync import (
     _role_back_data,
 )
 from groupbot.routers.admin_rank_audit_actions import _remove_assignment
-from groupbot.routers.group_control import _owner_access
-from groupbot.routers.user_display import clickable_user_display
+from groupbot.routers.admin_rank_target_actions import _resolve_target
+from groupbot.routers.user_display import clickable_identity, clickable_user_display
+from groupbot.services.admin_rank_access import (
+    assignment_permission_error,
+    can_open_rank_management,
+    removal_permission_error,
+)
 from groupbot.services.admin_rank_events import assignment_event, removal_event
+from groupbot.services.users import upsert_user
 
 
 async def _old_role(
@@ -25,7 +33,7 @@ async def _old_role(
     *,
     chat_id: int,
     target_id: int,
-) -> AdminRole | None:
+) -> tuple[AdminAssignment | None, AdminRole | None]:
     assignment = (
         await session.execute(
             select(AdminAssignment).where(
@@ -35,10 +43,49 @@ async def _old_role(
         )
     ).scalar_one_or_none()
     if assignment is None or assignment.role_id is None:
-        return None
-    return (
+        return assignment, None
+    role = (
         await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
     ).scalar_one_or_none()
+    return assignment, role
+
+
+async def _allowed_roles(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    actor_id: int,
+    target_id: int,
+    roles: list[AdminRole],
+) -> list[AdminRole]:
+    existing, old_role = await _old_role(session, chat_id=chat_id, target_id=target_id)
+    allowed: list[AdminRole] = []
+    for role in roles:
+        error = await assignment_permission_error(
+            session,
+            chat_id=chat_id,
+            actor_id=actor_id,
+            target_id=target_id,
+            new_role=role,
+            existing=existing,
+            old_role=old_role,
+        )
+        if error is None:
+            allowed.append(role)
+    return allowed
+
+
+def _roles_keyboard(chat_id: int, target_id: int, roles: list[AdminRole]) -> InlineKeyboardMarkup:
+    standard = [role for role in roles if role.name in STANDARD_NAMES]
+    custom = [role for role in roles if role.name not in STANDARD_NAMES]
+    rows = [
+        [InlineKeyboardButton(
+            text=("👑 " if role.name in STANDARD_NAMES else "➕ ") + role.name[:58],
+            callback_data=f"adminreply:set:{chat_id}:{target_id}:{role.id}",
+        )]
+        for role in standard + custom
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _assign_from_callback(
@@ -63,9 +110,6 @@ async def _assign_from_callback(
 
     async with session_factory() as session:
         async with session.begin():
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True)
-                return
             role = (
                 await session.execute(
                     select(AdminRole).where(
@@ -94,7 +138,20 @@ async def _assign_from_callback(
                 await callback.answer("Пользователь или ранг больше недоступен.", show_alert=True)
                 return
 
-            old_role = await _old_role(session, chat_id=chat_id, target_id=target_id)
+            existing, old_role = await _old_role(session, chat_id=chat_id, target_id=target_id)
+            access_error = await assignment_permission_error(
+                session,
+                chat_id=chat_id,
+                actor_id=callback.from_user.id,
+                target_id=target_id,
+                new_role=role,
+                existing=existing,
+                old_role=old_role,
+            )
+            if access_error:
+                await callback.answer(access_error, show_alert=True)
+                return
+
             error = await _assignment_limit_error(
                 session, chat_id=chat_id, target_id=target_id, role=role
             )
@@ -122,6 +179,16 @@ async def _assign_from_callback(
             if error:
                 await callback.answer(error, show_alert=True)
                 return
+            await session.flush()
+            current = (
+                await session.execute(
+                    select(AdminAssignment).where(
+                        AdminAssignment.chat_id == chat_id,
+                        AdminAssignment.user_id == target_id,
+                    )
+                )
+            ).scalar_one()
+            current.assigned_by_user_id = callback.from_user.id
 
     event_text = assignment_event(user, role, callback.from_user, old_role)
     if notify_group_from_private:
@@ -161,9 +228,6 @@ async def _remove_from_callback(
 ) -> None:
     async with session_factory() as session:
         async with session.begin():
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True)
-                return
             query = select(AdminAssignment).where(AdminAssignment.chat_id == chat_id)
             if assignment_id is not None:
                 query = query.where(AdminAssignment.id == assignment_id)
@@ -187,6 +251,16 @@ async def _remove_from_callback(
             ).scalar_one_or_none()
             if role is None:
                 await callback.answer("Ранг не найден.", show_alert=True)
+                return
+            access_error = await removal_permission_error(
+                session,
+                chat_id=chat_id,
+                actor_id=callback.from_user.id,
+                assignment=assignment,
+                role=role,
+            )
+            if access_error:
+                await callback.answer(access_error, show_alert=True)
                 return
             _telegram_demoted, error = await _remove_assignment(
                 callback.bot,
@@ -226,6 +300,117 @@ def create_admin_rank_compact_actions_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
     router = Router(name="admin_rank_compact_actions")
+
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.reply_to_message,
+        F.text.casefold() == "назначить",
+    )
+    async def open_assign_reply(message: Message) -> None:
+        if message.from_user is None or message.reply_to_message is None or message.reply_to_message.from_user is None:
+            return
+        target = message.reply_to_message.from_user
+        if target.is_bot:
+            await message.answer("Боту нельзя назначить административный ранг Mimorus.")
+            return
+        chat_id = message.chat.id
+        async with session_factory() as session:
+            async with session.begin():
+                if not await can_open_rank_management(session, chat_id=chat_id, actor_id=message.from_user.id):
+                    await message.answer("Ваш ранг не позволяет управлять администрацией.")
+                    return
+                await upsert_user(session, target)
+                await session.execute(
+                    insert(GroupMember)
+                    .values(
+                        chat_id=chat_id,
+                        user_id=target.id,
+                        status=MemberStatus.member.value,
+                        joined_at=func.now(),
+                        last_activity_at=func.now(),
+                    )
+                    .on_conflict_do_update(
+                        constraint="uq_group_member_chat_user",
+                        set_={"status": MemberStatus.member.value, "left_at": None},
+                    )
+                )
+                await _ensure_standard_roles(session, chat_id)
+                roles = list((
+                    await session.execute(
+                        select(AdminRole)
+                        .where(AdminRole.chat_id == chat_id, AdminRole.is_active.is_(True))
+                        .order_by(AdminRole.id)
+                    )
+                ).scalars().all())
+                roles = await _allowed_roles(
+                    session,
+                    chat_id=chat_id,
+                    actor_id=message.from_user.id,
+                    target_id=target.id,
+                    roles=roles,
+                )
+        if not roles:
+            await message.answer("Для этого пользователя у вашего ранга нет доступных действий назначения/изменения.")
+            return
+        target_text = clickable_identity(
+            telegram_user_id=target.id,
+            first_name=target.first_name,
+            last_name=target.last_name,
+            username=target.username,
+        )
+        await message.answer(
+            "👑 <b>Назначение ранга</b>\n\n"
+            f"Пользователь: {target_text}\n\n"
+            "Выберите доступный ранг:",
+            parse_mode="HTML",
+            reply_markup=_roles_keyboard(chat_id, target.id, roles),
+        )
+
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(r"(?i)^\s*назначить\s+(@?[A-Za-z0-9_]+)\s*$"),
+    )
+    async def open_assign_target(message: Message, bot: Bot) -> None:
+        if message.from_user is None:
+            return
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) != 2:
+            return
+        chat_id = message.chat.id
+        async with session_factory() as session:
+            async with session.begin():
+                if not await can_open_rank_management(session, chat_id=chat_id, actor_id=message.from_user.id):
+                    await message.answer("Ваш ранг не позволяет управлять администрацией.")
+                    return
+                user, _member, error = await _resolve_target(bot, session, chat_id=chat_id, raw_target=parts[1])
+                if error or user is None:
+                    await message.answer(error or "Пользователь не найден.")
+                    return
+                await _ensure_standard_roles(session, chat_id)
+                roles = list((
+                    await session.execute(
+                        select(AdminRole)
+                        .where(AdminRole.chat_id == chat_id, AdminRole.is_active.is_(True))
+                        .order_by(AdminRole.id)
+                    )
+                ).scalars().all())
+                roles = await _allowed_roles(
+                    session,
+                    chat_id=chat_id,
+                    actor_id=message.from_user.id,
+                    target_id=user.telegram_user_id,
+                    roles=roles,
+                )
+        if not roles:
+            await message.answer("Для этого пользователя у вашего ранга нет доступных действий назначения/изменения.")
+            return
+        await message.answer(
+            "👑 <b>Назначение ранга</b>\n\n"
+            f"Пользователь: {clickable_user_display(user)}\n\n"
+            "Выберите доступный ранг:",
+            parse_mode="HTML",
+            reply_markup=_roles_keyboard(chat_id, user.telegram_user_id, roles),
+        )
 
     @router.callback_query(F.data.startswith("adminreply:set:"))
     async def assign_reply(callback: CallbackQuery) -> None:
@@ -294,9 +479,6 @@ def create_admin_rank_compact_actions_router(
         chat_id = message.chat.id
         async with session_factory() as session:
             async with session.begin():
-                if not await _owner_access(session, chat_id, message.from_user.id):
-                    await message.answer("Снимать административные ранги может владелец группы с активным тарифом.")
-                    return
                 assignment = (
                     await session.execute(
                         select(AdminAssignment)
@@ -313,11 +495,18 @@ def create_admin_rank_compact_actions_router(
                 role = (
                     await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
                 ).scalar_one_or_none()
-                user = (
-                    await session.execute(select(User).where(User.telegram_user_id == target.id))
-                ).scalar_one_or_none()
                 if role is None:
                     await message.answer("Текущий административный ранг не найден.")
+                    return
+                access_error = await removal_permission_error(
+                    session,
+                    chat_id=chat_id,
+                    actor_id=message.from_user.id,
+                    assignment=assignment,
+                    role=role,
+                )
+                if access_error:
+                    await message.answer(f"❌ {access_error}")
                     return
                 _telegram_demoted, error = await _remove_assignment(
                     message.bot,
@@ -330,7 +519,72 @@ def create_admin_rank_compact_actions_router(
                 if error:
                     await message.answer(f"❌ {error}")
                     return
+        user = User(
+            telegram_user_id=target.id,
+            username=target.username,
+            first_name=target.first_name,
+            last_name=target.last_name,
+            is_bot=target.is_bot,
+        )
         await message.answer(removal_event(user, target.id, message.from_user), parse_mode="HTML")
+
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(r"(?i)^\s*(?:снять|разжаловать)\s+(@?[A-Za-z0-9_]+)\s*$"),
+    )
+    async def open_remove_target(message: Message, bot: Bot) -> None:
+        if message.from_user is None:
+            return
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) != 2:
+            return
+        chat_id = message.chat.id
+        async with session_factory() as session:
+            async with session.begin():
+                user, _member, error = await _resolve_target(bot, session, chat_id=chat_id, raw_target=parts[1])
+                if error or user is None:
+                    await message.answer(error or "Пользователь не найден.")
+                    return
+                assignment = (
+                    await session.execute(
+                        select(AdminAssignment).where(
+                            AdminAssignment.chat_id == chat_id,
+                            AdminAssignment.user_id == user.telegram_user_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if assignment is None or assignment.role_id is None:
+                    await message.answer("У этого пользователя нет назначенного административного ранга Mimorus.")
+                    return
+                role = (
+                    await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
+                ).scalar_one_or_none()
+                if role is None:
+                    await message.answer("Текущий административный ранг не найден.")
+                    return
+                access_error = await removal_permission_error(
+                    session,
+                    chat_id=chat_id,
+                    actor_id=message.from_user.id,
+                    assignment=assignment,
+                    role=role,
+                )
+                if access_error:
+                    await message.answer(f"❌ {access_error}")
+                    return
+        await message.answer(
+            "⚠️ <b>Снять административный ранг?</b>\n\n"
+            f"Пользователь: {clickable_user_display(user)}\n"
+            f"Ранг: <b>{escape(role.name)}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="✅ Снять ранг",
+                    callback_data=f"admintext:remove:{chat_id}:{user.telegram_user_id}",
+                )],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="noop")],
+            ]),
+        )
 
     @router.callback_query(F.data.startswith("admintext:remove:"))
     async def remove_text(callback: CallbackQuery) -> None:
