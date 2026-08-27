@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole, AuditLog, GroupMember, GroupSettings, MemberStatus, User
+from groupbot.moderation_models import ModerationAction
 from groupbot.routers.group_profile_stats import _access_allowed, _fmt_dt, _message_count, _rank_name, _special_statuses, _warning_count
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.helper_role_policy import HELPER_ROLE
@@ -109,6 +110,47 @@ async def _helper_profile_extra(
     return mentor_text, violation_count
 
 
+async def _admin_profile_extra(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    user_id: int,
+) -> tuple[int, int, int, int]:
+    action_rows = (
+        await session.execute(
+            select(ModerationAction.action, func.count())
+            .where(
+                ModerationAction.chat_id == chat_id,
+                ModerationAction.actor_user_id == user_id,
+                ModerationAction.action.in_(["warning", "mute", "ban"]),
+            )
+            .group_by(ModerationAction.action)
+        )
+    ).all()
+    action_counts = {str(action): int(count) for action, count in action_rows}
+
+    helper_count = int((
+        await session.execute(
+            select(func.count())
+            .select_from(AdminAssignment)
+            .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.assigned_by_user_id == user_id,
+                AdminRole.name == HELPER_ROLE,
+                AdminRole.is_active.is_(True),
+            )
+        )
+    ).scalar_one())
+
+    return (
+        action_counts.get("warning", 0),
+        action_counts.get("mute", 0),
+        action_counts.get("ban", 0),
+        helper_count,
+    )
+
+
 async def _profile_text(
     session: AsyncSession,
     *,
@@ -136,11 +178,23 @@ async def _profile_text(
     messages = await _message_count(session, chat_id, target.id)
     warnings = await _warning_count(session, chat_id, target.id)
     rank = await _rank_name(session, chat_id, target.id)
+    owner = await is_group_owner(session, chat_id, target.id)
 
     helper_mentor_text = "⚠️ не определён"
     helper_violation_count = 0
     if rank == HELPER_ROLE:
         helper_mentor_text, helper_violation_count = await _helper_profile_extra(
+            session,
+            chat_id=chat_id,
+            user_id=target.id,
+        )
+
+    admin_warnings = 0
+    admin_mutes = 0
+    admin_bans = 0
+    admin_helpers = 0
+    if owner or (rank is not None and rank != HELPER_ROLE):
+        admin_warnings, admin_mutes, admin_bans, admin_helpers = await _admin_profile_extra(
             session,
             chat_id=chat_id,
             user_id=target.id,
@@ -156,12 +210,21 @@ async def _profile_text(
     status_text = "участник"
     if member is not None and member.status != MemberStatus.member.value:
         status_text = member.status
-    admin_line = rank or "—"
+    admin_line = rank or ("Владелец группы" if owner else "—")
     special_line = ", ".join(statuses) if statuses else "—"
     helper_line = (
         f"\n🧭 Наставник: {helper_mentor_text}"
         f"\n🚨 Помог найти нарушений: <b>{helper_violation_count}</b>"
         if rank == HELPER_ROLE
+        else ""
+    )
+    admin_stats_line = (
+        "\n\n📊 <b>Статистика администратора</b>"
+        f"\n⚠️ Выдано предупреждений: <b>{admin_warnings}</b>"
+        f"\n🔇 Выдано мутов: <b>{admin_mutes}</b>"
+        f"\n⛔ Выдано банов: <b>{admin_bans}</b>"
+        f"\n🔹 Помощников закреплено: <b>{admin_helpers}</b>"
+        if owner or (rank is not None and rank != HELPER_ROLE)
         else ""
     )
     return (
@@ -175,6 +238,7 @@ async def _profile_text(
         f"Последняя активность: <b>{_fmt_dt(member.last_activity_at if member else None)}</b>\n"
         f"Сообщений учтено: <b>{messages}</b>\n"
         f"Активных предупреждений: <b>{warnings}</b>"
+        f"{admin_stats_line}"
     )
 
 
