@@ -14,6 +14,7 @@ from groupbot.routers import group_control_role_actions as group_control_role_ac
 from groupbot.routers import group_control_ux as group_control_ux_module
 from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
+from groupbot.services.admin_rank_access import can_open_rank_management
 from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import (
     HELPER_ROLE,
@@ -169,7 +170,11 @@ class HelperRoleCardFilter(Filter):
 
     async def __call__(self, callback: CallbackQuery) -> bool:
         data = callback.data or ""
-        if not (data.startswith("hier:role:") or data.startswith("gctl:role:")):
+        if not (
+            data.startswith("hier:role:")
+            or data.startswith("gctl:role:")
+            or data.startswith("hier:assigned:")
+        ):
             return False
         parts = data.split(":", 3)
         try:
@@ -223,11 +228,99 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
 
     @router.callback_query(HelperRoleCardFilter(session_factory))
     async def helper_role_card(callback: CallbackQuery) -> None:
-        parts = (callback.data or "").split(":", 3)
+        data = callback.data or ""
+        parts = data.split(":", 3)
         try:
             chat_id = int(parts[2])
             role_id = int(parts[3])
         except (ValueError, IndexError):
+            return
+
+        if data.startswith("hier:assigned:"):
+            async with session_factory() as session:
+                if not await can_open_rank_management(
+                    session,
+                    chat_id=chat_id,
+                    actor_id=callback.from_user.id,
+                ):
+                    await callback.answer("Ваш ранг не позволяет просматривать назначения Помощников.", show_alert=True)
+                    return
+                role = (
+                    await session.execute(
+                        select(AdminRole).where(
+                            AdminRole.id == role_id,
+                            AdminRole.chat_id == chat_id,
+                            AdminRole.name == HELPER_ROLE,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if role is None:
+                    await callback.answer("Ранг Помощник не найден.", show_alert=True)
+                    return
+                rows = list((
+                    await session.execute(
+                        select(AdminAssignment, User)
+                        .join(User, User.telegram_user_id == AdminAssignment.user_id)
+                        .where(
+                            AdminAssignment.chat_id == chat_id,
+                            AdminAssignment.role_id == role_id,
+                        )
+                        .order_by(AdminAssignment.id)
+                    )
+                ).all())
+                mentor_ids = {
+                    assignment.assigned_by_user_id
+                    for assignment, _ in rows
+                    if assignment.assigned_by_user_id is not None
+                }
+                mentors: dict[int, User] = {}
+                if mentor_ids:
+                    mentor_rows = list((
+                        await session.execute(
+                            select(User).where(User.telegram_user_id.in_(mentor_ids))
+                        )
+                    ).scalars().all())
+                    mentors = {user.telegram_user_id: user for user in mentor_rows}
+
+            lines = ["📋 <b>Назначенные Помощники</b>", ""]
+            keyboard: list[list[InlineKeyboardButton]] = []
+            if not rows:
+                lines.append("Назначенных Помощников пока нет.")
+            else:
+                for assignment, helper in rows:
+                    helper_text = clickable_user_display(helper)
+                    mentor_id = assignment.assigned_by_user_id
+                    if mentor_id is None:
+                        mentor_text = "⚠️ наставник не определён"
+                    else:
+                        mentor = mentors.get(mentor_id)
+                        mentor_text = (
+                            clickable_user_display(mentor)
+                            if mentor is not None
+                            else clickable_identity(
+                                telegram_user_id=mentor_id,
+                                first_name="Наставник",
+                                username=None,
+                            )
+                        )
+                    lines.append(f"• {helper_text}\n  ↳ наставник: {mentor_text}")
+                    button_name = (helper.first_name or str(helper.telegram_user_id)).strip()
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            text=f"❌ Снять: {button_name}"[:64],
+                            callback_data=f"hier:remove:{chat_id}:{assignment.id}:{role_id}",
+                        )
+                    ])
+            keyboard.append([
+                InlineKeyboardButton(text="◀️ К Помощнику", callback_data=f"hier:role:{chat_id}:{role_id}")
+            ])
+            if callback.message is not None:
+                await callback.message.edit_text(
+                    "\n".join(lines),
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+                )
+            await callback.answer()
             return
 
         async with session_factory() as session:
