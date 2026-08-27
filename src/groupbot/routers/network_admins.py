@@ -7,10 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import GroupOwner, NetworkAdmin, User
 from groupbot.network_models import Network, NetworkGroup
-from groupbot.routers.group_control import KNOWN_PERMISSIONS, _owner_access
+from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.audit import write_audit
 from groupbot.services.users import upsert_user
+
+
+NETWORK_PERMISSIONS = [
+    ("ban", "⛔ Сетевой бан"),
+    ("unban", "✅ Сетевой разбан"),
+    ("punishment_lists", "📋 Сетевой банлист"),
+]
 
 
 async def _owner_id(session: AsyncSession, chat_id: int) -> int | None:
@@ -27,10 +34,7 @@ async def _network_id_for_chat(session: AsyncSession, owner_id: int, chat_id: in
         await session.execute(
             select(Network.id)
             .join(NetworkGroup, NetworkGroup.network_id == Network.id)
-            .where(
-                Network.owner_user_id == owner_id,
-                NetworkGroup.chat_id == chat_id,
-            )
+            .where(Network.owner_user_id == owner_id, NetworkGroup.chat_id == chat_id)
             .order_by(Network.id.asc())
             .limit(1)
         )
@@ -131,7 +135,7 @@ async def _render_card(callback: CallbackQuery, session_factory: async_sessionma
     buttons = [[InlineKeyboardButton(
         text=f"{'✅' if key in allowed else '❌'} {label}",
         callback_data=f"network:perm:{chat_id}:{user_id}:{key}",
-    )] for key, label in KNOWN_PERMISSIONS]
+    )] for key, label in NETWORK_PERMISSIONS]
     buttons.append([InlineKeyboardButton(text="❌ Снять сетевого администратора", callback_data=f"network:remove:{chat_id}:{user_id}")])
     if network_id is not None:
         buttons.append([_back_button(chat_id, network_id, text="◀️ Назад к сетке")])
@@ -264,9 +268,9 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
     async def toggle_permission(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 4)
         chat_id, user_id, permission = int(parts[2]), int(parts[3]), parts[4]
-        valid = {key for key, _ in KNOWN_PERMISSIONS}
+        valid = {key for key, _ in NETWORK_PERMISSIONS}
         if permission not in valid:
-            await callback.answer("Неизвестное право.", show_alert=True)
+            await callback.answer("Неизвестное сетевое право.", show_alert=True)
             return
         async with session_factory() as session:
             async with session.begin():
@@ -282,7 +286,7 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
                 if row is None:
                     await callback.answer("Сетевой администратор не найден.", show_alert=True)
                     return
-                permissions = {str(value) for value in (row.permissions_json or [])}
+                permissions = {str(value) for value in (row.permissions_json or []) if str(value) in valid}
                 if permission in permissions:
                     permissions.remove(permission)
                     allowed = False
