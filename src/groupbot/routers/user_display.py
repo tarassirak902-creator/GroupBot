@@ -10,26 +10,15 @@ def clickable_identity(
     last_name: str | None = None,
     username: str | None = None,
 ) -> str:
-    """Render a public Telegram identity without exposing the numeric id.
+    """Render a Telegram identity as one clickable display name.
 
-    The numeric Telegram id is used only inside tg:// links and internal logic.
-    Name and username are separate clickable links, while ` | ` stays plain text.
+    Prefer the user's Telegram first/last name. Use @username only when no name is
+    available. The numeric Telegram id is used only inside the tg:// link.
     """
     full_name = " ".join(part for part in [first_name, last_name] if part).strip()
-    username_label = f"@{username}" if username else ""
+    label = full_name or (f"@{username}" if username else "Пользователь")
     href = f"tg://user?id={telegram_user_id}"
-
-    if full_name and username_label:
-        return (
-            f'<a href="{href}">{escape(full_name)}</a>'
-            " | "
-            f'<a href="{href}">{escape(username_label)}</a>'
-        )
-    if full_name:
-        return f'<a href="{href}">{escape(full_name)}</a>'
-    if username_label:
-        return f'<a href="{href}">{escape(username_label)}</a>'
-    return f'<a href="{href}">Пользователь</a>'
+    return f'<a href="{href}">{escape(label)}</a>'
 
 
 def clickable_user_display(user: User) -> str:
