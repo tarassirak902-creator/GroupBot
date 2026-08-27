@@ -14,7 +14,7 @@ from groupbot.routers import group_control_role_actions as group_control_role_ac
 from groupbot.routers import group_control_ux as group_control_ux_module
 from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
-from groupbot.services.admin_rank_access import can_open_rank_management
+from groupbot.services.admin_rank_access import can_open_rank_management, removal_permission_error
 from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import (
     HELPER_ROLE,
@@ -194,6 +194,37 @@ class HelperRoleCardFilter(Filter):
         return role_name == HELPER_ROLE
 
 
+class HelperRemovalFilter(Filter):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.session_factory = session_factory
+
+    async def __call__(self, callback: CallbackQuery) -> bool:
+        data = callback.data or ""
+        if not data.startswith("hier:remove:"):
+            return False
+        parts = data.split(":", 4)
+        try:
+            chat_id = int(parts[2])
+            assignment_id = int(parts[3])
+            role_id = int(parts[4])
+        except (ValueError, IndexError):
+            return False
+        async with self.session_factory() as session:
+            exists = (
+                await session.execute(
+                    select(AdminAssignment.id)
+                    .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+                    .where(
+                        AdminAssignment.id == assignment_id,
+                        AdminAssignment.chat_id == chat_id,
+                        AdminAssignment.role_id == role_id,
+                        AdminRole.name == HELPER_ROLE,
+                    )
+                )
+            ).scalar_one_or_none()
+        return exists is not None
+
+
 def _violation_message_url(message: Message) -> str | None:
     if message.chat.username:
         return f"https://t.me/{message.chat.username}/{message.message_id}"
@@ -367,6 +398,68 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
                 ]),
             )
         await callback.answer()
+
+    @router.callback_query(HelperRemovalFilter(session_factory))
+    async def helper_remove_from_assigned(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 4)
+        try:
+            chat_id = int(parts[2])
+            assignment_id = int(parts[3])
+            role_id = int(parts[4])
+        except (ValueError, IndexError):
+            return
+
+        async with session_factory() as session:
+            async with session.begin():
+                assignment = (
+                    await session.execute(
+                        select(AdminAssignment)
+                        .where(
+                            AdminAssignment.id == assignment_id,
+                            AdminAssignment.chat_id == chat_id,
+                            AdminAssignment.role_id == role_id,
+                        )
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                role = (
+                    await session.execute(
+                        select(AdminRole).where(
+                            AdminRole.id == role_id,
+                            AdminRole.chat_id == chat_id,
+                            AdminRole.name == HELPER_ROLE,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if assignment is None or role is None:
+                    await callback.answer("Назначение Помощника уже снято или недоступно.", show_alert=True)
+                    return
+
+                access_error = await removal_permission_error(
+                    session,
+                    chat_id=chat_id,
+                    actor_id=callback.from_user.id,
+                    assignment=assignment,
+                    role=role,
+                )
+                if access_error:
+                    await callback.answer(access_error, show_alert=True)
+                    return
+
+                _telegram_demoted, error = await admin_rank_audit_actions_module._remove_assignment(
+                    callback.bot,
+                    session,
+                    chat_id=chat_id,
+                    assignment=assignment,
+                    role=role,
+                    actor_id=callback.from_user.id,
+                )
+                if error:
+                    await callback.answer(error, show_alert=True)
+                    return
+
+        callback.data = f"hier:assigned:{chat_id}:{role_id}"
+        await helper_role_card(callback)
 
     @router.message(
         F.chat.type.in_({"group", "supergroup"}),
