@@ -14,6 +14,10 @@ from groupbot.routers.group_control import (
     _owner_access,
     _rank_limit,
 )
+from groupbot.routers.group_control_role_actions import (
+    _sync_managed_telegram_admins_for_role,
+    _sync_managed_telegram_admins_for_role_state,
+)
 from groupbot.services.audit import write_audit
 
 
@@ -323,44 +327,69 @@ def create_group_control_ux_router(
         if not isinstance(draft, dict):
             await callback.answer("Нет несохранённых настроек.", show_alert=True)
             return
+
+        sync_error: str | None = None
+        saved: dict[str, bool] = {}
+        role_name = ""
+        role_active = False
         async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True)
-                    return
-                role = (
-                    await session.execute(
-                        select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
+            try:
+                async with session.begin():
+                    if not await _owner_access(session, chat_id, callback.from_user.id):
+                        await callback.answer("Недостаточно прав.", show_alert=True)
+                        return
+                    role = (
+                        await session.execute(
+                            select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
+                        )
+                    ).scalar_one_or_none()
+                    if role is None:
+                        await callback.answer("Ранг не найден.", show_alert=True)
+                        return
+                    role_name = role.name
+                    role_active = role.is_active
+                    rows = (
+                        await session.execute(
+                            select(AdminPermission).where(AdminPermission.role_id == role_id).with_for_update()
+                        )
+                    ).scalars().all()
+                    by_key = {row.permission: row for row in rows}
+                    for key, _ in KNOWN_PERMISSIONS:
+                        value = bool(draft.get(key, False))
+                        saved[key] = value
+                        row = by_key.get(key)
+                        if row is None:
+                            session.add(AdminPermission(role_id=role_id, permission=key, allowed=value))
+                        else:
+                            row.allowed = value
+
+                    await session.flush()
+                    if role_active:
+                        sync_error = await _sync_managed_telegram_admins_for_role(
+                            callback,
+                            session,
+                            chat_id=chat_id,
+                            role_id=role_id,
+                        )
+                        if sync_error:
+                            raise RuntimeError(sync_error)
+
+                    await write_audit(
+                        session,
+                        "group.admin_permissions_saved",
+                        chat_id=chat_id,
+                        actor_user_id=callback.from_user.id,
+                        target_type="admin_role",
+                        target_id=str(role_id),
+                        payload={"permissions": saved, "telegram_admins_synced": role_active},
                     )
-                ).scalar_one_or_none()
-                if role is None:
-                    await callback.answer("Ранг не найден.", show_alert=True)
-                    return
-                rows = (
-                    await session.execute(
-                        select(AdminPermission).where(AdminPermission.role_id == role_id).with_for_update()
-                    )
-                ).scalars().all()
-                by_key = {row.permission: row for row in rows}
-                saved: dict[str, bool] = {}
-                for key, _ in KNOWN_PERMISSIONS:
-                    value = bool(draft.get(key, False))
-                    saved[key] = value
-                    row = by_key.get(key)
-                    if row is None:
-                        session.add(AdminPermission(role_id=role_id, permission=key, allowed=value))
-                    else:
-                        row.allowed = value
-                await write_audit(
-                    session,
-                    "group.admin_permissions_saved",
-                    chat_id=chat_id,
-                    actor_user_id=callback.from_user.id,
-                    target_type="admin_role",
-                    target_id=str(role_id),
-                    payload={"permissions": saved},
-                )
-            role_active = role.is_active
+            except RuntimeError as exc:
+                sync_error = str(exc)
+
+        if sync_error:
+            await callback.answer(sync_error, show_alert=True)
+            return
+
         await state.clear()
         await state.update_data(
             permission_draft_chat_id=chat_id,
@@ -372,8 +401,14 @@ def create_group_control_ux_router(
         if callback.message is not None:
             await callback.message.edit_text(
                 "✅ <b>Разрешения сохранены</b>\n\n"
-                f"Ранг: <b>{role.name}</b>\n"
-                "Настройки применены.",
+                f"Ранг: <b>{role_name}</b>\n"
+                "Настройки применены и синхронизированы с Telegram для администраторов, назначенных Mimorus."
+                if role_active
+                else (
+                    "✅ <b>Разрешения сохранены</b>\n\n"
+                    f"Ранг: <b>{role_name}</b>\n"
+                    "Настройки сохранены. Ранг выключен — Telegram-права будут применены при его включении."
+                ),
                 parse_mode="HTML",
                 reply_markup=_permission_editor_keyboard(
                     chat_id,
@@ -392,29 +427,51 @@ def create_group_control_ux_router(
             role_id = int(parts[3])
         except (ValueError, IndexError):
             return
+
+        sync_error: str | None = None
         async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True)
-                    return
-                role = (
-                    await session.execute(
-                        select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update()
+            try:
+                async with session.begin():
+                    if not await _owner_access(session, chat_id, callback.from_user.id):
+                        await callback.answer("Недостаточно прав.", show_alert=True)
+                        return
+                    role = (
+                        await session.execute(
+                            select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if role is None:
+                        await callback.answer("Ранг не найден.", show_alert=True)
+                        return
+
+                    new_value = not role.is_active
+                    sync_error = await _sync_managed_telegram_admins_for_role_state(
+                        callback,
+                        session,
+                        chat_id=chat_id,
+                        role_id=role_id,
+                        enabled=new_value,
                     )
-                ).scalar_one_or_none()
-                if role is None:
-                    await callback.answer("Ранг не найден.", show_alert=True)
-                    return
-                role.is_active = not role.is_active
-                await write_audit(
-                    session,
-                    "group.admin_role_toggled",
-                    chat_id=chat_id,
-                    actor_user_id=callback.from_user.id,
-                    target_type="admin_role",
-                    target_id=str(role_id),
-                    payload={"is_active": role.is_active},
-                )
+                    if sync_error:
+                        raise RuntimeError(sync_error)
+
+                    role.is_active = new_value
+                    await write_audit(
+                        session,
+                        "group.admin_role_toggled",
+                        chat_id=chat_id,
+                        actor_user_id=callback.from_user.id,
+                        target_type="admin_role",
+                        target_id=str(role_id),
+                        payload={"is_active": new_value, "telegram_admins_synced": True},
+                    )
+            except RuntimeError as exc:
+                sync_error = str(exc)
+
+        if sync_error:
+            await callback.answer(sync_error, show_alert=True)
+            return
+
         await state.clear()
         async with session_factory() as session:
             role, permissions, assignments = await _load_role(session, chat_id, role_id)
