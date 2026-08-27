@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole
-from groupbot.routers.admin_member_sync import _check_bot_promotion_rights, _telegram_rights_for_role
+from groupbot.routers import admin_member_sync as admin_member_sync_module
 from groupbot.routers.group_control import KNOWN_PERMISSIONS
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import is_group_owner
@@ -118,8 +118,8 @@ async def _sync_managed_telegram_admins_for_role(
     if not target_ids:
         return None
 
-    rights = await _telegram_rights_for_role(session, role_id)
-    error = await _check_bot_promotion_rights(callback.bot, chat_id, rights)
+    rights = await admin_member_sync_module._telegram_rights_for_role(session, role_id)
+    error = await admin_member_sync_module._check_bot_promotion_rights(callback.bot, chat_id, rights)
     if error:
         return error
 
@@ -159,7 +159,7 @@ async def _sync_managed_telegram_admins_for_role_state(
         return None
 
     if enabled:
-        rights = await _telegram_rights_for_role(session, role_id)
+        rights = await admin_member_sync_module._telegram_rights_for_role(session, role_id)
     else:
         rights = {
             "can_manage_chat": False,
@@ -178,7 +178,11 @@ async def _sync_managed_telegram_admins_for_role_state(
             "can_manage_topics": False,
         }
 
-    error = await _check_bot_promotion_rights(callback.bot, chat_id, rights if enabled else {})
+    error = await admin_member_sync_module._check_bot_promotion_rights(
+        callback.bot,
+        chat_id,
+        rights if enabled else {},
+    )
     if error:
         return error
 
