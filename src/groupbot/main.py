@@ -28,6 +28,7 @@ from groupbot.routers import entry_protection as entry_protection_module
 from groupbot.routers import manual_moderation as manual_moderation_module
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
+from groupbot.routers.admin_punishment_lists import create_admin_punishment_lists_router
 from groupbot.routers.admin_rank_audit_actions import create_admin_rank_audit_actions_router
 from groupbot.routers.admin_rank_compact_actions import create_admin_rank_compact_actions_router
 from groupbot.routers.admin_rank_group_notifications import create_admin_rank_group_notifications_router
@@ -155,6 +156,7 @@ async def main() -> None:
     dp.include_router(create_message_operations_router(session_factory))
     dp.include_router(create_ban_cleanup_router(session_factory))
     dp.include_router(create_moderation_release_router(session_factory))
+    dp.include_router(create_admin_punishment_lists_router(session_factory))
 
     manual_router = create_manual_moderation_router(session_factory)
     manual_router.message.filter(
