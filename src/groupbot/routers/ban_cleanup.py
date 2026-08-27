@@ -14,19 +14,29 @@ from groupbot.routers.message_operations import cleanup_user_messages
 from groupbot.services.permissions import has_permission
 
 
-def _confirm_keyboard(chat_id: int, target_id: int, index_token: str) -> InlineKeyboardMarkup:
+def _confirm_keyboard(
+    chat_id: int,
+    target_id: int,
+    index_token: str,
+    *,
+    can_clean: bool,
+) -> InlineKeyboardMarkup:
+    action_row = [
+        InlineKeyboardButton(
+            text="⛔ Бан",
+            callback_data=f"bclean:ban:{chat_id}:{target_id}:{index_token}",
+        )
+    ]
+    if can_clean:
+        action_row.append(
+            InlineKeyboardButton(
+                text="⛔🧹 Бан + очистка",
+                callback_data=f"bclean:clean:{chat_id}:{target_id}:{index_token}",
+            )
+        )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⛔ Бан",
-                    callback_data=f"bclean:ban:{chat_id}:{target_id}:{index_token}",
-                ),
-                InlineKeyboardButton(
-                    text="⛔🧹 Бан + очистка",
-                    callback_data=f"bclean:clean:{chat_id}:{target_id}:{index_token}",
-                ),
-            ],
+            action_row,
             [InlineKeyboardButton(text="❌ Отмена", callback_data="bclean:cancel")],
         ]
     )
@@ -58,6 +68,7 @@ def create_ban_cleanup_router(session_factory: async_sessionmaker[AsyncSession])
             if not await has_permission(session, chat_id, callback.from_user.id, "ban"):
                 await callback.answer("Недостаточно прав Mimorus для бана.", show_alert=True)
                 return
+            can_clean = await has_permission(session, chat_id, callback.from_user.id, "delete")
             if index_token != "x":
                 reasons = _configured_reasons(await _moderation_config(session, chat_id), "ban")
                 try:
@@ -65,11 +76,15 @@ def create_ban_cleanup_router(session_factory: async_sessionmaker[AsyncSession])
                 except (ValueError, IndexError):
                     await callback.answer("Причина больше недоступна.", show_alert=True)
                     return
+        description = (
+            "Выберите обычный бан или бан с очисткой сохранённых сообщений пользователя."
+            if can_clean
+            else "У вашего ранга нет права на удаление сообщений, поэтому доступен только обычный бан."
+        )
         await callback.message.edit_text(
-            "⛔ <b>Подтверждение бана</b>\n\n"
-            "Выберите обычный бан или бан с очисткой сохранённых сообщений пользователя.",
+            "⛔ <b>Подтверждение бана</b>\n\n" + description,
             parse_mode="HTML",
-            reply_markup=_confirm_keyboard(chat_id, target_id, index_token),
+            reply_markup=_confirm_keyboard(chat_id, target_id, index_token, can_clean=can_clean),
         )
         await callback.answer()
 
@@ -102,6 +117,12 @@ def create_ban_cleanup_router(session_factory: async_sessionmaker[AsyncSession])
                 return
             if not await has_permission(session, chat_id, callback.from_user.id, "ban"):
                 await callback.answer("Недостаточно прав Mimorus для бана.", show_alert=True)
+                return
+            if mode == "clean" and not await has_permission(session, chat_id, callback.from_user.id, "delete"):
+                await callback.answer(
+                    "Для бана с очисткой нужно право «Удаление сообщений».",
+                    show_alert=True,
+                )
                 return
             reasons = _configured_reasons(await _moderation_config(session, chat_id), "ban")
 
