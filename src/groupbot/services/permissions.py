@@ -6,6 +6,8 @@ from groupbot.network_models import Network, NetworkGroup
 
 
 OWNER_PERMISSION = "*"
+HELPER_ROLE = "Помощник"
+HELPER_BLOCKED_PERMISSIONS = {"warning", "mute", "ban", "unmute", "unban", "delete", "pin", "punishment_lists", "stats"}
 
 
 async def is_group_owner(session: AsyncSession, chat_id: int, user_id: int) -> bool:
@@ -57,19 +59,23 @@ async def has_permission(session: AsyncSession, chat_id: int, user_id: int, perm
     if await is_group_owner(session, chat_id, user_id):
         return True
 
-    assignment = (await session.execute(
-        select(AdminAssignment)
-        .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+    role = (await session.execute(
+        select(AdminRole)
+        .join(AdminAssignment, AdminAssignment.role_id == AdminRole.id)
         .where(
             AdminAssignment.chat_id == chat_id,
             AdminAssignment.user_id == user_id,
             AdminRole.is_active.is_(True),
         )
     )).scalar_one_or_none()
-    if assignment is not None and assignment.role_id is not None:
+    if role is not None:
+        # Helper is a reporter attached to an administrator, not a moderator.
+        # Historical/accidental permission rows must never grant moderation access.
+        if role.name == HELPER_ROLE and permission in HELPER_BLOCKED_PERMISSIONS:
+            return False
         allowed = (await session.execute(
             select(AdminPermission.allowed).where(
-                AdminPermission.role_id == assignment.role_id,
+                AdminPermission.role_id == role.id,
                 AdminPermission.permission.in_([permission, OWNER_PERMISSION]),
             )
         )).scalars().all()
