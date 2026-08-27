@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from groupbot.models import AdminAssignment, AdminRole
+from groupbot.models import AdminAssignment, AdminRole, Group, GroupStatus
 from groupbot.routers.admin_hierarchy import RANK_META
 from groupbot.routers.group_control import _owner_access
 from groupbot.services.subscriptions import active_subscription_for_group
@@ -18,6 +18,11 @@ CHIEF_ASSIGNABLE = {CHAT_ADMIN, VOICE_ADMIN, HELPER}
 
 
 async def _rank_management_available(session: AsyncSession, chat_id: int) -> bool:
+    status = (
+        await session.execute(select(Group.status).where(Group.chat_id == chat_id))
+    ).scalar_one_or_none()
+    if status != GroupStatus.active.value:
+        return False
     return await active_subscription_for_group(session, chat_id) is not None
 
 
@@ -46,7 +51,7 @@ async def assignment_permission_error(
     old_role: AdminRole | None,
 ) -> str | None:
     if not await _rank_management_available(session, chat_id):
-        return "У группы нет активного тарифа. Управление администрацией временно недоступно."
+        return "Группа отключена или у неё нет активного тарифа. Управление администрацией временно недоступно."
     if await _owner_access(session, chat_id, actor_id):
         return None
     if actor_id == target_id:
@@ -93,7 +98,7 @@ async def removal_permission_error(
     role: AdminRole,
 ) -> str | None:
     if not await _rank_management_available(session, chat_id):
-        return "У группы нет активного тарифа. Управление администрацией временно недоступно."
+        return "Группа отключена или у неё нет активного тарифа. Управление администрацией временно недоступно."
     if await _owner_access(session, chat_id, actor_id):
         return None
     if actor_id == assignment.user_id:
