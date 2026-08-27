@@ -83,7 +83,7 @@ def create_message_operations_router(
 
     @router.message(
         F.chat.type.in_({"group", "supergroup"}),
-        F.text.regexp(r"(?i)^\s*(?:очистить\s+пользователя|закрепи)\s*$"),
+        F.text.regexp(r"(?i)^\s*(?:очистить\s+пользователя|закрепи|открепи)\s*$"),
     )
     async def message_operation(message: Message, bot: Bot) -> None:
         if message.from_user is None:
@@ -98,27 +98,32 @@ def create_message_operations_router(
                 await message.reply("Недостаточно прав Mimorus для этого действия.")
                 return
 
-        if command == "закрепи":
+        if command in {"закрепи", "открепи"}:
             if message.reply_to_message is None:
-                await message.reply("Ответьте словом «закрепи» на сообщение, которое нужно закрепить.")
+                verb = "закрепи" if command == "закрепи" else "открепи"
+                await message.reply(f"Ответьте словом «{verb}» на нужное сообщение.")
                 return
             try:
-                await bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
+                if command == "закрепи":
+                    await bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
+                else:
+                    await bot.unpin_chat_message(message.chat.id, message.reply_to_message.message_id)
             except Exception as exc:
-                await message.reply(f"Не удалось закрепить сообщение через Telegram: {str(exc)[:200]}")
+                action = "закрепить" if command == "закрепи" else "открепить"
+                await message.reply(f"Не удалось {action} сообщение через Telegram: {str(exc)[:200]}")
                 return
             async with session_factory() as session:
                 async with session.begin():
                     await write_audit(
                         session,
-                        "moderation.message_pinned",
+                        "moderation.message_pinned" if command == "закрепи" else "moderation.message_unpinned",
                         chat_id=message.chat.id,
                         actor_user_id=message.from_user.id,
                         target_type="message",
                         target_id=str(message.reply_to_message.message_id),
                         payload=None,
                     )
-            await message.reply("📌 Сообщение закреплено.")
+            await message.reply("📌 Сообщение закреплено." if command == "закрепи" else "📌 Сообщение откреплено.")
             return
 
         if message.reply_to_message is None or message.reply_to_message.from_user is None:
