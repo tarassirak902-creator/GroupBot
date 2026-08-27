@@ -228,6 +228,11 @@ def create_network_moderation_router(
             return
 
         async with session_factory() as session:
+            group_status = (await session.execute(
+                select(Group.status).where(Group.chat_id == message.chat.id)
+            )).scalar_one_or_none()
+            if group_status != GroupStatus.active.value:
+                return
             if await active_subscription_for_group(session, message.chat.id) is None:
                 return
             network = await _network_for_chat(session, message.chat.id)
@@ -246,7 +251,11 @@ def create_network_moderation_router(
                 else:
                     await message.reply("Эта группа не входит в действующую сетку текущего владельца или сетка определена неоднозначно.")
                 return
-            permission = "unban" if command == "сразбан" else "ban"
+            permission = {
+                "сбан": "ban",
+                "сразбан": "unban",
+                "сбанлист": "punishment_lists",
+            }[command]
             if not await _network_permission(
                 session,
                 network=network,
@@ -262,9 +271,7 @@ def create_network_moderation_router(
             return
 
         if message.reply_to_message is None or message.reply_to_message.from_user is None:
-            await message.reply(
-                "Используйте сетевую команду ответом на сообщение участника."
-            )
+            await message.reply("Используйте сетевую команду ответом на сообщение участника.")
             return
         target = message.reply_to_message.from_user
         if target.is_bot:
