@@ -8,10 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole, GroupMember, MemberStatus, User
+from groupbot.routers import admin_member_sync as admin_member_sync_module
 from groupbot.routers.admin_member_sync import (
-    _assign_role,
     _assignment_limit_error,
-    _ensure_telegram_admin_for_role,
     _role_back_data,
 )
 from groupbot.routers.admin_rank_audit_actions import _remove_assignment
@@ -60,11 +59,11 @@ def create_admin_rank_group_notifications_router(
                 if error:
                     await callback.answer(error, show_alert=True)
                     return
-                error = await _ensure_telegram_admin_for_role(callback.bot, session, chat_id=chat_id, target_id=target_id, role=role, telegram_member=telegram_member)
+                error = await admin_member_sync_module._ensure_telegram_admin_for_role(callback.bot, session, chat_id=chat_id, target_id=target_id, role=role, telegram_member=telegram_member)
                 if error:
                     await callback.answer(error, show_alert=True)
                     return
-                error = await _assign_role(session, chat_id=chat_id, target_id=target_id, role=role, actor_id=callback.from_user.id)
+                error = await admin_member_sync_module._assign_role(session, chat_id=chat_id, target_id=target_id, role=role, actor_id=callback.from_user.id)
                 if error:
                     await callback.answer(error, show_alert=True)
                     return
