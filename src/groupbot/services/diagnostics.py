@@ -15,6 +15,7 @@ async def rights_diagnostic(bot: Bot, chat_id: int) -> tuple[str, bool]:
     pin_messages = is_admin and bool(getattr(member, "can_pin_messages", False))
     invite_users = is_admin and bool(getattr(member, "can_invite_users", False))
     promote_members = is_admin and bool(getattr(member, "can_promote_members", False))
+    manage_video_chats = is_admin and bool(getattr(member, "can_manage_video_chats", False))
     post_messages = is_admin and getattr(member, "can_post_messages", None) is not False
     receive_events = is_admin
     text = (
@@ -26,6 +27,7 @@ async def rights_diagnostic(bot: Bot, chat_id: int) -> tuple[str, bool]:
         f"{_mark(pin_messages)} Закрепление / открепление сообщений\n"
         f"{_mark(invite_users)} Приглашение пользователей / рекламные ссылки\n"
         f"{_mark(promote_members)} Назначение администраторов\n"
+        f"{_mark(manage_video_chats)} Управление голосовыми чатами\n"
         f"{_mark(post_messages)} Публикация сообщений\n"
         f"{_mark(receive_events)} Получение событий"
     )
@@ -36,5 +38,6 @@ async def rights_diagnostic(bot: Bot, chat_id: int) -> tuple[str, bool]:
         and pin_messages
         and invite_users
         and promote_members
+        and manage_video_chats
     )
     return text, critical_ok
