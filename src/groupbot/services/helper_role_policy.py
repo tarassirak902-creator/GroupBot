@@ -286,6 +286,7 @@ _original_remove_assignment = _audit_actions_module._remove_assignment
 _original_remove_role_and_managed_telegram_admin = _member_sync_module._remove_role_and_managed_telegram_admin
 _original_ensure_standard_roles = _hierarchy_module._ensure_standard_roles
 _original_telegram_rights_for_role = _member_sync_module._telegram_rights_for_role
+_original_check_bot_promotion_rights = _member_sync_module._check_bot_promotion_rights
 
 
 async def _standard_role_was_customized(
@@ -359,6 +360,30 @@ async def _telegram_rights_for_role_with_standard_matrix(
     return await _original_telegram_rights_for_role(session, role_id)
 
 
+async def _check_bot_promotion_rights_with_standard_matrix(
+    bot,
+    chat_id: int,
+    rights: dict[str, bool],
+) -> str | None:
+    error = await _original_check_bot_promotion_rights(bot, chat_id, rights)
+    if error:
+        return error
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat_id, me.id)
+    except Exception:
+        return "Не удалось проверить права Mimorus в группе."
+
+    required = (
+        ("can_manage_video_chats", "управление голосовыми чатами"),
+        ("can_invite_users", "приглашение пользователей"),
+    )
+    for key, title in required:
+        if rights.get(key) and not bool(getattr(member, key, False)):
+            return f"Mimorus не может выдать право «{title}», потому что сам его не имеет."
+    return None
+
+
 async def _remove_assignment_with_helper_cascade(
     bot,
     session: AsyncSession,
@@ -424,6 +449,7 @@ _member_sync_module._ensure_standard_roles = _ensure_standard_roles_with_default
 _compact_actions_module._ensure_standard_roles = _ensure_standard_roles_with_defaults
 
 _member_sync_module._telegram_rights_for_role = _telegram_rights_for_role_with_standard_matrix
+_member_sync_module._check_bot_promotion_rights = _check_bot_promotion_rights_with_standard_matrix
 _compact_actions_module._telegram_rights_for_role = _telegram_rights_for_role_with_standard_matrix
 _target_actions_module._telegram_rights_for_role = _telegram_rights_for_role_with_standard_matrix
 
