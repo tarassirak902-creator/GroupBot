@@ -6,8 +6,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole, AuditLog, Group, GroupSettings, GroupStatus, User
+from groupbot.routers import admin_member_sync as admin_member_sync_module
+from groupbot.routers import admin_rank_compact_actions as admin_rank_compact_actions_module
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.audit import write_audit
+from groupbot.services.helper_role_policy import (
+    HELPER_ROLE,
+    prepare_helper_telegram_state,
+    remember_assignment_actor,
+)
 from groupbot.services.subscriptions import active_subscription_for_group
 
 
@@ -15,7 +22,73 @@ LOCKED_TEXT = (
     "🔒 Функции Mimorus для этой группы пока недоступны.\n\n"
     "Владельцу группы нужно открыть Mimorus в личных сообщениях и активировать пробный тариф TEST."
 )
-HELPER_ROLE = "Помощник"
+
+
+# admin_member_sync and admin_rank_compact_actions are imported before this router in
+# main.py. Patch both references once so every existing assignment path uses the same
+# Helper policy without duplicating the large rank-assignment handlers.
+_original_ensure_telegram_admin_for_role = admin_member_sync_module._ensure_telegram_admin_for_role
+_original_assign_role = admin_member_sync_module._assign_role
+
+
+async def _ensure_telegram_admin_for_role_with_helper_policy(
+    bot,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    target_id: int,
+    role: AdminRole,
+    telegram_member,
+) -> str | None:
+    if role.name == HELPER_ROLE:
+        return await prepare_helper_telegram_state(
+            bot,
+            session,
+            chat_id=chat_id,
+            target_id=target_id,
+            role=role,
+            telegram_member=telegram_member,
+        )
+    return await _original_ensure_telegram_admin_for_role(
+        bot,
+        session,
+        chat_id=chat_id,
+        target_id=target_id,
+        role=role,
+        telegram_member=telegram_member,
+    )
+
+
+async def _assign_role_with_actor_tracking(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    target_id: int,
+    role: AdminRole,
+    actor_id: int,
+) -> str | None:
+    error = await _original_assign_role(
+        session,
+        chat_id=chat_id,
+        target_id=target_id,
+        role=role,
+        actor_id=actor_id,
+    )
+    if error is None:
+        await session.flush()
+        await remember_assignment_actor(
+            session,
+            chat_id=chat_id,
+            target_id=target_id,
+            actor_id=actor_id,
+        )
+    return error
+
+
+admin_member_sync_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_policy
+admin_member_sync_module._assign_role = _assign_role_with_actor_tracking
+admin_rank_compact_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_policy
+admin_rank_compact_actions_module._assign_role = _assign_role_with_actor_tracking
 
 
 def _violation_message_url(message: Message) -> str | None:
@@ -83,9 +156,9 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
 
             admin_id = assignment.assigned_by_user_id
             if admin_id is None:
-                admin_id = (
+                audit_rows = (
                     await session.execute(
-                        select(AuditLog.actor_user_id)
+                        select(AuditLog)
                         .where(
                             AuditLog.chat_id == message.chat.id,
                             AuditLog.event_type == "group.admin_rank_assigned",
@@ -93,11 +166,14 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
                             AuditLog.target_id == str(message.from_user.id),
                         )
                         .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-                        .limit(1)
+                        .limit(20)
                     )
-                ).scalar_one_or_none()
-                if admin_id is not None:
-                    assignment.assigned_by_user_id = admin_id
+                ).scalars().all()
+                for audit_row in audit_rows:
+                    if (audit_row.payload or {}).get("role_name") == HELPER_ROLE and audit_row.actor_user_id is not None:
+                        admin_id = audit_row.actor_user_id
+                        assignment.assigned_by_user_id = admin_id
+                        break
 
             if admin_id is None:
                 await message.reply(
