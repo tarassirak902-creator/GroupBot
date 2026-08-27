@@ -1,15 +1,181 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import Message, User as TelegramUser
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole, AuditLog, GroupMember, GroupSettings, MemberStatus, User
-from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.group_profile_stats import _access_allowed, _fmt_dt, _message_count, _rank_name, _special_statuses, _warning_count
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.helper_role_policy import HELPER_ROLE
+from groupbot.services.permissions import is_group_owner
+
+
+async def _can_view_other_profile(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    actor_id: int,
+) -> bool:
+    if await is_group_owner(session, chat_id, actor_id):
+        return True
+    assignment_id = (
+        await session.execute(
+            select(AdminAssignment.id)
+            .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.user_id == actor_id,
+                AdminRole.is_active.is_(True),
+                AdminRole.name != HELPER_ROLE,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return assignment_id is not None
+
+
+async def _helper_profile_extra(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    user_id: int,
+) -> tuple[str, int]:
+    violation_count = int((
+        await session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(
+                AuditLog.chat_id == chat_id,
+                AuditLog.actor_user_id == user_id,
+                AuditLog.event_type == "group.helper_violation_reported",
+            )
+        )
+    ).scalar_one())
+
+    assignment = (
+        await session.execute(
+            select(AdminAssignment)
+            .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.user_id == user_id,
+                AdminRole.name == HELPER_ROLE,
+            )
+        )
+    ).scalar_one_or_none()
+    mentor_id = assignment.assigned_by_user_id if assignment is not None else None
+
+    if mentor_id is None:
+        audit_rows = (
+            await session.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.chat_id == chat_id,
+                    AuditLog.event_type == "group.admin_rank_assigned",
+                    AuditLog.target_type == "user",
+                    AuditLog.target_id == str(user_id),
+                )
+                .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                .limit(20)
+            )
+        ).scalars().all()
+        for audit_row in audit_rows:
+            if (
+                (audit_row.payload or {}).get("role_name") == HELPER_ROLE
+                and audit_row.actor_user_id is not None
+            ):
+                mentor_id = audit_row.actor_user_id
+                break
+
+    if mentor_id is None:
+        return "⚠️ не определён", violation_count
+
+    mentor = (
+        await session.execute(
+            select(User).where(User.telegram_user_id == mentor_id)
+        )
+    ).scalar_one_or_none()
+    mentor_text = (
+        clickable_user_display(mentor)
+        if mentor is not None
+        else clickable_identity(
+            telegram_user_id=mentor_id,
+            first_name="Наставник",
+            username=None,
+        )
+    )
+    return mentor_text, violation_count
+
+
+async def _profile_text(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    target: TelegramUser,
+) -> str:
+    user = (
+        await session.execute(
+            select(User).where(User.telegram_user_id == target.id)
+        )
+    ).scalar_one_or_none()
+    member = (
+        await session.execute(
+            select(GroupMember).where(
+                GroupMember.chat_id == chat_id,
+                GroupMember.user_id == target.id,
+            )
+        )
+    ).scalar_one_or_none()
+    settings = (
+        await session.execute(
+            select(GroupSettings).where(GroupSettings.chat_id == chat_id)
+        )
+    ).scalar_one_or_none()
+    messages = await _message_count(session, chat_id, target.id)
+    warnings = await _warning_count(session, chat_id, target.id)
+    rank = await _rank_name(session, chat_id, target.id)
+
+    helper_mentor_text = "⚠️ не определён"
+    helper_violation_count = 0
+    if rank == HELPER_ROLE:
+        helper_mentor_text, helper_violation_count = await _helper_profile_extra(
+            session,
+            chat_id=chat_id,
+            user_id=target.id,
+        )
+
+    identity = clickable_identity(
+        telegram_user_id=target.id,
+        first_name=(user.first_name if user else target.first_name),
+        last_name=(user.last_name if user else target.last_name),
+        username=(user.username if user else target.username),
+    )
+    statuses = _special_statuses(settings.moderation_config if settings else {}, target.id)
+    status_text = "участник"
+    if member is not None and member.status != MemberStatus.member.value:
+        status_text = member.status
+    admin_line = rank or "—"
+    special_line = ", ".join(statuses) if statuses else "—"
+    helper_line = (
+        f"\n🧭 Наставник: {helper_mentor_text}"
+        f"\n🚨 Помог найти нарушений: <b>{helper_violation_count}</b>"
+        if rank == HELPER_ROLE
+        else ""
+    )
+    return (
+        "👤 <b>Профиль участника</b>\n\n"
+        f"Пользователь: {identity}\n"
+        f"Статус в группе: <b>{status_text}</b>\n"
+        f"Ранг Mimorus: <b>{admin_line}</b>\n"
+        f"Особый статус: <b>{special_line}</b>"
+        f"{helper_line}\n\n"
+        f"Первое появление: <b>{_fmt_dt(member.first_seen_at if member else None)}</b>\n"
+        f"Последняя активность: <b>{_fmt_dt(member.last_activity_at if member else None)}</b>\n"
+        f"Сообщений учтено: <b>{messages}</b>\n"
+        f"Активных предупреждений: <b>{warnings}</b>"
+    )
 
 
 def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
@@ -25,123 +191,50 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
         async with session_factory() as session:
             if not await _access_allowed(session, message.chat.id):
                 return
-            user = (
-                await session.execute(
-                    select(User).where(User.telegram_user_id == message.from_user.id)
-                )
-            ).scalar_one_or_none()
-            member = (
-                await session.execute(
-                    select(GroupMember).where(
-                        GroupMember.chat_id == message.chat.id,
-                        GroupMember.user_id == message.from_user.id,
-                    )
-                )
-            ).scalar_one_or_none()
-            settings = (
-                await session.execute(
-                    select(GroupSettings).where(GroupSettings.chat_id == message.chat.id)
-                )
-            ).scalar_one_or_none()
-            messages = await _message_count(session, message.chat.id, message.from_user.id)
-            warnings = await _warning_count(session, message.chat.id, message.from_user.id)
-            rank = await _rank_name(session, message.chat.id, message.from_user.id)
-
-            helper_violation_count = 0
-            helper_mentor_text = "⚠️ не определён"
-            if rank == HELPER_ROLE:
-                helper_violation_count = int((
-                    await session.execute(
-                        select(func.count())
-                        .select_from(AuditLog)
-                        .where(
-                            AuditLog.chat_id == message.chat.id,
-                            AuditLog.actor_user_id == message.from_user.id,
-                            AuditLog.event_type == "group.helper_violation_reported",
-                        )
-                    )
-                ).scalar_one())
-
-                assignment = (
-                    await session.execute(
-                        select(AdminAssignment)
-                        .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
-                        .where(
-                            AdminAssignment.chat_id == message.chat.id,
-                            AdminAssignment.user_id == message.from_user.id,
-                            AdminRole.name == HELPER_ROLE,
-                        )
-                    )
-                ).scalar_one_or_none()
-                mentor_id = assignment.assigned_by_user_id if assignment is not None else None
-
-                if mentor_id is None:
-                    audit_rows = (
-                        await session.execute(
-                            select(AuditLog)
-                            .where(
-                                AuditLog.chat_id == message.chat.id,
-                                AuditLog.event_type == "group.admin_rank_assigned",
-                                AuditLog.target_type == "user",
-                                AuditLog.target_id == str(message.from_user.id),
-                            )
-                            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-                            .limit(20)
-                        )
-                    ).scalars().all()
-                    for audit_row in audit_rows:
-                        if (
-                            (audit_row.payload or {}).get("role_name") == HELPER_ROLE
-                            and audit_row.actor_user_id is not None
-                        ):
-                            mentor_id = audit_row.actor_user_id
-                            break
-
-                if mentor_id is not None:
-                    mentor = (
-                        await session.execute(
-                            select(User).where(User.telegram_user_id == mentor_id)
-                        )
-                    ).scalar_one_or_none()
-                    helper_mentor_text = (
-                        clickable_user_display(mentor)
-                        if mentor is not None
-                        else clickable_identity(
-                            telegram_user_id=mentor_id,
-                            first_name="Наставник",
-                            username=None,
-                        )
-                    )
-
-        identity = clickable_identity(
-            telegram_user_id=message.from_user.id,
-            first_name=(user.first_name if user else message.from_user.first_name),
-            last_name=(user.last_name if user else message.from_user.last_name),
-            username=(user.username if user else message.from_user.username),
-        )
-        statuses = _special_statuses(settings.moderation_config if settings else {}, message.from_user.id)
-        status_text = "участник"
-        if member is not None and member.status != MemberStatus.member.value:
-            status_text = member.status
-        admin_line = rank or "—"
-        special_line = ", ".join(statuses) if statuses else "—"
-        helper_line = (
-            f"\n🧭 Наставник: {helper_mentor_text}"
-            f"\n🚨 Помог найти нарушений: <b>{helper_violation_count}</b>"
-            if rank == HELPER_ROLE
-            else ""
-        )
+            text = await _profile_text(
+                session,
+                chat_id=message.chat.id,
+                target=message.from_user,
+            )
         await message.answer(
-            "👤 <b>Профиль участника</b>\n\n"
-            f"Пользователь: {identity}\n"
-            f"Статус в группе: <b>{status_text}</b>\n"
-            f"Ранг Mimorus: <b>{admin_line}</b>\n"
-            f"Особый статус: <b>{special_line}</b>"
-            f"{helper_line}\n\n"
-            f"Первое появление: <b>{_fmt_dt(member.first_seen_at if member else None)}</b>\n"
-            f"Последняя активность: <b>{_fmt_dt(member.last_activity_at if member else None)}</b>\n"
-            f"Сообщений учтено: <b>{messages}</b>\n"
-            f"Активных предупреждений: <b>{warnings}</b>",
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.reply_to_message,
+        F.text.regexp(r"(?i)^\s*кто\s+он\s*[?？]?\s*$"),
+    )
+    async def who_is_he(message: Message) -> None:
+        if message.from_user is None or message.reply_to_message is None:
+            return
+        target = message.reply_to_message.from_user
+        if target is None:
+            await message.reply("Не удалось определить пользователя из сообщения.")
+            return
+
+        async with session_factory() as session:
+            if not await _access_allowed(session, message.chat.id):
+                return
+            if not await _can_view_other_profile(
+                session,
+                chat_id=message.chat.id,
+                actor_id=message.from_user.id,
+            ):
+                await message.reply(
+                    "Эта команда доступна владельцу и действующим администраторам группы."
+                )
+                return
+            text = await _profile_text(
+                session,
+                chat_id=message.chat.id,
+                target=target,
+            )
+
+        await message.answer(
+            text,
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
