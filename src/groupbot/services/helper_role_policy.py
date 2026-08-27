@@ -81,6 +81,55 @@ async def prepare_helper_telegram_state(
     return None
 
 
+async def cleanup_helper_managed_admins(
+    bot,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    role_id: int,
+) -> str | None:
+    """Ensure every user of the Helper role stays a normal Telegram member."""
+    role = (
+        await session.execute(
+            select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
+        )
+    ).scalar_one_or_none()
+    if role is None or role.name != HELPER_ROLE:
+        return None
+
+    target_ids = list((
+        await session.execute(
+            select(AdminAssignment.user_id)
+            .join(
+                TelegramAdminPromotion,
+                (TelegramAdminPromotion.chat_id == AdminAssignment.chat_id)
+                & (TelegramAdminPromotion.user_id == AdminAssignment.user_id),
+            )
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.role_id == role_id,
+            )
+        )
+    ).scalars().all())
+
+    for target_id in target_ids:
+        try:
+            member = await bot.get_chat_member(chat_id, target_id)
+        except Exception:
+            return f"Не удалось проверить Помощника Telegram ID {target_id}."
+        error = await prepare_helper_telegram_state(
+            bot,
+            session,
+            chat_id=chat_id,
+            target_id=target_id,
+            role=role,
+            telegram_member=member,
+        )
+        if error:
+            return error
+    return None
+
+
 async def remember_assignment_actor(
     session: AsyncSession,
     *,
