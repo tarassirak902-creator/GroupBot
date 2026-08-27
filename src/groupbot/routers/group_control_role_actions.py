@@ -6,9 +6,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole
+from groupbot.routers.admin_member_sync import _check_bot_promotion_rights, _telegram_rights_for_role
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import is_group_owner
 from groupbot.services.subscriptions import active_subscription_for_owner
+from groupbot.telegram_admin_models import TelegramAdminPromotion
 
 
 KNOWN_PERMISSIONS = [
@@ -78,6 +80,62 @@ async def _render_role(
     await callback.answer("Сохранено")
 
 
+async def _sync_managed_telegram_admins_for_role(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    role_id: int,
+) -> str | None:
+    """Apply current rank rights to Telegram admins promoted by Mimorus.
+
+    Telegram admins that existed before Mimorus promoted them are intentionally
+    excluded: their rights belong to the group owner and must not be overwritten.
+    """
+    target_ids = list((
+        await session.execute(
+            select(AdminAssignment.user_id)
+            .join(
+                TelegramAdminPromotion,
+                (TelegramAdminPromotion.chat_id == AdminAssignment.chat_id)
+                & (TelegramAdminPromotion.user_id == AdminAssignment.user_id),
+            )
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.role_id == role_id,
+            )
+        )
+    ).scalars().all())
+    if not target_ids:
+        return None
+
+    rights = await _telegram_rights_for_role(session, role_id)
+    error = await _check_bot_promotion_rights(callback.bot, chat_id, rights)
+    if error:
+        return error
+
+    for target_id in target_ids:
+        try:
+            member = await callback.bot.get_chat_member(chat_id, target_id)
+        except Exception:
+            return f"Не удалось проверить администратора Telegram ID {target_id}. Изменение права отменено."
+        if member.status != "administrator":
+            continue
+        try:
+            await callback.bot.promote_chat_member(
+                chat_id=chat_id,
+                user_id=target_id,
+                is_anonymous=False,
+                **rights,
+            )
+        except Exception:
+            return (
+                "Telegram не позволил обновить права одного из администраторов. "
+                "Изменение права ранга отменено. Проверьте права Mimorus."
+            )
+    return None
+
+
 def create_group_control_role_actions_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
@@ -89,47 +147,71 @@ def create_group_control_role_actions_router(
         if len(parts) != 5:
             await callback.answer("Некорректное действие.", show_alert=True)
             return
-        chat_id = int(parts[2])
-        role_id = int(parts[3])
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except ValueError:
+            await callback.answer("Некорректное действие.", show_alert=True)
+            return
         permission = parts[4]
         if permission not in {key for key, _ in KNOWN_PERMISSIONS}:
             await callback.answer("Неизвестное право.", show_alert=True)
             return
+
+        sync_error: str | None = None
         async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True)
-                    return
-                role = (
-                    await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))
-                ).scalar_one_or_none()
-                if role is None:
-                    await callback.answer("Ранг не найден.", show_alert=True)
-                    return
-                row = (
-                    await session.execute(
-                        select(AdminPermission).where(
-                            AdminPermission.role_id == role_id,
-                            AdminPermission.permission == permission,
-                        ).with_for_update()
+            try:
+                async with session.begin():
+                    if not await _owner_access(session, chat_id, callback.from_user.id):
+                        await callback.answer("Недостаточно прав.", show_alert=True)
+                        return
+                    role = (
+                        await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id))
+                    ).scalar_one_or_none()
+                    if role is None:
+                        await callback.answer("Ранг не найден.", show_alert=True)
+                        return
+                    row = (
+                        await session.execute(
+                            select(AdminPermission).where(
+                                AdminPermission.role_id == role_id,
+                                AdminPermission.permission == permission,
+                            ).with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if row is None:
+                        row = AdminPermission(role_id=role_id, permission=permission, allowed=True)
+                        session.add(row)
+                        value = True
+                    else:
+                        row.allowed = not row.allowed
+                        value = row.allowed
+
+                    await session.flush()
+                    sync_error = await _sync_managed_telegram_admins_for_role(
+                        callback,
+                        session,
+                        chat_id=chat_id,
+                        role_id=role_id,
                     )
-                ).scalar_one_or_none()
-                if row is None:
-                    row = AdminPermission(role_id=role_id, permission=permission, allowed=True)
-                    session.add(row)
-                    value = True
-                else:
-                    row.allowed = not row.allowed
-                    value = row.allowed
-                await write_audit(
-                    session,
-                    "group.admin_permission_changed",
-                    chat_id=chat_id,
-                    actor_user_id=callback.from_user.id,
-                    target_type="admin_role",
-                    target_id=str(role_id),
-                    payload={"permission": permission, "allowed": value},
-                )
+                    if sync_error:
+                        raise RuntimeError(sync_error)
+
+                    await write_audit(
+                        session,
+                        "group.admin_permission_changed",
+                        chat_id=chat_id,
+                        actor_user_id=callback.from_user.id,
+                        target_type="admin_role",
+                        target_id=str(role_id),
+                        payload={"permission": permission, "allowed": value},
+                    )
+            except RuntimeError as exc:
+                sync_error = str(exc)
+
+        if sync_error:
+            await callback.answer(sync_error, show_alert=True)
+            return
         await _render_role(callback, session_factory, chat_id, role_id)
 
     @router.callback_query(F.data.startswith("gctl:role_toggle:"))
@@ -138,8 +220,12 @@ def create_group_control_role_actions_router(
         if len(parts) != 4:
             await callback.answer("Некорректное действие.", show_alert=True)
             return
-        chat_id = int(parts[2])
-        role_id = int(parts[3])
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except ValueError:
+            await callback.answer("Некорректное действие.", show_alert=True)
+            return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
