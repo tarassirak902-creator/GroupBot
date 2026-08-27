@@ -18,7 +18,6 @@ STANDARD_RANK_LEVEL = {
     CHIEF: 2,
     CHAT_ADMIN: 3,
     VOICE_ADMIN: 3,
-    HELPER: 4,
 }
 
 
@@ -63,17 +62,7 @@ async def manual_punishment_error(
     actor_id: int,
     target_id: int,
 ) -> str | None:
-    """Return a user-facing error when manual punishment of target is forbidden.
-
-    Approved project rules:
-    - Group owner can punish anyone below the owner.
-    - VIP can be punished only by Owner or Deputy Owner.
-    - Nedotroga can be punished only by Owner, Deputy Owner or Chief Admin.
-    - Standard Mimorus ranks may punish only strictly lower standard ranks.
-      Chat Admin and Voice Admin are the same hierarchy level.
-    - A custom rank has no approved hierarchy position, so it may punish ordinary
-      members according to its permissions but not active Mimorus administrators.
-    """
+    """Return a user-facing error when manual punishment of target is forbidden."""
     if actor_id == target_id:
         return "Нельзя применить наказание к себе."
 
@@ -84,12 +73,13 @@ async def manual_punishment_error(
         return None
 
     actor_role = await _role_name(session, chat_id=chat_id, user_id=actor_id)
+    if actor_role == HELPER:
+        return "Помощник не может выдавать наказания. Используйте ответом на сообщение команду «нарушение»."
 
     special = await _special_statuses(session, chat_id)
     vip_ids = _ids(special.get("vip"))
     nedotroga_ids = _ids(special.get("nedotroga"))
 
-    # Special statuses override the ordinary rank hierarchy.
     if target_id in vip_ids:
         if actor_role == DEPUTY:
             return None
@@ -101,9 +91,7 @@ async def manual_punishment_error(
         return "🛡 Недотрогу может наказать только Владелец группы, Зам. владельца или Глав. админ."
 
     target_role = await _role_name(session, chat_id=chat_id, user_id=target_id)
-    if target_role is None:
-        # Ordinary member: the caller's warning/mute/ban permission is checked by
-        # the moderation handler separately.
+    if target_role is None or target_role == HELPER:
         return None
 
     actor_level = STANDARD_RANK_LEVEL.get(actor_role or "")
