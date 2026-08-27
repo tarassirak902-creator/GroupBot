@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import AdminAssignment, AdminRole, AuditLog, GroupMember, GroupSettings, MemberStatus, User
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.group_profile_stats import _access_allowed, _fmt_dt, _message_count, _rank_name, _special_statuses, _warning_count
-from groupbot.routers.user_display import clickable_identity
+from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.helper_role_policy import HELPER_ROLE
 
 
@@ -46,7 +46,9 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
             messages = await _message_count(session, message.chat.id, message.from_user.id)
             warnings = await _warning_count(session, message.chat.id, message.from_user.id)
             rank = await _rank_name(session, message.chat.id, message.from_user.id)
+
             helper_violation_count = 0
+            helper_mentor_text = "⚠️ не определён"
             if rank == HELPER_ROLE:
                 helper_violation_count = int((
                     await session.execute(
@@ -59,6 +61,57 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
                         )
                     )
                 ).scalar_one())
+
+                assignment = (
+                    await session.execute(
+                        select(AdminAssignment)
+                        .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+                        .where(
+                            AdminAssignment.chat_id == message.chat.id,
+                            AdminAssignment.user_id == message.from_user.id,
+                            AdminRole.name == HELPER_ROLE,
+                        )
+                    )
+                ).scalar_one_or_none()
+                mentor_id = assignment.assigned_by_user_id if assignment is not None else None
+
+                if mentor_id is None:
+                    audit_rows = (
+                        await session.execute(
+                            select(AuditLog)
+                            .where(
+                                AuditLog.chat_id == message.chat.id,
+                                AuditLog.event_type == "group.admin_rank_assigned",
+                                AuditLog.target_type == "user",
+                                AuditLog.target_id == str(message.from_user.id),
+                            )
+                            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                            .limit(20)
+                        )
+                    ).scalars().all()
+                    for audit_row in audit_rows:
+                        if (
+                            (audit_row.payload or {}).get("role_name") == HELPER_ROLE
+                            and audit_row.actor_user_id is not None
+                        ):
+                            mentor_id = audit_row.actor_user_id
+                            break
+
+                if mentor_id is not None:
+                    mentor = (
+                        await session.execute(
+                            select(User).where(User.telegram_user_id == mentor_id)
+                        )
+                    ).scalar_one_or_none()
+                    helper_mentor_text = (
+                        clickable_user_display(mentor)
+                        if mentor is not None
+                        else clickable_identity(
+                            telegram_user_id=mentor_id,
+                            first_name="Наставник",
+                            username=None,
+                        )
+                    )
 
         identity = clickable_identity(
             telegram_user_id=message.from_user.id,
@@ -73,6 +126,7 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
         admin_line = rank or "—"
         special_line = ", ".join(statuses) if statuses else "—"
         helper_line = (
+            f"\n🧭 Наставник: {helper_mentor_text}"
             f"\n🚨 Помог найти нарушений: <b>{helper_violation_count}</b>"
             if rank == HELPER_ROLE
             else ""
