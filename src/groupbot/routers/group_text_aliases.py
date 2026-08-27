@@ -5,7 +5,7 @@ from aiogram.types import Message, User as TelegramUser
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, AdminRole, AuditLog, GroupMember, GroupSettings, MemberStatus, User
+from groupbot.models import AdminAssignment, AdminRole, AuditLog, GroupMember, GroupOwner, GroupSettings, MemberStatus, User
 from groupbot.moderation_models import ModerationAction
 from groupbot.routers.group_profile_stats import _access_allowed, _fmt_dt, _message_count, _rank_name, _special_statuses, _warning_count
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
@@ -149,6 +149,139 @@ async def _admin_profile_extra(
         action_counts.get("ban", 0),
         helper_count,
     )
+
+
+async def _admin_leaderboard_text(session: AsyncSession, *, chat_id: int) -> str:
+    owner_ids = set((
+        await session.execute(
+            select(GroupOwner.user_id).where(
+                GroupOwner.chat_id == chat_id,
+                GroupOwner.is_current.is_(True),
+            )
+        )
+    ).scalars().all())
+
+    admin_rows = (
+        await session.execute(
+            select(AdminAssignment.user_id, AdminRole.name)
+            .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminRole.is_active.is_(True),
+                AdminRole.name != HELPER_ROLE,
+            )
+        )
+    ).all()
+    role_by_user = {int(user_id): str(role_name) for user_id, role_name in admin_rows}
+    admin_ids = set(role_by_user) | {int(user_id) for user_id in owner_ids}
+
+    if not admin_ids:
+        return "🏆 <b>Топ администрации</b>\n\nВ группе пока нет действующей администрации Mimorus."
+
+    action_rows = (
+        await session.execute(
+            select(ModerationAction.actor_user_id, ModerationAction.action, func.count())
+            .where(
+                ModerationAction.chat_id == chat_id,
+                ModerationAction.actor_user_id.in_(admin_ids),
+                ModerationAction.action.in_(["warning", "mute", "ban"]),
+            )
+            .group_by(ModerationAction.actor_user_id, ModerationAction.action)
+        )
+    ).all()
+    actions_by_user: dict[int, dict[str, int]] = {user_id: {} for user_id in admin_ids}
+    for user_id, action, count in action_rows:
+        actions_by_user[int(user_id)][str(action)] = int(count)
+
+    helper_rows = (
+        await session.execute(
+            select(AdminAssignment.user_id, AdminAssignment.assigned_by_user_id)
+            .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.assigned_by_user_id.in_(admin_ids),
+                AdminRole.name == HELPER_ROLE,
+                AdminRole.is_active.is_(True),
+            )
+        )
+    ).all()
+    helpers_by_mentor: dict[int, list[int]] = {user_id: [] for user_id in admin_ids}
+    helper_to_mentor: dict[int, int] = {}
+    for helper_id, mentor_id in helper_rows:
+        if mentor_id is None:
+            continue
+        mentor_id = int(mentor_id)
+        helper_id = int(helper_id)
+        helpers_by_mentor.setdefault(mentor_id, []).append(helper_id)
+        helper_to_mentor[helper_id] = mentor_id
+
+    helper_reports_by_mentor: dict[int, int] = {user_id: 0 for user_id in admin_ids}
+    if helper_to_mentor:
+        report_rows = (
+            await session.execute(
+                select(AuditLog.actor_user_id, func.count())
+                .where(
+                    AuditLog.chat_id == chat_id,
+                    AuditLog.actor_user_id.in_(helper_to_mentor),
+                    AuditLog.event_type == "group.helper_violation_reported",
+                )
+                .group_by(AuditLog.actor_user_id)
+            )
+        ).all()
+        for helper_id, count in report_rows:
+            helper_id = int(helper_id)
+            mentor_id = helper_to_mentor.get(helper_id)
+            if mentor_id is not None:
+                helper_reports_by_mentor[mentor_id] = helper_reports_by_mentor.get(mentor_id, 0) + int(count)
+
+    users = (
+        await session.execute(
+            select(User).where(User.telegram_user_id.in_(admin_ids))
+        )
+    ).scalars().all()
+    users_by_id = {int(user.telegram_user_id): user for user in users}
+
+    ranking: list[tuple[int, int, int, int, int, int]] = []
+    for user_id in admin_ids:
+        counts = actions_by_user.get(user_id, {})
+        warnings = counts.get("warning", 0)
+        mutes = counts.get("mute", 0)
+        bans = counts.get("ban", 0)
+        total = warnings + mutes + bans
+        helper_reports = helper_reports_by_mentor.get(user_id, 0)
+        ranking.append((user_id, total, helper_reports, warnings, mutes, bans))
+
+    ranking.sort(key=lambda row: (-row[1], -row[2], row[0]))
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [
+        "🏆 <b>Топ администрации</b>",
+        "",
+        "Сортировка: по количеству фактических предов, мутов и банов.",
+        "",
+    ]
+    for index, (user_id, total, helper_reports, warnings, mutes, bans) in enumerate(ranking[:10], start=1):
+        user = users_by_id.get(user_id)
+        identity = (
+            clickable_user_display(user)
+            if user is not None
+            else clickable_identity(
+                telegram_user_id=user_id,
+                first_name="Администратор",
+                username=None,
+            )
+        )
+        role_name = "Владелец группы" if user_id in owner_ids else role_by_user.get(user_id, "Администратор")
+        prefix = medals[index - 1] if index <= len(medals) else f"{index}."
+        helper_count = len(helpers_by_mentor.get(user_id, []))
+        lines.extend([
+            f"{prefix} {identity} — <b>{role_name}</b>",
+            f"   📌 Действий: <b>{total}</b> · ⚠️ {warnings} · 🔇 {mutes} · ⛔ {bans}",
+            f"   🔹 Помощников: <b>{helper_count}</b> · 🚨 нашли нарушений: <b>{helper_reports}</b>",
+            "",
+        ])
+
+    return "\n".join(lines).rstrip()
 
 
 async def _profile_text(
@@ -296,6 +429,33 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
                 chat_id=message.chat.id,
                 target=target,
             )
+
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(r"(?i)^\s*топ\s+админ(?:ов|истрации)?\s*[?？]?\s*$"),
+    )
+    async def admin_leaderboard(message: Message) -> None:
+        if message.from_user is None:
+            return
+        async with session_factory() as session:
+            if not await _access_allowed(session, message.chat.id):
+                return
+            if not await _can_view_other_profile(
+                session,
+                chat_id=message.chat.id,
+                actor_id=message.from_user.id,
+            ):
+                await message.reply(
+                    "Эта команда доступна владельцу и действующим администраторам группы."
+                )
+                return
+            text = await _admin_leaderboard_text(session, chat_id=message.chat.id)
 
         await message.answer(
             text,
