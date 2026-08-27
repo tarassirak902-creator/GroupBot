@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminRole
+from groupbot.routers.standard_rank_cards import create_standard_rank_cards_router
 from groupbot.services.admin_rank_access import can_open_rank_management
 from groupbot.services.helper_role_policy import HELPER_ROLE
 
@@ -42,6 +43,10 @@ def create_helper_private_assignment_hint_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
     router = Router(name="helper_private_assignment_hint")
+
+    # Standard rank cards must run before the legacy hierarchy router so owners
+    # see the real Mimorus + Telegram rights matrix approved for each rank.
+    router.include_router(create_standard_rank_cards_router(session_factory))
 
     @router.callback_query(HelperAssignFilter(session_factory))
     async def helper_assign_hint(callback: CallbackQuery) -> None:
