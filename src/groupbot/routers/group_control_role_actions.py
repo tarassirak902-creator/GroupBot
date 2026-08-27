@@ -7,23 +7,22 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole
 from groupbot.routers.admin_member_sync import _check_bot_promotion_rights, _telegram_rights_for_role
+from groupbot.routers.group_control import KNOWN_PERMISSIONS
 from groupbot.services.audit import write_audit
 from groupbot.services.permissions import is_group_owner
 from groupbot.services.subscriptions import active_subscription_for_owner
 from groupbot.telegram_admin_models import TelegramAdminPromotion
 
 
-KNOWN_PERMISSIONS = [
-    ("warning", "⚠️ Предупреждение"),
-    ("mute", "🔇 Мут"),
-    ("ban", "⛔ Бан"),
-    ("unmute", "🔊 Размут"),
-    ("unban", "✅ Разбан"),
-    ("delete", "🗑 Удаление сообщений"),
-    ("pin", "📌 Закрепление сообщений"),
-    ("punishment_lists", "📋 Общие списки наказаний"),
-    ("stats", "📊 Полная статистика"),
-]
+# group_control.py is the historical source of the permission catalog and both
+# group_control_ux.py and network_admins.py import this same mutable list. Keep
+# the active consumers on one shared object so enforcement and UI cannot drift.
+if not any(key == "punishment_lists" for key, _ in KNOWN_PERMISSIONS):
+    stats_index = next(
+        (index for index, (key, _) in enumerate(KNOWN_PERMISSIONS) if key == "stats"),
+        len(KNOWN_PERMISSIONS),
+    )
+    KNOWN_PERMISSIONS.insert(stats_index, ("punishment_lists", "📋 Общие списки наказаний"))
 
 
 async def _owner_access(session: AsyncSession, chat_id: int, user_id: int) -> bool:
