@@ -129,6 +129,11 @@ async def _telegram_rights_for_role(session: AsyncSession, role_id: int) -> dict
         "can_promote_members": False,
         "can_change_info": False,
         "can_invite_users": False,
+        "can_post_stories": False,
+        "can_edit_stories": False,
+        "can_delete_stories": False,
+        "can_post_messages": False,
+        "can_edit_messages": False,
         "can_pin_messages": "pin" in allowed,
         "can_manage_topics": False,
     }
@@ -268,6 +273,11 @@ async def _remove_role_and_managed_telegram_admin(
                 "can_promote_members": False,
                 "can_change_info": False,
                 "can_invite_users": False,
+                "can_post_stories": False,
+                "can_edit_stories": False,
+                "can_delete_stories": False,
+                "can_post_messages": False,
+                "can_edit_messages": False,
                 "can_pin_messages": False,
                 "can_manage_topics": False,
             }
