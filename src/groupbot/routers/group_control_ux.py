@@ -7,6 +7,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole
+from groupbot.routers.admin_member_sync import _remove_role_and_managed_telegram_admin
 from groupbot.routers.group_control import (
     KNOWN_PERMISSIONS,
     STANDARD_ADMIN_ROLE_NAMES,
@@ -158,40 +159,68 @@ def create_group_control_ux_router(
             role_id = int(parts[3])
         except (ValueError, IndexError):
             return
+
+        removal_error: str | None = None
+        role_name = ""
+        assignments = 0
         async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True)
-                    return
-                role = (
-                    await session.execute(
-                        select(AdminRole)
-                        .where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
-                        .with_for_update()
+            try:
+                async with session.begin():
+                    if not await _owner_access(session, chat_id, callback.from_user.id):
+                        await callback.answer("Недостаточно прав.", show_alert=True)
+                        return
+                    role = (
+                        await session.execute(
+                            select(AdminRole)
+                            .where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if role is None:
+                        await callback.answer("Ранг уже удалён.", show_alert=True)
+                        return
+                    if role.name in STANDARD_ADMIN_ROLE_NAMES:
+                        await callback.answer("Стандартный ранг Mimorus удалить нельзя.", show_alert=True)
+                        return
+
+                    role_name = role.name
+                    assignment_rows = list((
+                        await session.execute(
+                            select(AdminAssignment)
+                            .where(AdminAssignment.role_id == role_id)
+                            .with_for_update()
+                        )
+                    ).scalars().all())
+                    assignments = len(assignment_rows)
+
+                    for assignment in assignment_rows:
+                        error = await _remove_role_and_managed_telegram_admin(
+                            callback,
+                            session,
+                            chat_id=chat_id,
+                            assignment=assignment,
+                            role_id=role_id,
+                        )
+                        if error:
+                            raise RuntimeError(error)
+
+                    await session.execute(delete(AdminRole).where(AdminRole.id == role_id))
+                    await write_audit(
+                        session,
+                        "group.admin_role_deleted",
+                        chat_id=chat_id,
+                        actor_user_id=callback.from_user.id,
+                        target_type="admin_role",
+                        target_id=str(role_id),
+                        payload={"name": role_name, "assignments_removed": assignments},
                     )
-                ).scalar_one_or_none()
-                if role is None:
-                    await callback.answer("Ранг уже удалён.", show_alert=True)
-                    return
-                if role.name in STANDARD_ADMIN_ROLE_NAMES:
-                    await callback.answer("Стандартный ранг Mimorus удалить нельзя.", show_alert=True)
-                    return
-                role_name = role.name
-                assignments = (
-                    await session.execute(
-                        select(func.count()).select_from(AdminAssignment).where(AdminAssignment.role_id == role_id)
-                    )
-                ).scalar_one()
-                await session.execute(delete(AdminRole).where(AdminRole.id == role_id))
-                await write_audit(
-                    session,
-                    "group.admin_role_deleted",
-                    chat_id=chat_id,
-                    actor_user_id=callback.from_user.id,
-                    target_type="admin_role",
-                    target_id=str(role_id),
-                    payload={"name": role_name, "assignments_detached": assignments},
-                )
+            except RuntimeError as exc:
+                removal_error = str(exc)
+
+        if removal_error:
+            await callback.answer(removal_error, show_alert=True)
+            return
+
         await state.clear()
         async with session_factory() as session:
             rows = list((
@@ -398,17 +427,21 @@ def create_group_control_ux_router(
         )
         async with session_factory() as session:
             _, _, assignments = await _load_role(session, chat_id, role_id)
-        if callback.message is not None:
-            await callback.message.edit_text(
+        if role_active:
+            result_text = (
                 "✅ <b>Разрешения сохранены</b>\n\n"
                 f"Ранг: <b>{role_name}</b>\n"
                 "Настройки применены и синхронизированы с Telegram для администраторов, назначенных Mimorus."
-                if role_active
-                else (
-                    "✅ <b>Разрешения сохранены</b>\n\n"
-                    f"Ранг: <b>{role_name}</b>\n"
-                    "Настройки сохранены. Ранг выключен — Telegram-права будут применены при его включении."
-                ),
+            )
+        else:
+            result_text = (
+                "✅ <b>Разрешения сохранены</b>\n\n"
+                f"Ранг: <b>{role_name}</b>\n"
+                "Настройки сохранены. Ранг выключен — Telegram-права будут применены при его включении."
+            )
+        if callback.message is not None:
+            await callback.message.edit_text(
+                result_text,
                 parse_mode="HTML",
                 reply_markup=_permission_editor_keyboard(
                     chat_id,
