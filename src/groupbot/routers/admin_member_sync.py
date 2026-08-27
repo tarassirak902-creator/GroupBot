@@ -223,18 +223,9 @@ async def _assign_role(
         return f"Лимит назначений для «{role.name}» уже достигнут: {limit}."
 
     if existing is None:
-        session.add(
-            AdminAssignment(
-                chat_id=chat_id,
-                user_id=target_id,
-                role_id=role.id,
-                assigned_by_user_id=actor_id,
-                is_reserve=False,
-            )
-        )
+        session.add(AdminAssignment(chat_id=chat_id, user_id=target_id, role_id=role.id, is_reserve=False))
     else:
         existing.role_id = role.id
-        existing.assigned_by_user_id = actor_id
         # Резервный администратор — независимый статус. При смене ранга его не снимаем.
 
     await write_audit(
@@ -464,23 +455,270 @@ def create_admin_member_sync_router(session_factory: async_sessionmaker[AsyncSes
                 if error:
                     await callback.answer(error, show_alert=True)
                     return
-                await upsert_user(session, callback.from_user)
 
-        target_text = clickable_user_display(user)
-        actor_text = clickable_identity(
-            telegram_user_id=callback.from_user.id,
-            first_name=callback.from_user.first_name,
-            last_name=callback.from_user.last_name,
-            username=callback.from_user.username,
-        )
-        text = (
-            "👑 <b>Ранг назначен</b>\n\n"
-            f"Пользователь: {target_text}\n"
-            f"Ранг: <b>{escape(role.name)}</b>\n"
-            f"Назначил: {actor_text}"
-        )
         if callback.message is not None:
-            await callback.message.edit_text(text, parse_mode="HTML")
-        await callback.answer("Ранг назначен")
+            await callback.message.edit_text(
+                f"✅ Пользователю {clickable_user_display(user)} назначен ранг «<b>{escape(role.name)}</b>».\n"
+                "Telegram-права синхронизированы там, где Mimorus управляет назначением.",
+                parse_mode="HTML",
+            )
+        await callback.answer("Назначено")
+
+    @router.callback_query(F.data.startswith("hier:assign:"))
+    async def rank_picker(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except (ValueError, IndexError):
+            return
+
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+
+            role = (
+                await session.execute(
+                    select(AdminRole).where(
+                        AdminRole.id == role_id,
+                        AdminRole.chat_id == chat_id,
+                        AdminRole.is_active.is_(True),
+                    )
+                )
+            ).scalar_one_or_none()
+            if role is None:
+                await callback.answer("Ранг не найден.", show_alert=True)
+                return
+
+            limit = _assignment_limit(role)
+            if limit is not None and await _assignment_count(session, role_id) >= limit:
+                await callback.answer(
+                    f"Для ранга «{role.name}» достигнут лимит назначений: {limit}.",
+                    show_alert=True,
+                )
+                return
+
+            try:
+                synced = await _sync_telegram_admins(callback, session, chat_id)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                synced = 0
+
+            users = await _known_group_users(session, chat_id)
+
+        if callback.message is not None:
+            text = (
+                f"➕ <b>Назначить ранг «{escape(role.name)}»</b>\n\n"
+                "Выберите участника из списка ниже.\n"
+                "Имя и @username кликабельны отдельно, а разделитель | — обычный текст."
+            )
+            if synced:
+                text += f"\n\nАдминистраторы Telegram синхронизированы: <b>{synced}</b>."
+            if users:
+                text += "\n\n" + _picker_users_text(users)
+            else:
+                text += (
+                    "\n\nПока нет известных участников. Обычные участники появляются здесь "
+                    "после любой активности в группе."
+                )
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=_picker_keyboard(
+                    users,
+                    f"priv:rank_pick:{chat_id}:{role_id}",
+                    _role_back_data(chat_id, role),
+                ),
+            )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("priv:rank_pick:"))
+    async def rank_pick(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 4)
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+            target_id = int(parts[4])
+        except (ValueError, IndexError):
+            return
+
+        try:
+            telegram_member = await callback.bot.get_chat_member(chat_id, target_id)
+            if telegram_member.status in {"left", "kicked"}:
+                await callback.answer("Пользователь больше не состоит в группе.", show_alert=True)
+                return
+        except Exception:
+            await callback.answer("Не удалось проверить участника группы.", show_alert=True)
+            return
+
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                role = (
+                    await session.execute(
+                        select(AdminRole).where(
+                            AdminRole.id == role_id,
+                            AdminRole.chat_id == chat_id,
+                            AdminRole.is_active.is_(True),
+                        )
+                    )
+                ).scalar_one_or_none()
+                user = (
+                    await session.execute(select(User).where(User.telegram_user_id == target_id))
+                ).scalar_one_or_none()
+                member = (
+                    await session.execute(
+                        select(GroupMember).where(
+                            GroupMember.chat_id == chat_id,
+                            GroupMember.user_id == target_id,
+                            GroupMember.status == MemberStatus.member.value,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if role is None or user is None or member is None:
+                    await callback.answer("Пользователь или ранг больше недоступен.", show_alert=True)
+                    return
+                error = await _assignment_limit_error(
+                    session,
+                    chat_id=chat_id,
+                    target_id=target_id,
+                    role=role,
+                )
+                if error:
+                    await callback.answer(error, show_alert=True)
+                    return
+                error = await _ensure_telegram_admin_for_role(
+                    callback.bot,
+                    session,
+                    chat_id=chat_id,
+                    target_id=target_id,
+                    role=role,
+                    telegram_member=telegram_member,
+                )
+                if error:
+                    await callback.answer(error, show_alert=True)
+                    return
+                error = await _assign_role(
+                    session,
+                    chat_id=chat_id,
+                    target_id=target_id,
+                    role=role,
+                    actor_id=callback.from_user.id,
+                )
+                if error:
+                    await callback.answer(error, show_alert=True)
+                    return
+
+        back_data = _role_back_data(chat_id, role)
+        if callback.message is not None:
+            await callback.message.edit_text(
+                f"✅ Пользователю {clickable_user_display(user)} назначен ранг «<b>{escape(role.name)}</b>».\n"
+                "Telegram-права синхронизированы там, где Mimorus управляет назначением.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📋 Назначенные", callback_data=f"hier:assigned:{chat_id}:{role_id}")],
+                    [InlineKeyboardButton(text="◀️ К рангу", callback_data=back_data)],
+                ]),
+            )
+        await callback.answer("Назначено")
+
+    @router.callback_query(F.data.startswith("hier:remove:"))
+    async def remove_rank(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 4)
+        try:
+            chat_id = int(parts[2])
+            assignment_id = int(parts[3])
+            role_id = int(parts[4])
+        except (ValueError, IndexError):
+            return
+
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                assignment = (
+                    await session.execute(
+                        select(AdminAssignment).where(
+                            AdminAssignment.id == assignment_id,
+                            AdminAssignment.chat_id == chat_id,
+                            AdminAssignment.role_id == role_id,
+                        ).with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if assignment is None:
+                    await callback.answer("Назначение уже снято.", show_alert=True)
+                    return
+                error = await _remove_role_and_managed_telegram_admin(
+                    callback,
+                    session,
+                    chat_id=chat_id,
+                    assignment=assignment,
+                    role_id=role_id,
+                )
+                if error:
+                    await callback.answer(error, show_alert=True)
+                    return
+
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "✅ Административный ранг снят.\n\n"
+                "Если пользователя назначал администратором сам Mimorus, Telegram-права также сняты. "
+                "Администраторы, назначенные вручную до Mimorus, не разжалуются.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ К рангу", callback_data=f"hier:role:{chat_id}:{role_id}")]
+                ]),
+            )
+        await callback.answer("Ранг снят")
+
+    @router.callback_query(F.data.startswith("hier:special_add:"))
+    async def special_picker(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2])
+            status = parts[3]
+        except (ValueError, IndexError):
+            return
+        if status not in SPECIAL_STATUSES:
+            return
+
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            try:
+                synced = await _sync_telegram_admins(callback, session, chat_id)
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                synced = 0
+            users = await _known_group_users(session, chat_id)
+
+        if callback.message is not None:
+            text = (
+                f"➕ <b>{SPECIAL_STATUSES[status]}</b>\n\n"
+                "Выберите участника из списка ниже.\n"
+                "Имя и @username кликабельны отдельно, а разделитель | — обычный текст."
+            )
+            if synced:
+                text += f"\n\nАдминистраторы Telegram синхронизированы: <b>{synced}</b>."
+            if users:
+                text += "\n\n" + _picker_users_text(users)
+            else:
+                text += "\n\nПока нет известных участников."
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=_picker_keyboard(
+                    users,
+                    f"priv:special_pick:{chat_id}:{status}",
+                    f"hier:special_list:{chat_id}:{status}",
+                ),
+            )
+        await callback.answer()
 
     return router
