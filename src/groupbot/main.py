@@ -29,6 +29,7 @@ from groupbot.routers import manual_moderation as manual_moderation_module
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admin_rank_audit_actions import create_admin_rank_audit_actions_router
+from groupbot.routers.admin_rank_target_actions import create_admin_rank_target_actions_router
 from groupbot.routers.admins_display import create_admins_display_router
 from groupbot.routers.advertising import create_advertising_router
 from groupbot.routers.advertising_deal_actions_v2 import create_advertising_deal_actions_v2_router
@@ -141,6 +142,7 @@ async def main() -> None:
 
     dp.include_router(create_group_startgroup_router(session_factory))
     dp.include_router(create_group_router(session_factory))
+    dp.include_router(create_admin_rank_target_actions_router(session_factory))
     dp.include_router(create_admin_rank_audit_actions_router(session_factory))
     dp.include_router(create_admin_member_sync_router(session_factory))
     dp.include_router(create_admins_display_router(session_factory))
