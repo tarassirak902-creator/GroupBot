@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from groupbot.models import AdminAssignment, AdminPermission, GroupOwner, NetworkAdmin
+from groupbot.models import AdminAssignment, AdminPermission, AdminRole, GroupOwner, NetworkAdmin
 from groupbot.network_models import Network, NetworkGroup
 
 
@@ -58,9 +58,12 @@ async def has_permission(session: AsyncSession, chat_id: int, user_id: int, perm
         return True
 
     assignment = (await session.execute(
-        select(AdminAssignment).where(
+        select(AdminAssignment)
+        .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+        .where(
             AdminAssignment.chat_id == chat_id,
             AdminAssignment.user_id == user_id,
+            AdminRole.is_active.is_(True),
         )
     )).scalar_one_or_none()
     if assignment is not None and assignment.role_id is not None:
