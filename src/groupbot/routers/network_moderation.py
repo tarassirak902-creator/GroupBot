@@ -5,7 +5,7 @@ from aiogram.types import Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, Group, GroupOwner, GroupStatus, NetworkAdmin, User
+from groupbot.models import Group, GroupOwner, GroupStatus, NetworkAdmin, User
 from groupbot.moderation_models import ModerationAction
 from groupbot.network_models import Network, NetworkGroup
 from groupbot.routers.user_display import clickable_user_display
@@ -99,9 +99,10 @@ async def _protected_in_group(
     user_id: int,
     actor_id: int,
 ) -> bool:
-    # VIP/Nedotroga manual-punishment rules are evaluated using the actor's
-    # local rank in this exact group. Network-admin status alone grants no
-    # special-status override.
+    # Use the same Mimorus punishment policy as local moderation in each
+    # concrete group. This protects active Mimorus administrators and applies
+    # the local VIP/Nedotroga rules. Helper is intentionally not treated as an
+    # administrator and can be punished as a regular participant.
     if await manual_punishment_error(
         session,
         chat_id=chat_id,
@@ -110,20 +111,9 @@ async def _protected_in_group(
     ):
         return True
 
-    # Preserve the existing protection for Mimorus administrators. The
-    # rank-vs-rank manual punishment matrix has not been approved yet.
-    assignment = (
-        await session.execute(
-            select(AdminAssignment.id).where(
-                AdminAssignment.chat_id == chat_id,
-                AdminAssignment.user_id == user_id,
-                AdminAssignment.role_id.is_not(None),
-            ).limit(1)
-        )
-    ).scalar_one_or_none()
-    if assignment is not None:
-        return True
-
+    # Telegram itself does not allow a bot to ban a current creator/admin.
+    # Keep this technical protection for manually appointed Telegram admins
+    # even when they do not have a Mimorus rank.
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except Exception:
