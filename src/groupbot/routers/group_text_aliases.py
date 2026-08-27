@@ -206,33 +206,29 @@ async def _admin_leaderboard_text(session: AsyncSession, *, chat_id: int) -> str
         )
     ).all()
     helpers_by_mentor: dict[int, list[int]] = {user_id: [] for user_id in admin_ids}
-    helper_to_mentor: dict[int, int] = {}
     for helper_id, mentor_id in helper_rows:
         if mentor_id is None:
             continue
-        mentor_id = int(mentor_id)
-        helper_id = int(helper_id)
-        helpers_by_mentor.setdefault(mentor_id, []).append(helper_id)
-        helper_to_mentor[helper_id] = mentor_id
+        helpers_by_mentor.setdefault(int(mentor_id), []).append(int(helper_id))
 
     helper_reports_by_mentor: dict[int, int] = {user_id: 0 for user_id in admin_ids}
-    if helper_to_mentor:
-        report_rows = (
-            await session.execute(
-                select(AuditLog.actor_user_id, func.count())
-                .where(
-                    AuditLog.chat_id == chat_id,
-                    AuditLog.actor_user_id.in_(helper_to_mentor),
-                    AuditLog.event_type == "group.helper_violation_reported",
-                )
-                .group_by(AuditLog.actor_user_id)
+    report_rows = (
+        await session.execute(
+            select(AuditLog.payload)
+            .where(
+                AuditLog.chat_id == chat_id,
+                AuditLog.event_type == "group.helper_violation_reported",
             )
-        ).all()
-        for helper_id, count in report_rows:
-            helper_id = int(helper_id)
-            mentor_id = helper_to_mentor.get(helper_id)
-            if mentor_id is not None:
-                helper_reports_by_mentor[mentor_id] = helper_reports_by_mentor.get(mentor_id, 0) + int(count)
+        )
+    ).scalars().all()
+    for payload in report_rows:
+        raw_mentor_id = (payload or {}).get("assigned_admin_id")
+        try:
+            mentor_id = int(raw_mentor_id)
+        except (TypeError, ValueError):
+            continue
+        if mentor_id in admin_ids:
+            helper_reports_by_mentor[mentor_id] = helper_reports_by_mentor.get(mentor_id, 0) + 1
 
     users = (
         await session.execute(
