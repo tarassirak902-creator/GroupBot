@@ -89,9 +89,8 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         text_lines.extend(["", "Назначенные:"])
         for row, user in rows:
             text_lines.append(f"• {clickable_user_display(user)}")
-            label = user.first_name or user.username or "Пользователь"
-            if user.last_name:
-                label = f"{label} {user.last_name}"
+            label = " ".join(part for part in [user.first_name, user.last_name] if part).strip()
+            label = label or (f"@{user.username}" if user.username else "Пользователь")
             buttons.append([InlineKeyboardButton(text=f"👤 {label}"[:64], callback_data=f"network:card:{chat_id}:{user.telegram_user_id}")])
     else:
         text_lines.extend(["", "Назначений пока нет."])
@@ -195,8 +194,6 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
         buttons = []
         for user in candidates:
             label = user.full_name or (f"@{user.username}" if user.username else "Пользователь")
-            if user.username:
-                label = f"{label} | @{user.username}"
             buttons.append([InlineKeyboardButton(text=label[:64], callback_data=f"network:set:{chat_id}:{user.id}")])
         if network_id is not None:
             buttons.append([_back_button(chat_id, network_id, text="◀️ Назад к сетке")])
@@ -215,6 +212,16 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
     async def set_network(callback: CallbackQuery, bot: Bot) -> None:
         _, _, chat_raw, user_raw = (callback.data or "").split(":", 3)
         chat_id, user_id = int(chat_raw), int(user_raw)
+
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            owner_id = await _owner_id(session, chat_id)
+            if owner_id is None or user_id == owner_id:
+                await callback.answer("Владельца нельзя назначить сетевым администратором.", show_alert=True)
+                return
+
         try:
             member = await bot.get_chat_member(chat_id, user_id)
             if member.status not in {"administrator", "creator"} or member.status == "creator" or member.user.is_bot:
@@ -227,6 +234,7 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
                     return
                 owner_id = await _owner_id(session, chat_id)
                 if owner_id is None or user_id == owner_id:
@@ -258,10 +266,12 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
         chat_id, user_id, permission = int(parts[2]), int(parts[3]), parts[4]
         valid = {key for key, _ in KNOWN_PERMISSIONS}
         if permission not in valid:
+            await callback.answer("Неизвестное право.", show_alert=True)
             return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
                     return
                 owner_id = await _owner_id(session, chat_id)
                 row = (await session.execute(select(NetworkAdmin).where(
@@ -290,6 +300,7 @@ def create_network_admins_router(session_factory: async_sessionmaker[AsyncSessio
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
                     return
                 owner_id = await _owner_id(session, chat_id)
                 row = (await session.execute(select(NetworkAdmin).where(
