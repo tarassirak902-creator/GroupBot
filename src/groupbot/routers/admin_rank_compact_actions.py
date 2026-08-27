@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import escape
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
@@ -137,7 +139,7 @@ async def _assign_from_callback(
                 ])
             await callback.message.edit_text(
                 "✅ <b>Ранг сохранён</b>\n\n"
-                f"{clickable_user_display(user)} → <b>{role.name}</b>\n\n"
+                f"{clickable_user_display(user)} → <b>{escape(role.name)}</b>\n\n"
                 "Уведомление отправлено в группу.",
                 parse_mode="HTML",
                 reply_markup=markup,
@@ -311,6 +313,9 @@ def create_admin_rank_compact_actions_router(
                 role = (
                     await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
                 ).scalar_one_or_none()
+                user = (
+                    await session.execute(select(User).where(User.telegram_user_id == target.id))
+                ).scalar_one_or_none()
                 if role is None:
                     await message.answer("Текущий административный ранг не найден.")
                     return
@@ -325,7 +330,7 @@ def create_admin_rank_compact_actions_router(
                 if error:
                     await message.answer(f"❌ {error}")
                     return
-        await message.answer(removal_event(None, target.id, message.from_user), parse_mode="HTML")
+        await message.answer(removal_event(user, target.id, message.from_user), parse_mode="HTML")
 
     @router.callback_query(F.data.startswith("admintext:remove:"))
     async def remove_text(callback: CallbackQuery) -> None:
