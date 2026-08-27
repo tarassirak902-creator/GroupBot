@@ -10,7 +10,7 @@ from groupbot.routers import admin_member_sync as admin_member_sync_module
 from groupbot.routers.admin_hierarchy import _ensure_standard_roles
 from groupbot.routers.admin_rank_target_actions import _resolve_target
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
-from groupbot.services.admin_rank_access import assignment_permission_error
+from groupbot.services.admin_rank_access import assignment_permission_error, can_open_rank_management
 from groupbot.services.helper_role_policy import HELPER_ROLE, prepare_helper_telegram_state
 
 
@@ -52,6 +52,10 @@ async def _assign_helper(
 
     async with session_factory() as session:
         async with session.begin():
+            if not await can_open_rank_management(session, chat_id=chat_id, actor_id=actor_id):
+                await message.reply("Ваш ранг не позволяет назначать Помощников или группа сейчас недоступна.")
+                return
+
             user, telegram_member, error = await _resolve_target(
                 bot,
                 session,
