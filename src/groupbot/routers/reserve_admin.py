@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, User
@@ -74,6 +74,22 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
     await callback.answer()
 
 
+async def _clear_other_reserves(session: AsyncSession, *, chat_id: int, keep_user_id: int | None = None) -> None:
+    rows = list((await session.execute(
+        select(AdminAssignment).where(
+            AdminAssignment.chat_id == chat_id,
+            AdminAssignment.is_reserve.is_(True),
+        ).with_for_update()
+    )).scalars().all())
+    for assignment in rows:
+        if keep_user_id is not None and assignment.user_id == keep_user_id:
+            continue
+        if assignment.role_id is None:
+            await session.delete(assignment)
+        else:
+            assignment.is_reserve = False
+
+
 def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="reserve_admin")
 
@@ -106,8 +122,6 @@ def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession
         for user in admins:
             marker = "✅ " if user.id == current_id else ""
             label = user.full_name or (f"@{user.username}" if user.username else "Администратор")
-            if user.username:
-                label = f"{label} | @{user.username}"
             rows.append([
                 InlineKeyboardButton(
                     text=f"{marker}{label}"[:64],
@@ -129,6 +143,11 @@ def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession
     async def set_reserve(callback: CallbackQuery, bot: Bot) -> None:
         _, _, chat_raw, user_raw = (callback.data or "").split(":", 3)
         chat_id, user_id = int(chat_raw), int(user_raw)
+
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
 
         try:
             telegram_admins = await bot.get_chat_administrators(chat_id)
@@ -156,12 +175,8 @@ def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession
 
                 await upsert_user(session, selected)
                 await session.flush()
+                await _clear_other_reserves(session, chat_id=chat_id, keep_user_id=user_id)
 
-                await session.execute(
-                    update(AdminAssignment)
-                    .where(AdminAssignment.chat_id == chat_id, AdminAssignment.is_reserve.is_(True))
-                    .values(is_reserve=False)
-                )
                 assignment = (
                     await session.execute(
                         select(AdminAssignment)
@@ -199,14 +214,18 @@ def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession
                     await callback.answer("Резервный администратор не назначен.", show_alert=True)
                     return
                 assignment, _ = current
-                assignment.is_reserve = False
+                target_id = assignment.user_id
+                if assignment.role_id is None:
+                    await session.delete(assignment)
+                else:
+                    assignment.is_reserve = False
                 await write_audit(
                     session,
                     "group.reserve_admin_cleared",
                     chat_id=chat_id,
                     actor_user_id=callback.from_user.id,
                     target_type="user",
-                    target_id=str(assignment.user_id),
+                    target_id=str(target_id),
                     payload={},
                 )
         await _render(callback, session_factory, chat_id)
