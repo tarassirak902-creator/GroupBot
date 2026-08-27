@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from groupbot.models import AdminAssignment, AdminRole
 from groupbot.routers.admin_hierarchy import RANK_META
 from groupbot.routers.group_control import _owner_access
+from groupbot.services.subscriptions import active_subscription_for_group
 
 DEPUTY = "Зам. владельца"
 CHIEF = "Глав. админ"
@@ -14,6 +15,10 @@ VOICE_ADMIN = "Администратор войса"
 HELPER = "Помощник"
 STANDARD_MANAGED = {CHIEF, CHAT_ADMIN, VOICE_ADMIN, HELPER}
 CHIEF_ASSIGNABLE = {CHAT_ADMIN, VOICE_ADMIN, HELPER}
+
+
+async def _rank_management_available(session: AsyncSession, chat_id: int) -> bool:
+    return await active_subscription_for_group(session, chat_id) is not None
 
 
 async def _actor_role(session: AsyncSession, chat_id: int, actor_id: int) -> AdminRole | None:
@@ -40,6 +45,8 @@ async def assignment_permission_error(
     existing: AdminAssignment | None,
     old_role: AdminRole | None,
 ) -> str | None:
+    if not await _rank_management_available(session, chat_id):
+        return "У группы нет активного тарифа. Управление администрацией временно недоступно."
     if await _owner_access(session, chat_id, actor_id):
         return None
     if actor_id == target_id:
@@ -85,6 +92,8 @@ async def removal_permission_error(
     assignment: AdminAssignment,
     role: AdminRole,
 ) -> str | None:
+    if not await _rank_management_available(session, chat_id):
+        return "У группы нет активного тарифа. Управление администрацией временно недоступно."
     if await _owner_access(session, chat_id, actor_id):
         return None
     if actor_id == assignment.user_id:
@@ -122,6 +131,8 @@ async def removal_permission_error(
 
 
 async def can_open_rank_management(session: AsyncSession, *, chat_id: int, actor_id: int) -> bool:
+    if not await _rank_management_available(session, chat_id):
+        return False
     if await _owner_access(session, chat_id, actor_id):
         return True
     role = await _actor_role(session, chat_id, actor_id)
