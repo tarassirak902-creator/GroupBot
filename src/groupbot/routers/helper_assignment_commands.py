@@ -7,10 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole
 from groupbot.routers import admin_member_sync as admin_member_sync_module
+from groupbot.routers import admin_rank_audit_actions as admin_rank_audit_actions_module
 from groupbot.routers.admin_hierarchy import _ensure_standard_roles
 from groupbot.routers.admin_rank_target_actions import _resolve_target
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
-from groupbot.services.admin_rank_access import assignment_permission_error, can_open_rank_management
+from groupbot.services.admin_rank_access import (
+    assignment_permission_error,
+    can_open_rank_management,
+    removal_permission_error,
+)
 from groupbot.services.helper_role_policy import HELPER_ROLE, prepare_helper_telegram_state
 
 
@@ -139,6 +144,96 @@ async def _assign_helper(
     )
 
 
+async def _remove_helper(
+    message: Message,
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    raw_target: str,
+) -> None:
+    if message.from_user is None:
+        return
+    chat_id = message.chat.id
+    actor_id = message.from_user.id
+
+    async with session_factory() as session:
+        async with session.begin():
+            if not await can_open_rank_management(session, chat_id=chat_id, actor_id=actor_id):
+                await message.reply("Ваш ранг не позволяет снимать Помощников или группа сейчас недоступна.")
+                return
+
+            user, _telegram_member, error = await _resolve_target(
+                bot,
+                session,
+                chat_id=chat_id,
+                raw_target=raw_target,
+            )
+            if error or user is None:
+                await message.reply(error or "Не удалось определить пользователя.")
+                return
+
+            assignment = (
+                await session.execute(
+                    select(AdminAssignment)
+                    .where(
+                        AdminAssignment.chat_id == chat_id,
+                        AdminAssignment.user_id == user.telegram_user_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if assignment is None or assignment.role_id is None:
+                await message.reply("У этого пользователя нет ранга «Помощник».")
+                return
+
+            role = (
+                await session.execute(
+                    select(AdminRole).where(
+                        AdminRole.id == assignment.role_id,
+                        AdminRole.chat_id == chat_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if role is None or role.name != HELPER_ROLE:
+                await message.reply("У этого пользователя нет ранга «Помощник».")
+                return
+
+            permission_error = await removal_permission_error(
+                session,
+                chat_id=chat_id,
+                actor_id=actor_id,
+                assignment=assignment,
+                role=role,
+            )
+            if permission_error:
+                await message.reply(permission_error)
+                return
+
+            _telegram_demoted, error = await admin_rank_audit_actions_module._remove_assignment(
+                bot,
+                session,
+                chat_id=chat_id,
+                assignment=assignment,
+                role=role,
+                actor_id=actor_id,
+            )
+            if error:
+                await message.reply(error)
+                return
+
+    helper_text = clickable_user_display(user)
+    actor_text = clickable_identity(
+        telegram_user_id=message.from_user.id,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        username=None,
+    )
+    await message.reply(
+        f"🔹 {helper_text} снят с роли «Помощник» — снял {actor_text}.",
+        parse_mode="HTML",
+    )
+
+
 def create_helper_assignment_commands_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
@@ -170,6 +265,38 @@ def create_helper_assignment_commands_router(
         if len(parts) != 3:
             return
         await _assign_helper(
+            message,
+            bot,
+            session_factory,
+            raw_target=parts[2],
+        )
+
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.reply_to_message,
+        F.text.casefold() == "снять помощника",
+    )
+    async def remove_helper_by_reply(message: Message, bot: Bot) -> None:
+        replied = message.reply_to_message
+        if replied is None or replied.from_user is None:
+            await message.reply("Не удалось определить пользователя из сообщения.")
+            return
+        await _remove_helper(
+            message,
+            bot,
+            session_factory,
+            raw_target=str(replied.from_user.id),
+        )
+
+    @router.message(
+        F.chat.type.in_({"group", "supergroup"}),
+        F.text.regexp(r"(?i)^\s*снять\s+помощника\s+(@?[A-Za-z0-9_]+)\s*$"),
+    )
+    async def remove_helper_by_target(message: Message, bot: Bot) -> None:
+        parts = (message.text or "").strip().split(maxsplit=2)
+        if len(parts) != 3:
+            return
+        await _remove_helper(
             message,
             bot,
             session_factory,
