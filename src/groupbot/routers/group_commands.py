@@ -1,6 +1,7 @@
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -15,6 +16,15 @@ LOCKED_TEXT = (
     "Владельцу группы нужно открыть Mimorus в личных сообщениях и активировать пробный тариф TEST."
 )
 HELPER_ROLE = "Помощник"
+
+
+def _violation_message_url(message: Message) -> str | None:
+    if message.chat.username:
+        return f"https://t.me/{message.chat.username}/{message.message_id}"
+    chat_id = str(message.chat.id)
+    if chat_id.startswith("-100"):
+        return f"https://t.me/c/{chat_id[4:]}/{message.message_id}"
+    return None
 
 
 def create_group_commands_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
@@ -73,9 +83,6 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
 
             admin_id = assignment.assigned_by_user_id
             if admin_id is None:
-                # Compatibility for Helper assignments created before assigned_by_user_id
-                # started being populated consistently: recover the actor from the latest
-                # rank-assignment audit entry instead of guessing.
                 admin_id = (
                     await session.execute(
                         select(AuditLog.actor_user_id)
@@ -94,8 +101,8 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
 
             if admin_id is None:
                 await message.reply(
-                    "⚠️ Не удалось определить администратора, назначившего Помощника. "
-                    "Снимите и назначьте Помощника заново."
+                    "⚠️ Не удалось определить вашего наставника. "
+                    "Попросите администратора снять и назначить вам ранг Помощника заново."
                 )
                 return
 
@@ -128,14 +135,54 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
             )
             await session.commit()
 
-        await message.reply_to_message.reply(
-            "🚨 <b>Помощник сообщил о нарушении</b>\n\n"
+        url = _violation_message_url(message.reply_to_message)
+        markup = (
+            InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="🔗 Перейти к сообщению в группе", url=url)
+                ]]
+            )
+            if url is not None
+            else None
+        )
+        private_text = (
+            "🚨 <b>Помощник сообщил о нарушении !</b>\n\n"
             f"Помощник: {helper_text}\n"
             f"Нарушитель: {target_text}\n"
-            f"Ответственный администратор: {admin_text}\n\n"
-            f"{admin_text}, проверьте отмеченное сообщение.",
-            parse_mode="HTML",
+            "Причина: сообщение отмечено как нарушение.\n\n"
+            f"{admin_text}, проверьте отмеченное сообщение !"
         )
+        if url is None:
+            private_text += "\n\n🔗 Прямая ссылка на сообщение недоступна для этого типа группы."
+
+        try:
+            await message.bot.send_message(
+                admin_id,
+                private_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=markup,
+            )
+            try:
+                await message.bot.forward_message(
+                    chat_id=admin_id,
+                    from_chat_id=message.chat.id,
+                    message_id=message.reply_to_message.message_id,
+                )
+            except TelegramBadRequest:
+                await message.bot.copy_message(
+                    chat_id=admin_id,
+                    from_chat_id=message.chat.id,
+                    message_id=message.reply_to_message.message_id,
+                )
+        except (TelegramForbiddenError, TelegramBadRequest):
+            await message.reply(
+                "⚠️ Не удалось отправить нарушение наставнику в личные сообщения. "
+                "Ему нужно сначала открыть Mimorus в личке и нажать /start."
+            )
+            return
+
+        await message.reply("Отправил данное нарушение вашему наставнику в личные сообщения.")
 
     @router.message(Command("help"), F.chat.type.in_({"group", "supergroup"}))
     async def help_command(message: Message) -> None:
