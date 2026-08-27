@@ -75,6 +75,7 @@ from groupbot.routers.group_sections_nav import create_group_sections_nav_router
 from groupbot.routers.group_startgroup import create_group_startgroup_router
 from groupbot.routers.group_text_aliases import create_group_text_aliases_router
 from groupbot.routers.groups import create_group_router
+from groupbot.routers.helper_assignment_commands import create_helper_assignment_commands_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
 from groupbot.routers.manual_moderation import create_manual_moderation_router
 from groupbot.routers.message_operations import create_message_operations_router
@@ -145,6 +146,7 @@ async def main() -> None:
 
     dp.include_router(create_group_startgroup_router(session_factory))
     dp.include_router(create_group_router(session_factory))
+    dp.include_router(create_helper_assignment_commands_router(session_factory))
     dp.include_router(create_admin_rank_compact_actions_router(session_factory))
     dp.include_router(create_admin_rank_target_actions_router(session_factory))
     dp.include_router(create_admin_rank_group_notifications_router(session_factory))
