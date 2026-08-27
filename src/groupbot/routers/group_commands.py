@@ -7,7 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole, AuditLog, Group, GroupSettings, GroupStatus, User
 from groupbot.routers import admin_member_sync as admin_member_sync_module
+from groupbot.routers import admin_rank_audit_actions as admin_rank_audit_actions_module
 from groupbot.routers import admin_rank_compact_actions as admin_rank_compact_actions_module
+from groupbot.routers import admin_rank_group_notifications as admin_rank_group_notifications_module
 from groupbot.routers import group_control_role_actions as group_control_role_actions_module
 from groupbot.routers import group_control_ux as group_control_ux_module
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
@@ -145,10 +147,15 @@ async def _sync_role_state_with_helper_policy(
     )
 
 
-admin_member_sync_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_policy
-admin_member_sync_module._assign_role = _assign_role_with_actor_tracking
-admin_rank_compact_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_policy
-admin_rank_compact_actions_module._assign_role = _assign_role_with_actor_tracking
+for _rank_module in (
+    admin_member_sync_module,
+    admin_rank_compact_actions_module,
+    admin_rank_audit_actions_module,
+    admin_rank_group_notifications_module,
+):
+    _rank_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_policy
+    _rank_module._assign_role = _assign_role_with_actor_tracking
+
 group_control_role_actions_module._sync_managed_telegram_admins_for_role = _sync_role_with_helper_policy
 group_control_role_actions_module._sync_managed_telegram_admins_for_role_state = _sync_role_state_with_helper_policy
 group_control_ux_module._sync_managed_telegram_admins_for_role = _sync_role_with_helper_policy
