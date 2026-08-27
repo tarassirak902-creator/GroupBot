@@ -81,19 +81,13 @@ async def _render_role(
     await callback.answer("Сохранено")
 
 
-async def _sync_managed_telegram_admins_for_role(
-    callback: CallbackQuery,
+async def _managed_target_ids_for_role(
     session: AsyncSession,
     *,
     chat_id: int,
     role_id: int,
-) -> str | None:
-    """Apply current rank rights to Telegram admins promoted by Mimorus.
-
-    Telegram admins that existed before Mimorus promoted them are intentionally
-    excluded: their rights belong to the group owner and must not be overwritten.
-    """
-    target_ids = list((
+) -> list[int]:
+    return list((
         await session.execute(
             select(AdminAssignment.user_id)
             .join(
@@ -107,6 +101,21 @@ async def _sync_managed_telegram_admins_for_role(
             )
         )
     ).scalars().all())
+
+
+async def _sync_managed_telegram_admins_for_role(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    role_id: int,
+) -> str | None:
+    """Apply current rank rights to Telegram admins promoted by Mimorus.
+
+    Telegram admins that existed before Mimorus promoted them are intentionally
+    excluded: their rights belong to the group owner and must not be overwritten.
+    """
+    target_ids = await _managed_target_ids_for_role(session, chat_id=chat_id, role_id=role_id)
     if not target_ids:
         return None
 
@@ -133,6 +142,71 @@ async def _sync_managed_telegram_admins_for_role(
             return (
                 "Telegram не позволил обновить права одного из администраторов. "
                 "Изменение права ранга отменено. Проверьте права Mimorus."
+            )
+    return None
+
+
+async def _sync_managed_telegram_admins_for_role_state(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    role_id: int,
+    enabled: bool,
+) -> str | None:
+    """Disable or restore Telegram admin rights for a whole Mimorus-managed rank."""
+    target_ids = await _managed_target_ids_for_role(session, chat_id=chat_id, role_id=role_id)
+    if not target_ids:
+        return None
+
+    if enabled:
+        rights = await _telegram_rights_for_role(session, role_id)
+    else:
+        rights = {
+            "can_manage_chat": False,
+            "can_delete_messages": False,
+            "can_manage_video_chats": False,
+            "can_restrict_members": False,
+            "can_promote_members": False,
+            "can_change_info": False,
+            "can_invite_users": False,
+            "can_post_stories": False,
+            "can_edit_stories": False,
+            "can_delete_stories": False,
+            "can_post_messages": False,
+            "can_edit_messages": False,
+            "can_pin_messages": False,
+            "can_manage_topics": False,
+        }
+
+    error = await _check_bot_promotion_rights(callback.bot, chat_id, rights if enabled else {})
+    if error:
+        return error
+
+    for target_id in target_ids:
+        try:
+            member = await callback.bot.get_chat_member(chat_id, target_id)
+        except Exception:
+            return f"Не удалось проверить администратора Telegram ID {target_id}. Изменение ранга отменено."
+
+        if enabled:
+            if member.status not in {"member", "restricted", "administrator"}:
+                continue
+        elif member.status != "administrator":
+            continue
+
+        try:
+            await callback.bot.promote_chat_member(
+                chat_id=chat_id,
+                user_id=target_id,
+                is_anonymous=False,
+                **rights,
+            )
+        except Exception:
+            action = "вернуть" if enabled else "снять"
+            return (
+                f"Telegram не позволил {action} права администратора у одного из пользователей. "
+                "Изменение состояния ранга отменено. Проверьте право Mimorus назначать администраторов."
             )
     return None
 
@@ -189,14 +263,15 @@ def create_group_control_role_actions_router(
                         value = row.allowed
 
                     await session.flush()
-                    sync_error = await _sync_managed_telegram_admins_for_role(
-                        callback,
-                        session,
-                        chat_id=chat_id,
-                        role_id=role_id,
-                    )
-                    if sync_error:
-                        raise RuntimeError(sync_error)
+                    if role.is_active:
+                        sync_error = await _sync_managed_telegram_admins_for_role(
+                            callback,
+                            session,
+                            chat_id=chat_id,
+                            role_id=role_id,
+                        )
+                        if sync_error:
+                            raise RuntimeError(sync_error)
 
                     await write_audit(
                         session,
@@ -227,30 +302,50 @@ def create_group_control_role_actions_router(
         except ValueError:
             await callback.answer("Некорректное действие.", show_alert=True)
             return
+
+        sync_error: str | None = None
         async with session_factory() as session:
-            async with session.begin():
-                if not await _owner_access(session, chat_id, callback.from_user.id):
-                    await callback.answer("Недостаточно прав.", show_alert=True)
-                    return
-                role = (
-                    await session.execute(
-                        select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update()
+            try:
+                async with session.begin():
+                    if not await _owner_access(session, chat_id, callback.from_user.id):
+                        await callback.answer("Недостаточно прав.", show_alert=True)
+                        return
+                    role = (
+                        await session.execute(
+                            select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update()
+                        )
+                    ).scalar_one_or_none()
+                    if role is None:
+                        await callback.answer("Ранг не найден.", show_alert=True)
+                        return
+
+                    value = not role.is_active
+                    sync_error = await _sync_managed_telegram_admins_for_role_state(
+                        callback,
+                        session,
+                        chat_id=chat_id,
+                        role_id=role_id,
+                        enabled=value,
                     )
-                ).scalar_one_or_none()
-                if role is None:
-                    await callback.answer("Ранг не найден.", show_alert=True)
-                    return
-                role.is_active = not role.is_active
-                value = role.is_active
-                await write_audit(
-                    session,
-                    "group.admin_role_toggled",
-                    chat_id=chat_id,
-                    actor_user_id=callback.from_user.id,
-                    target_type="admin_role",
-                    target_id=str(role_id),
-                    payload={"is_active": value},
-                )
+                    if sync_error:
+                        raise RuntimeError(sync_error)
+
+                    role.is_active = value
+                    await write_audit(
+                        session,
+                        "group.admin_role_toggled",
+                        chat_id=chat_id,
+                        actor_user_id=callback.from_user.id,
+                        target_type="admin_role",
+                        target_id=str(role_id),
+                        payload={"is_active": value, "telegram_admins_synced": True},
+                    )
+            except RuntimeError as exc:
+                sync_error = str(exc)
+
+        if sync_error:
+            await callback.answer(sync_error, show_alert=True)
+            return
         await _render_role(callback, session_factory, chat_id, role_id)
 
     return router
