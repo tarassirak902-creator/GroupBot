@@ -15,6 +15,7 @@ from groupbot.routers.manual_moderation import (
     _warning_stage,
 )
 from groupbot.routers.user_display import clickable_identity
+from groupbot.services.manual_punishment_access import manual_punishment_error
 from groupbot.services.permissions import is_group_owner
 
 
@@ -64,6 +65,17 @@ async def unified_execute_action(
     duration_token: str | None = None,
 ) -> str:
     """Run moderation and return a common public notification with clickable names only."""
+    if action in {"warning", "mute", "ban"} and not getattr(actor, "is_bot", False):
+        async with session_factory() as session:
+            access_error = await manual_punishment_error(
+                session,
+                chat_id=chat_id,
+                actor_id=actor.id,
+                target_id=target.id,
+            )
+        if access_error:
+            raise ValueError(access_error)
+
     await _base_execute_action(
         bot=bot,
         session_factory=session_factory,
