@@ -157,6 +157,7 @@ class AdminAssignment(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False, index=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_user_id", ondelete="RESTRICT"), nullable=False, index=True)
     role_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("admin_roles.id", ondelete="SET NULL"), index=True)
+    assigned_by_user_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("users.telegram_user_id", ondelete="SET NULL"), index=True)
     is_reserve: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
