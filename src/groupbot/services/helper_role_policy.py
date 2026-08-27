@@ -287,6 +287,7 @@ _original_remove_role_and_managed_telegram_admin = _member_sync_module._remove_r
 _original_ensure_standard_roles = _hierarchy_module._ensure_standard_roles
 _original_telegram_rights_for_role = _member_sync_module._telegram_rights_for_role
 _original_check_bot_promotion_rights = _member_sync_module._check_bot_promotion_rights
+_original_ensure_telegram_admin_for_role = _member_sync_module._ensure_telegram_admin_for_role
 
 
 async def _standard_role_was_customized(
@@ -384,6 +385,34 @@ async def _check_bot_promotion_rights_with_standard_matrix(
     return None
 
 
+async def _ensure_telegram_admin_for_role_with_helper_cleanup(
+    bot,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    target_id: int,
+    role: AdminRole,
+    telegram_member,
+) -> str | None:
+    if role.name == HELPER_ROLE:
+        return await prepare_helper_telegram_state(
+            bot,
+            session,
+            chat_id=chat_id,
+            target_id=target_id,
+            role=role,
+            telegram_member=telegram_member,
+        )
+    return await _original_ensure_telegram_admin_for_role(
+        bot,
+        session,
+        chat_id=chat_id,
+        target_id=target_id,
+        role=role,
+        telegram_member=telegram_member,
+    )
+
+
 async def _remove_assignment_with_helper_cascade(
     bot,
     session: AsyncSession,
@@ -452,6 +481,11 @@ _member_sync_module._telegram_rights_for_role = _telegram_rights_for_role_with_s
 _member_sync_module._check_bot_promotion_rights = _check_bot_promotion_rights_with_standard_matrix
 _compact_actions_module._telegram_rights_for_role = _telegram_rights_for_role_with_standard_matrix
 _target_actions_module._telegram_rights_for_role = _telegram_rights_for_role_with_standard_matrix
+
+_member_sync_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_cleanup
+_audit_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_cleanup
+_compact_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_cleanup
+_target_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_cleanup
 
 _audit_actions_module._remove_assignment = _remove_assignment_with_helper_cascade
 _compact_actions_module._remove_assignment = _remove_assignment_with_helper_cascade
