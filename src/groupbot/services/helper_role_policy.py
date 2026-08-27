@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.models import AdminAssignment, AdminRole
+from groupbot.services.audit import write_audit
 from groupbot.telegram_admin_models import TelegramAdminPromotion
 
 HELPER_ROLE = "Помощник"
@@ -130,6 +131,49 @@ async def cleanup_helper_managed_admins(
     return None
 
 
+async def detach_helpers_from_mentor(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    mentor_id: int,
+    actor_id: int | None,
+    reason: str,
+) -> int:
+    """Remove Helper role from everyone attached to a mentor who stops being an admin."""
+    helpers = list((
+        await session.execute(
+            select(AdminAssignment)
+            .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.assigned_by_user_id == mentor_id,
+                AdminRole.name == HELPER_ROLE,
+            )
+            .with_for_update()
+        )
+    ).scalars().all())
+
+    detached = 0
+    for helper in helpers:
+        helper_id = helper.user_id
+        if helper.is_reserve:
+            helper.role_id = None
+            helper.assigned_by_user_id = None
+        else:
+            await session.delete(helper)
+        await write_audit(
+            session,
+            "group.helper_detached_from_mentor",
+            chat_id=chat_id,
+            actor_user_id=actor_id,
+            target_type="user",
+            target_id=str(helper_id),
+            payload={"mentor_user_id": mentor_id, "reason": reason},
+        )
+        detached += 1
+    return detached
+
+
 async def remember_assignment_actor(
     session: AsyncSession,
     *,
@@ -147,5 +191,20 @@ async def remember_assignment_actor(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if assignment is not None:
-        assignment.assigned_by_user_id = actor_id
+    if assignment is None:
+        return
+
+    assignment.assigned_by_user_id = actor_id
+    role = None
+    if assignment.role_id is not None:
+        role = (
+            await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
+        ).scalar_one_or_none()
+    if role is not None and role.name == HELPER_ROLE:
+        await detach_helpers_from_mentor(
+            session,
+            chat_id=chat_id,
+            mentor_id=target_id,
+            actor_id=actor_id,
+            reason="mentor_became_helper",
+        )
