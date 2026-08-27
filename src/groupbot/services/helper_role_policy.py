@@ -288,6 +288,7 @@ _original_ensure_standard_roles = _hierarchy_module._ensure_standard_roles
 _original_telegram_rights_for_role = _member_sync_module._telegram_rights_for_role
 _original_check_bot_promotion_rights = _member_sync_module._check_bot_promotion_rights
 _original_ensure_telegram_admin_for_role = _member_sync_module._ensure_telegram_admin_for_role
+_original_assign_role = _member_sync_module._assign_role
 
 
 async def _standard_role_was_customized(
@@ -413,6 +414,32 @@ async def _ensure_telegram_admin_for_role_with_helper_cleanup(
     )
 
 
+async def _assign_role_with_actor_tracking(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    target_id: int,
+    role: AdminRole,
+    actor_id: int,
+) -> str | None:
+    error = await _original_assign_role(
+        session,
+        chat_id=chat_id,
+        target_id=target_id,
+        role=role,
+        actor_id=actor_id,
+    )
+    if error is not None:
+        return error
+    await remember_assignment_actor(
+        session,
+        chat_id=chat_id,
+        target_id=target_id,
+        actor_id=actor_id,
+    )
+    return None
+
+
 async def _remove_assignment_with_helper_cascade(
     bot,
     session: AsyncSession,
@@ -486,6 +513,11 @@ _member_sync_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for
 _audit_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_cleanup
 _compact_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_cleanup
 _target_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_cleanup
+
+_member_sync_module._assign_role = _assign_role_with_actor_tracking
+_audit_actions_module._assign_role = _assign_role_with_actor_tracking
+_compact_actions_module._assign_role = _assign_role_with_actor_tracking
+_target_actions_module._assign_role = _assign_role_with_actor_tracking
 
 _audit_actions_module._remove_assignment = _remove_assignment_with_helper_cascade
 _compact_actions_module._remove_assignment = _remove_assignment_with_helper_cascade
