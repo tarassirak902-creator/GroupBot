@@ -12,14 +12,6 @@ CHAT_ADMIN = "Администратор чата"
 VOICE_ADMIN = "Администратор войса"
 HELPER = "Помощник"
 
-# Lower number means higher position. Chat and voice administrators are equal.
-STANDARD_RANK_LEVEL = {
-    DEPUTY: 1,
-    CHIEF: 2,
-    CHAT_ADMIN: 3,
-    VOICE_ADMIN: 3,
-}
-
 
 async def _role_name(session: AsyncSession, *, chat_id: int, user_id: int) -> str | None:
     return (
@@ -66,15 +58,23 @@ async def manual_punishment_error(
     if actor_id == target_id:
         return "Нельзя применить наказание к себе."
 
+    # Mimorus administration is managed through ranks, not moderation punishments.
+    # Owner and all active administrative ranks are immune to warning/mute/ban.
     if await is_group_owner(session, chat_id, target_id):
-        return "Владельца группы нельзя наказать."
-
-    if await is_group_owner(session, chat_id, actor_id):
-        return None
+        return "⛔ Нельзя наказать администратора Mimorus. Сначала снимите пользователя с должности администратора."
 
     actor_role = await _role_name(session, chat_id=chat_id, user_id=actor_id)
     if actor_role == HELPER:
         return "Помощник не может выдавать наказания. Используйте ответом на сообщение команду «нарушение»."
+
+    target_role = await _role_name(session, chat_id=chat_id, user_id=target_id)
+    if target_role is not None and target_role != HELPER:
+        return "⛔ Нельзя наказать администратора Mimorus. Сначала снимите пользователя с должности администратора."
+
+    # Helper is not an administrator and is moderated as a regular participant.
+    # Special statuses keep their stricter punishment rules.
+    if await is_group_owner(session, chat_id, actor_id):
+        return None
 
     special = await _special_statuses(session, chat_id)
     vip_ids = _ids(special.get("vip"))
@@ -90,23 +90,4 @@ async def manual_punishment_error(
             return None
         return "🛡 Недотрогу может наказать только Владелец группы, Зам. владельца или Глав. админ."
 
-    target_role = await _role_name(session, chat_id=chat_id, user_id=target_id)
-    if target_role is None or target_role == HELPER:
-        return None
-
-    actor_level = STANDARD_RANK_LEVEL.get(actor_role or "")
-    target_level = STANDARD_RANK_LEVEL.get(target_role)
-
-    if target_level is None:
-        return "Пользователя с собственным административным рангом может наказать только Владелец группы, пока для таких рангов не задана иерархия."
-
-    if actor_level is None:
-        return "Ваш административный ранг не имеет места в стандартной иерархии и не может наказывать других администраторов."
-
-    if actor_level < target_level:
-        return None
-
-    if actor_level == target_level:
-        return "Нельзя наказать администратора равного вам уровня."
-
-    return "Нельзя наказать администратора, который находится выше вас по иерархии."
+    return None
