@@ -8,10 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import AdminAssignment, AdminRole, AuditLog, Group, GroupSettings, GroupStatus, User
 from groupbot.routers import admin_member_sync as admin_member_sync_module
 from groupbot.routers import admin_rank_compact_actions as admin_rank_compact_actions_module
+from groupbot.routers import group_control_role_actions as group_control_role_actions_module
+from groupbot.routers import group_control_ux as group_control_ux_module
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import (
     HELPER_ROLE,
+    cleanup_helper_managed_admins,
     prepare_helper_telegram_state,
     remember_assignment_actor,
 )
@@ -24,11 +27,12 @@ LOCKED_TEXT = (
 )
 
 
-# admin_member_sync and admin_rank_compact_actions are imported before this router in
-# main.py. Patch both references once so every existing assignment path uses the same
-# Helper policy without duplicating the large rank-assignment handlers.
+# These modules are imported before group_commands in main.py. Patch their references
+# once so every existing assignment/settings path uses the same Helper policy.
 _original_ensure_telegram_admin_for_role = admin_member_sync_module._ensure_telegram_admin_for_role
 _original_assign_role = admin_member_sync_module._assign_role
+_original_sync_role = group_control_role_actions_module._sync_managed_telegram_admins_for_role
+_original_sync_role_state = group_control_role_actions_module._sync_managed_telegram_admins_for_role_state
 
 
 async def _ensure_telegram_admin_for_role_with_helper_policy(
@@ -85,10 +89,70 @@ async def _assign_role_with_actor_tracking(
     return error
 
 
+async def _sync_role_with_helper_policy(
+    callback,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    role_id: int,
+) -> str | None:
+    role_name = (
+        await session.execute(
+            select(AdminRole.name).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
+        )
+    ).scalar_one_or_none()
+    if role_name == HELPER_ROLE:
+        return await cleanup_helper_managed_admins(
+            callback.bot,
+            session,
+            chat_id=chat_id,
+            role_id=role_id,
+        )
+    return await _original_sync_role(
+        callback,
+        session,
+        chat_id=chat_id,
+        role_id=role_id,
+    )
+
+
+async def _sync_role_state_with_helper_policy(
+    callback,
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    role_id: int,
+    enabled: bool,
+) -> str | None:
+    role_name = (
+        await session.execute(
+            select(AdminRole.name).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id)
+        )
+    ).scalar_one_or_none()
+    if role_name == HELPER_ROLE:
+        return await cleanup_helper_managed_admins(
+            callback.bot,
+            session,
+            chat_id=chat_id,
+            role_id=role_id,
+        )
+    return await _original_sync_role_state(
+        callback,
+        session,
+        chat_id=chat_id,
+        role_id=role_id,
+        enabled=enabled,
+    )
+
+
 admin_member_sync_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_policy
 admin_member_sync_module._assign_role = _assign_role_with_actor_tracking
 admin_rank_compact_actions_module._ensure_telegram_admin_for_role = _ensure_telegram_admin_for_role_with_helper_policy
 admin_rank_compact_actions_module._assign_role = _assign_role_with_actor_tracking
+group_control_role_actions_module._sync_managed_telegram_admins_for_role = _sync_role_with_helper_policy
+group_control_role_actions_module._sync_managed_telegram_admins_for_role_state = _sync_role_state_with_helper_policy
+group_control_ux_module._sync_managed_telegram_admins_for_role = _sync_role_with_helper_policy
+group_control_ux_module._sync_managed_telegram_admins_for_role_state = _sync_role_state_with_helper_policy
 
 
 def _violation_message_url(message: Message) -> str | None:
