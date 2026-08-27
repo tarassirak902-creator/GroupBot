@@ -5,12 +5,12 @@ from aiogram.types import Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import Group, GroupOwner, GroupSettings, GroupStatus, NetworkAdmin, User
+from groupbot.models import AdminAssignment, Group, GroupOwner, GroupStatus, NetworkAdmin, User
 from groupbot.moderation_models import ModerationAction
 from groupbot.network_models import Network, NetworkGroup
 from groupbot.routers.user_display import clickable_user_display
+from groupbot.services.manual_punishment_access import manual_punishment_error
 from groupbot.services.moderation_notifications import unified_execute_action
-from groupbot.services.protected_members import is_protected_member
 from groupbot.services.subscriptions import active_subscription_for_group
 
 
@@ -97,19 +97,33 @@ async def _protected_in_group(
     *,
     chat_id: int,
     user_id: int,
+    actor_id: int,
 ) -> bool:
-    config = (
-        await session.execute(
-            select(GroupSettings.moderation_config).where(GroupSettings.chat_id == chat_id)
-        )
-    ).scalar_one_or_none() or {}
-    if await is_protected_member(
+    # VIP/Nedotroga manual-punishment rules are evaluated using the actor's
+    # local rank in this exact group. Network-admin status alone grants no
+    # special-status override.
+    if await manual_punishment_error(
         session,
         chat_id=chat_id,
-        user_id=user_id,
-        moderation_config=config,
+        actor_id=actor_id,
+        target_id=user_id,
     ):
         return True
+
+    # Preserve the existing protection for Mimorus administrators. The
+    # rank-vs-rank manual punishment matrix has not been approved yet.
+    assignment = (
+        await session.execute(
+            select(AdminAssignment.id).where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.user_id == user_id,
+                AdminAssignment.role_id.is_not(None),
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if assignment is not None:
+        return True
+
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except Exception:
@@ -140,6 +154,7 @@ async def _send_network_action(
                         session,
                         chat_id=chat_id,
                         user_id=target.id,
+                        actor_id=actor.id,
                     ):
                         protected += 1
                         continue
