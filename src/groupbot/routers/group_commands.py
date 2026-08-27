@@ -1,8 +1,8 @@
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
+from aiogram.filters import Command, Filter
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminAssignment, AdminRole, AuditLog, Group, GroupSettings, GroupStatus, User
@@ -12,6 +12,7 @@ from groupbot.routers import admin_rank_compact_actions as admin_rank_compact_ac
 from groupbot.routers import admin_rank_group_notifications as admin_rank_group_notifications_module
 from groupbot.routers import group_control_role_actions as group_control_role_actions_module
 from groupbot.routers import group_control_ux as group_control_ux_module
+from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_identity, clickable_user_display
 from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import (
@@ -162,6 +163,32 @@ group_control_ux_module._sync_managed_telegram_admins_for_role = _sync_role_with
 group_control_ux_module._sync_managed_telegram_admins_for_role_state = _sync_role_state_with_helper_policy
 
 
+class HelperRoleCardFilter(Filter):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.session_factory = session_factory
+
+    async def __call__(self, callback: CallbackQuery) -> bool:
+        data = callback.data or ""
+        if not (data.startswith("hier:role:") or data.startswith("gctl:role:")):
+            return False
+        parts = data.split(":", 3)
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except (ValueError, IndexError):
+            return False
+        async with self.session_factory() as session:
+            role_name = (
+                await session.execute(
+                    select(AdminRole.name).where(
+                        AdminRole.id == role_id,
+                        AdminRole.chat_id == chat_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        return role_name == HELPER_ROLE
+
+
 def _violation_message_url(message: Message) -> str | None:
     if message.chat.username:
         return f"https://t.me/{message.chat.username}/{message.message_id}"
@@ -193,6 +220,60 @@ def create_group_commands_router(session_factory: async_sessionmaker[AsyncSessio
         elif reason == "group_inactive":
             await message.answer("⚠️ Группа не подключена или отключена владельцем.")
         return False
+
+    @router.callback_query(HelperRoleCardFilter(session_factory))
+    async def helper_role_card(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":", 3)
+        try:
+            chat_id = int(parts[2])
+            role_id = int(parts[3])
+        except (ValueError, IndexError):
+            return
+
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
+            role = (
+                await session.execute(
+                    select(AdminRole).where(
+                        AdminRole.id == role_id,
+                        AdminRole.chat_id == chat_id,
+                        AdminRole.name == HELPER_ROLE,
+                    )
+                )
+            ).scalar_one_or_none()
+            if role is None:
+                await callback.answer("Ранг Помощник не найден.", show_alert=True)
+                return
+            count = (
+                await session.execute(
+                    select(func.count()).select_from(AdminAssignment).where(
+                        AdminAssignment.chat_id == chat_id,
+                        AdminAssignment.role_id == role_id,
+                    )
+                )
+            ).scalar_one()
+
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "🔹 <b>Помощник</b>\n\n"
+                "Помощник — не администратор Telegram и не модератор. Он помогает своему наставнику находить нарушения в группе.\n\n"
+                f"Назначено Помощников: <b>{count}</b>\n\n"
+                "Как работает:\n"
+                "• Помощник закрепляется за конкретным администратором-наставником.\n"
+                "• Ответом на нарушающее сообщение пишет <code>нарушение</code>.\n"
+                "• Mimorus отправляет наставнику карточку нарушения в личные сообщения и пересылает само сообщение.\n"
+                "• Предупреждения, муты, баны, удаление и другие модерационные команды Помощнику недоступны.\n\n"
+                "Назначать Помощников могут Владелец, Зам. владельца, Глав. админ, Администратор чата и Администратор войса в пределах утверждённой иерархии.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="➕ Назначить Помощника", callback_data=f"hier:assign:{chat_id}:{role_id}")],
+                    [InlineKeyboardButton(text="📋 Назначенные Помощники", callback_data=f"hier:assigned:{chat_id}:{role_id}")],
+                    [InlineKeyboardButton(text="◀️ Ранги администрации", callback_data=f"gctl:roles:{chat_id}")],
+                ]),
+            )
+        await callback.answer()
 
     @router.message(
         F.chat.type.in_({"group", "supergroup"}),
