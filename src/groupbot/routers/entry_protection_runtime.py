@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, ChatPermissions, Message
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,13 +17,17 @@ from groupbot.routers.entry_protection import (
     _apply_entry_action,
     _captcha_cfg,
     _captcha_challenge,
+    _name_only,
     _notify_raid,
+    _render_antiraid,
     _render_captcha,
     _save_config,
+    _seconds_label,
 )
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
 from groupbot.routers.manual_moderation import _group_ready, _unmuted_permissions
 from groupbot.services.protected_members import is_protected_member
+from groupbot.services.protection_schedule import protection_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -59,23 +63,31 @@ async def _cancel_group_challenges(
         rows = list((await session.execute(
             select(EntryCaptchaChallenge).where(EntryCaptchaChallenge.chat_id == chat_id)
         )).scalars().all())
-        if rows:
-            async with session.begin_nested():
-                await session.execute(
-                    delete(EntryCaptchaChallenge).where(EntryCaptchaChallenge.chat_id == chat_id)
-                )
-            await session.commit()
+        await session.execute(
+            delete(EntryCaptchaChallenge).where(EntryCaptchaChallenge.chat_id == chat_id)
+        )
+        await session.commit()
 
     for row in rows:
         try:
             await _restore_member_permissions(bot, row.chat_id, row.user_id)
         except Exception:
             logger.info(
-                "Could not restore permissions after captcha disable chat_id=%s user_id=%s",
+                "Could not restore permissions after captcha cancellation chat_id=%s user_id=%s",
                 row.chat_id,
                 row.user_id,
             )
         await _delete_challenge_message(bot, row.chat_id, row.message_id)
+
+
+async def _clear_raid_runtime(
+    session_factory: async_sessionmaker[AsyncSession],
+    chat_id: int,
+) -> None:
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(delete(EntryRaidState).where(EntryRaidState.chat_id == chat_id))
+            await session.execute(delete(EntryJoinEvent).where(EntryJoinEvent.chat_id == chat_id))
 
 
 async def _captcha_timeout_task(
@@ -141,29 +153,26 @@ async def _start_challenge(
         ).scalar_one_or_none()
         old_message_id = old.message_id if old is not None else None
         if old is not None:
-            async with session.begin_nested():
-                await session.delete(old)
+            await session.delete(old)
             await session.commit()
 
     if old_message_id is not None:
         await _delete_challenge_message(bot, chat_id, old_message_id)
 
+    challenge = None
     try:
         await bot.restrict_chat_member(
             chat_id,
             user.id,
-            permissions=(await _group_default_permissions(bot, chat_id)).model_copy(
-                update={"can_send_messages": False}
-            ),
+            permissions=ChatPermissions(can_send_messages=False),
         )
         challenge_text, markup, expected = _captcha_challenge(chat_id, user.id, captcha["mode"])
         challenge = await bot.send_message(
             chat_id,
             (
-                f"🧩 <a href=\"tg://user?id={user.id}\">"
-                f"{(user.full_name or 'Участник')}</a>, пройдите проверку.\n\n"
+                f"🧩 {_name_only(user)}, пройдите проверку.\n\n"
                 f"{challenge_text}\n\n"
-                f"На прохождение: <b>{captcha['timeout_seconds']} сек.</b>."
+                f"На прохождение: <b>{_seconds_label(int(captcha['timeout_seconds']))}</b>."
             ),
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -208,6 +217,8 @@ async def _start_challenge(
         )
     except Exception:
         logger.exception("Could not start captcha chat_id=%s user_id=%s", chat_id, user.id)
+        if challenge is not None:
+            await _delete_challenge_message(bot, chat_id, challenge.message_id)
         try:
             await _restore_member_permissions(bot, chat_id, user.id)
         except Exception:
@@ -229,7 +240,26 @@ async def restore_entry_protection_runtime(
             )
         challenges = list((await session.execute(select(EntryCaptchaChallenge))).scalars().all())
 
+    restored = 0
+    cancelled_chat_ids: set[int] = set()
     for row in challenges:
+        async with session_factory() as session:
+            root = (
+                await session.execute(
+                    select(GroupSettings.moderation_config).where(GroupSettings.chat_id == row.chat_id)
+                )
+            ).scalar_one_or_none() or {}
+        persistent_cfg = dict(root.get("captcha") or {})
+        effective_enabled = protection_enabled(
+            root,
+            "captcha",
+            bool(persistent_cfg.get("enabled", False)),
+        )
+        if not effective_enabled:
+            if row.chat_id not in cancelled_chat_ids:
+                await _cancel_group_challenges(bot, session_factory, row.chat_id)
+                cancelled_chat_ids.add(row.chat_id)
+            continue
         asyncio.create_task(
             _captcha_timeout_task(
                 bot,
@@ -239,9 +269,10 @@ async def restore_entry_protection_runtime(
                 deadline_at=row.deadline_at,
             )
         )
+        restored += 1
 
-    if challenges:
-        logger.info("Restored %s pending captcha challenge(s)", len(challenges))
+    if restored:
+        logger.info("Restored %s pending captcha challenge(s)", restored)
 
 
 def create_persistent_entry_runtime_router(
@@ -266,6 +297,24 @@ def create_persistent_entry_runtime_router(
         if not enabled:
             await _cancel_group_challenges(bot, session_factory, chat_id)
         await _render_captcha(callback, session_factory, chat_id)
+
+    @router.callback_query(F.data.startswith("entry:raid_toggle:"))
+    async def raid_toggle(callback: CallbackQuery) -> None:
+        chat_id = int((callback.data or "").rsplit(":", 1)[1])
+        enabled = False
+        async with session_factory() as session:
+            async with session.begin():
+                if not await _owner_access(session, chat_id, callback.from_user.id):
+                    await callback.answer("Недостаточно прав.", show_alert=True)
+                    return
+                settings = await _ensure_group_settings(session, chat_id)
+                cfg = _antiraid_cfg(settings.moderation_config)
+                cfg["enabled"] = not cfg["enabled"]
+                enabled = bool(cfg["enabled"])
+                await _save_config(session, chat_id, "antiraid", cfg)
+        if not enabled:
+            await _clear_raid_runtime(session_factory, chat_id)
+        await _render_antiraid(callback, session_factory, chat_id)
 
     @router.callback_query(F.data.startswith("captcha:answer:"))
     async def captcha_answer(callback: CallbackQuery, bot: Bot) -> None:
