@@ -83,29 +83,29 @@ async def _drop_stale_assignment(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if assignment is None:
-        return
 
     role = None
-    if assignment.role_id is not None:
-        role = (
-            await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
-        ).scalar_one_or_none()
+    was_reserve = False
+    if assignment is not None:
+        was_reserve = bool(assignment.is_reserve)
+        if assignment.role_id is not None:
+            role = (
+                await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
+            ).scalar_one_or_none()
 
-    was_reserve = bool(assignment.is_reserve)
-    if role is not None and role.name != HELPER_ROLE:
-        await detach_helpers_from_mentor(
-            session,
-            chat_id=chat_id,
-            mentor_id=user_id,
-            actor_id=None,
-            reason=f"mentor_{status}",
-        )
+        if role is not None and role.name != HELPER_ROLE:
+            await detach_helpers_from_mentor(
+                session,
+                chat_id=chat_id,
+                mentor_id=user_id,
+                actor_id=None,
+                reason=f"mentor_{status}",
+            )
 
-    if was_reserve:
-        assignment.role_id = None
-        assignment.assigned_by_user_id = None
-    else:
+        # Reserve administrator is valid only while the user is a real active
+        # Telegram administrator. Leaving/banning therefore removes both the
+        # Mimorus rank and the independent reserve flag instead of preserving a
+        # ghost reserve assignment.
         await session.delete(assignment)
 
     promotion = (
@@ -121,19 +121,83 @@ async def _drop_stale_assignment(
     if promotion is not None:
         await session.delete(promotion)
 
-    await write_audit(
-        session,
-        "group.admin_assignment_removed_on_member_exit",
-        chat_id=chat_id,
-        actor_user_id=None,
-        target_type="user",
-        target_id=str(user_id),
-        payload={
-            "member_status": status,
-            "role_name": role.name if role is not None else None,
-            "was_reserve": was_reserve,
-        },
-    )
+    if assignment is not None or promotion is not None:
+        await write_audit(
+            session,
+            "group.admin_assignment_removed_on_member_exit",
+            chat_id=chat_id,
+            actor_user_id=None,
+            target_type="user",
+            target_id=str(user_id),
+            payload={
+                "member_status": status,
+                "role_name": role.name if role is not None else None,
+                "was_reserve": was_reserve,
+                "telegram_promotion_tracking_removed": promotion is not None,
+            },
+        )
+
+
+async def _release_telegram_admin_state_after_manual_demotion(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    user_id: int,
+    actor_id: int | None,
+) -> tuple[bool, bool]:
+    """Respect an external/manual Telegram demotion while user remains in chat."""
+    assignment = (
+        await session.execute(
+            select(AdminAssignment)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.user_id == user_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    reserve_cleared = False
+    if assignment is not None and assignment.is_reserve:
+        reserve_cleared = True
+        if assignment.role_id is None:
+            await session.delete(assignment)
+        else:
+            assignment.is_reserve = False
+        await write_audit(
+            session,
+            "group.reserve_admin_cleared",
+            chat_id=chat_id,
+            actor_user_id=actor_id,
+            target_type="user",
+            target_id=str(user_id),
+            payload={"reason": "telegram_admin_status_removed"},
+        )
+
+    promotion = (
+        await session.execute(
+            select(TelegramAdminPromotion)
+            .where(
+                TelegramAdminPromotion.chat_id == chat_id,
+                TelegramAdminPromotion.user_id == user_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    promotion_released = promotion is not None
+    if promotion is not None:
+        await session.delete(promotion)
+        await write_audit(
+            session,
+            "group.telegram_admin_promotion_tracking_released",
+            chat_id=chat_id,
+            actor_user_id=actor_id,
+            target_type="user",
+            target_id=str(user_id),
+            payload={"reason": "telegram_admin_status_removed"},
+        )
+
+    return reserve_cleared, promotion_released
 
 
 def create_member_status_sync_router(
@@ -177,7 +241,10 @@ def create_member_status_sync_router(
                     status=new_status,
                     rejoined=(old_status != MemberStatus.member.value and new_status == MemberStatus.member.value),
                 )
+
                 removed_special_statuses: list[str] = []
+                reserve_cleared = False
+                promotion_tracking_released = False
                 if new_status in {MemberStatus.left.value, MemberStatus.banned.value}:
                     await _drop_stale_assignment(
                         session,
@@ -203,6 +270,15 @@ def create_member_status_sync_router(
                                 "statuses": removed_special_statuses,
                             },
                         )
+                elif raw_old == "administrator" and raw_new != "administrator":
+                    reserve_cleared, promotion_tracking_released = (
+                        await _release_telegram_admin_state_after_manual_demotion(
+                            session,
+                            chat_id=event.chat.id,
+                            user_id=user.id,
+                            actor_id=actor_id,
+                        )
+                    )
 
                 await write_audit(
                     session,
@@ -217,6 +293,8 @@ def create_member_status_sync_router(
                         "old_member_status": old_status,
                         "new_member_status": new_status,
                         "special_statuses_removed": removed_special_statuses,
+                        "reserve_cleared": reserve_cleared,
+                        "telegram_promotion_tracking_released": promotion_tracking_released,
                     },
                 )
 
