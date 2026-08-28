@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 from html import escape
 
 from aiogram import Bot
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from groupbot.moderation_models import ModerationAction
 from groupbot.routers.manual_moderation import (
     _duration,
     _execute_action as _base_execute_action,
@@ -54,6 +56,27 @@ def _warning_punishment(count: int, limit: int) -> str | None:
     return None
 
 
+async def _clear_unban_state(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    chat_id: int,
+    target_id: int,
+) -> None:
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(ModerationAction)
+                .where(
+                    ModerationAction.chat_id == chat_id,
+                    ModerationAction.target_user_id == target_id,
+                    ModerationAction.action.in_(("ban", "mute", "warning")),
+                    ModerationAction.is_active.is_(True),
+                )
+                .values(is_active=False, revoked_at=now)
+            )
+
+
 async def unified_execute_action(
     *,
     bot: Bot,
@@ -93,6 +116,14 @@ async def unified_execute_action(
     # grants more capabilities than the owner configured for ordinary members.
     if action == "unmute":
         await restore_member_permissions(bot, chat_id, target.id)
+    elif action == "unban":
+        # Unban is a full release from the punishment chain. Warning-scale mutes
+        # may still overlap the ban, so close all three active states together.
+        await _clear_unban_state(
+            session_factory,
+            chat_id=chat_id,
+            target_id=target.id,
+        )
 
     target_text = _notification_identity(target)
     async with session_factory() as session:
