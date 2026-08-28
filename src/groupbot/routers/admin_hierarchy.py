@@ -17,7 +17,9 @@ from groupbot.routers.group_control import (
     _owner_access,
     _trial_rank_limit,
 )
+from groupbot.routers.member_status_guard import is_regular_group_member
 from groupbot.services.audit import write_audit
+from groupbot.services.special_statuses import special_status_ids
 from groupbot.services.users import upsert_user
 
 
@@ -184,8 +186,6 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         await state.clear()
         await _render_roles(callback, session_factory, chat_id)
 
-    # Intercept custom-role creation so the TEST limit counts only custom roles,
-    # not the five mandatory standard hierarchy roles.
     @router.callback_query(F.data.startswith("gctl:role_create:"))
     async def custom_role_create(callback: CallbackQuery, state: FSMContext) -> None:
         try:
@@ -426,9 +426,8 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
                 return
             settings = await _ensure_group_settings(session, chat_id)
             cfg = dict(settings.moderation_config or {})
-            statuses = dict(cfg.get("special_statuses") or {})
-            vip = list(statuses.get("vip") or [])
-            ned = list(statuses.get("nedotroga") or [])
+            vip = special_status_ids(cfg, "vip")
+            ned = special_status_ids(cfg, "nedotroga")
         if callback.message is not None:
             await callback.message.edit_text(
                 "💎 <b>Особые статусы</b>\n\n"
@@ -454,9 +453,12 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         if status not in SPECIAL_STATUSES:
             return
         async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
             settings = await _ensure_group_settings(session, chat_id)
             cfg = dict(settings.moderation_config or {})
-            ids = [int(uid) for uid in list((cfg.get("special_statuses") or {}).get(status) or [])]
+            ids = sorted(special_status_ids(cfg, status))
             users = []
             if ids:
                 users = (await session.execute(select(User).where(User.telegram_user_id.in_(ids)))).scalars().all()
@@ -492,10 +494,14 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
             return
         if status not in SPECIAL_STATUSES:
             return
+        async with session_factory() as session:
+            if not await _owner_access(session, chat_id, callback.from_user.id):
+                await callback.answer("Недостаточно прав.", show_alert=True)
+                return
         await state.set_state(HierarchyState.waiting_special_user_id)
         await state.update_data(special_chat_id=chat_id, special_status=status)
         if callback.message is not None:
-            await callback.message.answer(f"Отправьте Telegram ID пользователя для статуса {SPECIAL_STATUSES[status]}.")
+            await callback.message.answer(f"Отправьте Telegram ID обычного участника для статуса {SPECIAL_STATUSES[status]}.")
         await callback.answer()
 
     @router.message(HierarchyState.waiting_special_user_id, F.chat.type == "private")
@@ -511,13 +517,17 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
         data = await state.get_data()
         chat_id = int(data["special_chat_id"])
         status = str(data["special_status"])
+        if status not in SPECIAL_STATUSES:
+            await state.clear()
+            await message.answer("Неизвестный особый статус.")
+            return
         try:
             member = await bot.get_chat_member(chat_id, target_id)
-            if member.status in {"left", "kicked"}:
-                await message.answer("Этот пользователь сейчас не состоит в группе.")
+            if not await is_regular_group_member(bot, chat_id, target_id):
+                await message.answer("VIP и Недотрога назначаются только обычным участникам группы.")
                 return
         except Exception:
-            await message.answer("Не удалось подтвердить участника группы. Проверьте ID.")
+            await message.answer("Не удалось подтвердить обычного участника группы. Проверьте ID.")
             return
         async with session_factory() as session:
             async with session.begin():
@@ -529,10 +539,9 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
                 settings = await _ensure_group_settings(session, chat_id)
                 cfg = dict(settings.moderation_config or {})
                 statuses = dict(cfg.get("special_statuses") or {})
-                ids = [int(uid) for uid in list(statuses.get(status) or [])]
-                if target_id not in ids:
-                    ids.append(target_id)
-                statuses[status] = ids
+                ids = special_status_ids(cfg, status)
+                ids.add(target_id)
+                statuses[status] = sorted(ids)
                 cfg["special_statuses"] = statuses
                 settings.moderation_config = cfg
                 await write_audit(
@@ -554,6 +563,9 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
             chat_id = int(parts[2]); status = parts[3]; target_id = int(parts[4])
         except (ValueError, IndexError):
             return
+        if status not in SPECIAL_STATUSES:
+            await callback.answer("Неизвестный особый статус.", show_alert=True)
+            return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id):
@@ -562,8 +574,9 @@ def create_admin_hierarchy_router(session_factory: async_sessionmaker[AsyncSessi
                 settings = await _ensure_group_settings(session, chat_id)
                 cfg = dict(settings.moderation_config or {})
                 statuses = dict(cfg.get("special_statuses") or {})
-                ids = [int(uid) for uid in list(statuses.get(status) or []) if int(uid) != target_id]
-                statuses[status] = ids
+                ids = special_status_ids(cfg, status)
+                ids.discard(target_id)
+                statuses[status] = sorted(ids)
                 cfg["special_statuses"] = statuses
                 settings.moderation_config = cfg
                 await write_audit(
