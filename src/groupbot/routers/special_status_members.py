@@ -10,6 +10,7 @@ from groupbot.routers.admin_hierarchy import SPECIAL_STATUSES
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
 from groupbot.routers.member_status_guard import is_regular_group_member
 from groupbot.services.audit import write_audit
+from groupbot.services.special_statuses import special_status_ids
 
 
 def _label(user: User) -> str:
@@ -94,13 +95,20 @@ def create_special_status_members_router(session_factory: async_sessionmaker[Asy
                 settings = await _ensure_group_settings(session, chat_id)
                 config = dict(settings.moderation_config or {})
                 statuses = dict(config.get("special_statuses") or {})
-                ids = [int(value) for value in statuses.get(status, [])]
-                if user_id not in ids:
-                    ids.append(user_id)
-                statuses[status] = ids
+                ids = special_status_ids(config, status)
+                ids.add(user_id)
+                statuses[status] = sorted(ids)
                 config["special_statuses"] = statuses
                 settings.moderation_config = config
-                await write_audit(session, "group.special_status_added", chat_id=chat_id, actor_user_id=callback.from_user.id, target_type="user", target_id=str(user_id), payload={"status": status})
+                await write_audit(
+                    session,
+                    "group.special_status_added",
+                    chat_id=chat_id,
+                    actor_user_id=callback.from_user.id,
+                    target_type="user",
+                    target_id=str(user_id),
+                    payload={"status": status},
+                )
         await callback.answer(f"✅ {SPECIAL_STATUSES[status]} назначен.")
         if callback.message is not None:
             await callback.message.edit_text(
