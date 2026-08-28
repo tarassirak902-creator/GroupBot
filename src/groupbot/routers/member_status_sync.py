@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import AdminAssignment, AdminRole, Group, GroupMember, MemberStatus
 from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import HELPER_ROLE, detach_helpers_from_mentor
+from groupbot.services.special_statuses import remove_special_statuses_for_user
 from groupbot.services.users import upsert_user
 from groupbot.telegram_admin_models import TelegramAdminPromotion
 
@@ -176,6 +177,7 @@ def create_member_status_sync_router(
                     status=new_status,
                     rejoined=(old_status != MemberStatus.member.value and new_status == MemberStatus.member.value),
                 )
+                removed_special_statuses: list[str] = []
                 if new_status in {MemberStatus.left.value, MemberStatus.banned.value}:
                     await _drop_stale_assignment(
                         session,
@@ -183,6 +185,24 @@ def create_member_status_sync_router(
                         user_id=user.id,
                         status=new_status,
                     )
+                    removed_special_statuses = await remove_special_statuses_for_user(
+                        session,
+                        chat_id=event.chat.id,
+                        user_id=user.id,
+                    )
+                    if removed_special_statuses:
+                        await write_audit(
+                            session,
+                            "group.special_statuses_removed_on_member_exit",
+                            chat_id=event.chat.id,
+                            actor_user_id=None,
+                            target_type="user",
+                            target_id=str(user.id),
+                            payload={
+                                "member_status": new_status,
+                                "statuses": removed_special_statuses,
+                            },
+                        )
 
                 await write_audit(
                     session,
@@ -196,6 +216,7 @@ def create_member_status_sync_router(
                         "new_telegram_status": raw_new,
                         "old_member_status": old_status,
                         "new_member_status": new_status,
+                        "special_statuses_removed": removed_special_statuses,
                     },
                 )
 
