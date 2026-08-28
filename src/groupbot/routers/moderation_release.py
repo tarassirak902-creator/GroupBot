@@ -10,9 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import User
 from groupbot.moderation_models import ModerationAction
-from groupbot.routers.manual_moderation import _group_ready, _unmuted_permissions
+from groupbot.routers.manual_moderation import _group_ready
 from groupbot.routers.user_display import clickable_identity
 from groupbot.services.audit import write_audit
+from groupbot.services.moderation_state import restore_member_permissions
 from groupbot.services.permissions import has_permission, is_group_owner
 from groupbot.services.users import upsert_user
 
@@ -172,7 +173,7 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
                 return
 
             if command == "размут":
-                await bot.restrict_chat_member(message.chat.id, target_id, permissions=_unmuted_permissions())
+                await restore_member_permissions(bot, message.chat.id, target_id)
                 async with session_factory() as session:
                     async with session.begin():
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="mute")
