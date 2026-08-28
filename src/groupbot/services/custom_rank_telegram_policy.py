@@ -5,11 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole
 from groupbot.routers import admin_member_sync as _member_sync_module
+from groupbot.routers import admin_punishment_lists as _punishment_lists_module
 from groupbot.routers import group_control_role_actions as _role_actions_module
 from groupbot.routers import group_control_ux as _role_ux_module
+from groupbot.routers import manual_moderation as _manual_moderation_module
 from groupbot.routers.admin_hierarchy import STANDARD_NAMES
 from groupbot.routers.group_control import KNOWN_PERMISSIONS
+from groupbot.services import helper_role_policy as _helper_role_policy
 from groupbot.services.helper_role_policy import NO_ADMIN_RIGHTS
+from groupbot.services.permissions import has_permission
 from groupbot.telegram_admin_models import TelegramAdminPromotion
 
 
@@ -19,6 +23,25 @@ from groupbot.telegram_admin_models import TelegramAdminPromotion
 KNOWN_PERMISSIONS[:] = [
     (key, title) for key, title in KNOWN_PERMISSIONS if key != "stats"
 ]
+
+# Keep default role permissions aligned with the same catalog. Historical rows
+# named "stats" may stay in the database, but they are inert and no longer
+# displayed or consulted for full group statistics.
+_helper_role_policy.STANDARD_PERMISSION_KEYS.discard("stats")
+_helper_role_policy.STANDARD_PERMISSION_KEYS.add("punishment_lists")
+for _role_name in (
+    _helper_role_policy.DEPUTY_ROLE,
+    _helper_role_policy.CHIEF_ROLE,
+    _helper_role_policy.CHAT_ADMIN_ROLE,
+):
+    _helper_role_policy.STANDARD_ROLE_DEFAULT_PERMISSIONS[_role_name].discard("stats")
+    _helper_role_policy.STANDARD_ROLE_DEFAULT_PERMISSIONS[_role_name].add("punishment_lists")
+_helper_role_policy.STANDARD_ROLE_DEFAULT_PERMISSIONS[
+    _helper_role_policy.VOICE_ADMIN_ROLE
+].discard("stats")
+_helper_role_policy.STANDARD_ROLE_DEFAULT_PERMISSIONS[
+    _helper_role_policy.HELPER_ROLE
+].discard("stats")
 
 CUSTOM_TELEGRAM_PERMISSIONS = {
     "mute",
@@ -32,6 +55,15 @@ CUSTOM_TELEGRAM_PERMISSIONS = {
 _original_ensure_telegram_admin_for_role = _member_sync_module._ensure_telegram_admin_for_role
 _original_sync_role_permissions = _role_actions_module._sync_managed_telegram_admins_for_role
 _original_sync_role_state = _role_actions_module._sync_managed_telegram_admins_for_role_state
+
+
+async def punishment_list_access(
+    session: AsyncSession,
+    chat_id: int,
+    user_id: int,
+) -> bool:
+    """All punishment-list commands use the same explicit role permission."""
+    return await has_permission(session, chat_id, user_id, "punishment_lists")
 
 
 async def _custom_role_needs_telegram_admin(
@@ -281,3 +313,5 @@ _role_actions_module._sync_managed_telegram_admins_for_role = sync_custom_role_p
 _role_ux_module._sync_managed_telegram_admins_for_role = sync_custom_role_permissions
 _role_actions_module._sync_managed_telegram_admins_for_role_state = sync_custom_role_state
 _role_ux_module._sync_managed_telegram_admins_for_role_state = sync_custom_role_state
+_manual_moderation_module._admin_access = punishment_list_access
+_punishment_lists_module._admin_access = punishment_list_access
