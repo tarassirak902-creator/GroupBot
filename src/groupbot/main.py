@@ -67,6 +67,10 @@ from groupbot.routers.creator_identity_privacy import create_creator_identity_pr
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
 from groupbot.routers.entry_protection import create_entry_protection_router
+from groupbot.routers.entry_protection_runtime import (
+    create_persistent_entry_runtime_router,
+    restore_entry_protection_runtime,
+)
 from groupbot.routers.group_analytics import create_group_analytics_router
 from groupbot.routers.group_cabinet_actions import create_group_cabinet_actions_router
 from groupbot.routers.group_commands import create_group_commands_router
@@ -151,6 +155,7 @@ async def main() -> None:
     dp.message.outer_middleware(AntiSpamMiddleware(session_factory))
     dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
 
+    dp.include_router(create_persistent_entry_runtime_router(session_factory))
     dp.include_router(create_group_startgroup_router(session_factory))
     dp.include_router(create_group_router(session_factory))
     dp.include_router(create_helper_private_assignment_hint_router(session_factory))
@@ -219,6 +224,7 @@ async def main() -> None:
     dp.include_router(create_group_cabinet_actions_router(session_factory))
     dp.include_router(create_private_router(session_factory, settings))
 
+    await restore_entry_protection_runtime(bot, session_factory)
     await clear_global_group_commands(bot)
     lifecycle_task = asyncio.create_task(group_lifecycle_worker(bot, session_factory))
     subscription_lifecycle_task = asyncio.create_task(subscription_lifecycle_worker(session_factory))
