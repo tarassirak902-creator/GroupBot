@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, AdminRole, AuditLog, Group, GroupMember, Transaction, User
+from groupbot.models import AdminAssignment, AdminRole, AuditLog, Group, GroupMember, MemberStatus, Transaction, User
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_identity
@@ -63,7 +63,12 @@ async def _count_deleted_messages(session: AsyncSession, chat_id: int, since: da
 
 
 async def _known_members(session: AsyncSession, chat_id: int) -> int:
-    return int((await session.execute(select(func.count()).select_from(GroupMember).where(GroupMember.chat_id == chat_id))).scalar_one())
+    return int((await session.execute(
+        select(func.count()).select_from(GroupMember).where(
+            GroupMember.chat_id == chat_id,
+            GroupMember.status == MemberStatus.member.value,
+        )
+    )).scalar_one())
 
 
 async def _active_authors(session: AsyncSession, chat_id: int, since: datetime | None) -> int:
@@ -135,7 +140,7 @@ async def _build_stats(session: AsyncSession, chat_id: int, *, period: str, top_
     top = await _top_users(session, chat_id, since, top_limit)
     lines = [
         "📊 <b>СТАТИСТИКА ГРУППЫ</b>", f"🏠 {escape(title)}", f"🕘 Период: {period_label}", "",
-        f"👥 Сейчас известно в группе: <b>{known}</b>", f"✍️ Активных авторов: <b>{authors}</b>",
+        f"👥 Участников сейчас: <b>{known}</b>", f"✍️ Активных авторов: <b>{authors}</b>",
         f"💬 Сообщений: <b>{messages}</b>", f"🗑 Удалено сообщений: <b>{deleted}</b>", "",
         "⚖️ <b>МОДЕРАЦИЯ</b>", f"⚠️ Предупреждений: <b>{warnings}</b>", f"🔇 Мутов: <b>{mutes}</b>",
         f"🚫 Банов: <b>{bans}</b>", f"🚨 Жалоб помощников: <b>{complaints}</b>", "",
