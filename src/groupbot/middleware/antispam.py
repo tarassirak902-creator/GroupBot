@@ -15,7 +15,6 @@ from groupbot.models import GroupSettings
 from groupbot.moderation_models import ObservedMessage
 from groupbot.routers.manual_moderation import _execute_action, _group_ready
 from groupbot.services.automatic_moderation import (
-    automatic_moderation_claimed,
     claim_automatic_moderation,
     mark_observed_deleted,
 )
@@ -40,8 +39,6 @@ class AntiSpamMiddleware(BaseMiddleware):
         if not isinstance(event, Message) or event.chat.type not in {"group", "supergroup"}:
             return await handler(event, data)
         if event.from_user is None or event.from_user.is_bot:
-            return await handler(event, data)
-        if automatic_moderation_claimed(data):
             return await handler(event, data)
         bot = data.get("bot")
         if not isinstance(bot, Bot):
@@ -135,9 +132,9 @@ class AntiSpamMiddleware(BaseMiddleware):
             if event.message_id not in repeated_message_ids:
                 return await handler(event, data)
 
-        if not claim_automatic_moderation(data, "antispam"):
-            return await handler(event, data)
-
+        # Cleanup is independent from punishment ownership. Another protection
+        # may already have claimed the update, but repeated spam should still be
+        # removed from the chat and reflected in deletion statistics.
         deleted_ids: list[int] = []
         for message_id in repeated_message_ids:
             try:
@@ -158,6 +155,9 @@ class AntiSpamMiddleware(BaseMiddleware):
                         message_ids=deleted_ids,
                         deleted_at=datetime.now(timezone.utc),
                     )
+
+        if not claim_automatic_moderation(data, "antispam"):
+            return await handler(event, data)
 
         if action is not None:
             try:
