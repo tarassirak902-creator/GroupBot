@@ -159,14 +159,9 @@ async def unified_execute_action(
         if token is not None:
             _CURRENT_MODERATION_SOURCE.reset(token)
 
-    # The legacy base executor uses an all-allowed permission set on unmute.
-    # Re-apply the chat's actual default member permissions so Mimorus never
-    # grants more capabilities than the owner configured for ordinary members.
     if action == "unmute":
         await restore_member_permissions(bot, chat_id, target.id)
     elif action == "unban":
-        # Unban is a full release from the punishment chain. Warning-scale mutes
-        # may still overlap the ban, so close all three active states together.
         await _clear_unban_state(
             session_factory,
             chat_id=chat_id,
@@ -225,3 +220,11 @@ async def unified_execute_action(
         ])
 
     raise ValueError("Неизвестное действие.")
+
+
+# The legacy executor resolves _record_action through the manual_moderation module
+# globals. Install the source-aware wrapper once at import time so all existing
+# execution paths stay compatible while automatic middleware can pass a source.
+from groupbot.routers import manual_moderation as _manual_moderation_module  # noqa: E402
+
+_manual_moderation_module._record_action = sourced_record_action
