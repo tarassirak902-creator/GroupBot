@@ -11,6 +11,7 @@ from groupbot.routers.standard_rank_cards import create_standard_rank_cards_rout
 from groupbot.services.admin_rank_access import can_open_rank_management
 from groupbot.services.helper_role_policy import HELPER_ROLE
 from groupbot.services import helper_lifecycle_policy as _helper_lifecycle_policy  # noqa: F401
+from groupbot.services import custom_rank_telegram_policy as _custom_rank_telegram_policy  # noqa: F401
 
 
 class HelperAssignFilter(Filter):
