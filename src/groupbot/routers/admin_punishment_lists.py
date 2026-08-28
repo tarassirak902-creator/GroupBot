@@ -30,6 +30,7 @@ LIST_COMMANDS: dict[str, tuple[str, bool]] = {
     "мои муты": ("mute", True),
     "выдал пред": ("warning", True),
 }
+LIST_COMMAND_RE = r"(?i)^\s*(?:банлист|мутлист|преды|мои\s+баны|мои\s+муты|выдал\s+пред)\s*$"
 
 
 def _latest_by_target(rows: list[ModerationAction], limit: int = 30) -> list[ModerationAction]:
@@ -155,7 +156,7 @@ def create_admin_punishment_lists_router(
 
     @router.message(
         F.chat.type.in_({"group", "supergroup"}),
-        F.text.casefold().in_(set(LIST_COMMANDS)),
+        F.text.regexp(LIST_COMMAND_RE),
     )
     async def punishment_list(message: Message) -> None:
         if message.from_user is None:
