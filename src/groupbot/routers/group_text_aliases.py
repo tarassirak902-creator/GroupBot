@@ -398,7 +398,7 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
     @router.message(
         F.chat.type.in_({"group", "supergroup"}),
         F.reply_to_message,
-        F.text.regexp(r"(?i)^\s*кто\s+(?:он|она|ты)\s*[?？]?\s*$"),
+        F.text.regexp(r"(?i)^\s*(?:кто\s+(?:он|она|ты)|инфо|информация|профиль)\s*[?？]?\s*$"),
     )
     async def who_is_reply_target(message: Message) -> None:
         if message.from_user is None or message.reply_to_message is None:
