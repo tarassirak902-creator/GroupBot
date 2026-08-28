@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import AdminAssignment, AdminRole, GroupMember, GroupSettings, MemberStatus, User
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.user_display import clickable_identity
+from groupbot.services.special_statuses import special_statuses_for_user
 from groupbot.services.subscriptions import active_subscription_for_group
 
 
@@ -59,13 +60,7 @@ async def _rank_name(session: AsyncSession, chat_id: int, user_id: int) -> str |
 
 
 def _special_statuses(config: dict | None, user_id: int) -> list[str]:
-    special = dict((config or {}).get("special_statuses") or {})
-    result: list[str] = []
-    if user_id in {int(x) for x in (special.get("vip") or [])}:
-        result.append("💎 VIP")
-    if user_id in {int(x) for x in (special.get("nedotroga") or [])}:
-        result.append("🛡 Недотрога")
-    return result
+    return special_statuses_for_user(config, user_id)
 
 
 def create_group_profile_stats_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
