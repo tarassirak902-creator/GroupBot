@@ -10,13 +10,16 @@ from groupbot.routers import admin_rank_compact_actions as _compact_actions_modu
 from groupbot.routers import admin_rank_target_actions as _target_actions_module
 from groupbot.routers import group_control_role_actions as _role_actions_module
 from groupbot.routers import group_control_ux as _role_ux_module
+from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import (
     CHAT_ADMIN_ROLE,
     CHIEF_ROLE,
     DEPUTY_ROLE,
+    HELPER_ROLE,
     VOICE_ADMIN_ROLE,
     detach_helpers_from_mentor,
 )
+from groupbot.services.special_statuses import remove_special_statuses_for_user
 
 
 MENTOR_ROLE_NAMES = {
@@ -57,12 +60,7 @@ async def assign_role_with_mentor_lifecycle(
     role: AdminRole,
     actor_id: int,
 ) -> str | None:
-    """Detach Helpers only when their mentor really leaves mentor-capable ranks.
-
-    Moving Deputy/Chief/Chat/Voice between those four roles preserves Helpers.
-    Moving from one of those roles to Helper, a custom role, or any other
-    ineligible role removes the old mentor relationship immediately.
-    """
+    """Apply rank transition cleanup without breaking eligible mentor changes."""
     old_role_name = await _current_role_name(
         session,
         chat_id=chat_id,
@@ -86,6 +84,30 @@ async def assign_role_with_mentor_lifecycle(
             actor_id=actor_id,
             reason="mentor_rank_changed_to_ineligible",
         )
+
+    # VIP/Nedotriga are statuses for ordinary participants. Once a user receives
+    # a full administrative rank, remove stale participant immunity so it cannot
+    # silently reappear after a later demotion. Helper intentionally remains an
+    # ordinary Telegram participant and is excluded from this cleanup.
+    if role.name != HELPER_ROLE:
+        removed_statuses = await remove_special_statuses_for_user(
+            session,
+            chat_id=chat_id,
+            user_id=target_id,
+        )
+        if removed_statuses:
+            await write_audit(
+                session,
+                "group.special_statuses_removed_on_admin_assignment",
+                chat_id=chat_id,
+                actor_user_id=actor_id,
+                target_type="user",
+                target_id=str(target_id),
+                payload={
+                    "role_name": role.name,
+                    "statuses": removed_statuses,
+                },
+            )
     return None
 
 
