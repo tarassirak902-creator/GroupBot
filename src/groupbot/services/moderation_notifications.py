@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from html import escape
 
@@ -12,6 +13,7 @@ from groupbot.routers.manual_moderation import (
     _duration,
     _execute_action as _base_execute_action,
     _format_expiry,
+    _record_action as _base_record_action,
     _warning_count,
     _warning_limit,
     _warning_stage,
@@ -20,6 +22,46 @@ from groupbot.routers.user_display import clickable_identity
 from groupbot.services.manual_punishment_access import manual_punishment_error
 from groupbot.services.moderation_state import restore_member_permissions
 from groupbot.services.permissions import is_group_owner
+
+
+_CURRENT_MODERATION_SOURCE: ContextVar[str | None] = ContextVar(
+    "mimorus_current_moderation_source",
+    default=None,
+)
+
+
+async def sourced_record_action(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    target_user_id: int,
+    actor_user_id: int,
+    action: str,
+    reason: str | None = None,
+    warning_index: int | None = None,
+    expires_at: datetime | None = None,
+    source: str = "manual",
+) -> ModerationAction:
+    """Record the action with the source of the current executor call.
+
+    Warning-scale rows explicitly pass ``warning_scale`` and therefore keep that
+    source. Only legacy/default ``manual`` rows inherit the current automatic
+    middleware source. This avoids the old race-prone "update latest row" step.
+    """
+    effective_source = source
+    if source == "manual":
+        effective_source = _CURRENT_MODERATION_SOURCE.get() or source
+    return await _base_record_action(
+        session,
+        chat_id=chat_id,
+        target_user_id=target_user_id,
+        actor_user_id=actor_user_id,
+        action=action,
+        reason=reason,
+        warning_index=warning_index,
+        expires_at=expires_at,
+        source=effective_source,
+    )
 
 
 def _notification_identity(user) -> str:
@@ -87,6 +129,7 @@ async def unified_execute_action(
     action: str,
     reason: str | None,
     duration_token: str | None = None,
+    source: str | None = None,
 ) -> str:
     """Run moderation and return a common public notification with clickable names only."""
     if action in {"warning", "mute", "ban"} and not getattr(actor, "is_bot", False):
@@ -100,16 +143,21 @@ async def unified_execute_action(
         if access_error:
             raise ValueError(access_error)
 
-    await _base_execute_action(
-        bot=bot,
-        session_factory=session_factory,
-        chat_id=chat_id,
-        actor=actor,
-        target=target,
-        action=action,
-        reason=reason,
-        duration_token=duration_token,
-    )
+    token = _CURRENT_MODERATION_SOURCE.set(source) if source else None
+    try:
+        await _base_execute_action(
+            bot=bot,
+            session_factory=session_factory,
+            chat_id=chat_id,
+            actor=actor,
+            target=target,
+            action=action,
+            reason=reason,
+            duration_token=duration_token,
+        )
+    finally:
+        if token is not None:
+            _CURRENT_MODERATION_SOURCE.reset(token)
 
     # The legacy base executor uses an all-allowed permission set on unmute.
     # Re-apply the chat's actual default member permissions so Mimorus never
