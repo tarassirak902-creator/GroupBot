@@ -164,8 +164,9 @@ def create_moderation_release_router(session_factory: async_sessionmaker[AsyncSe
                 async with session_factory() as session:
                     async with session.begin():
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="ban")
+                        cleared_mutes = await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="mute")
                         await _deactivate_actions(session, chat_id=message.chat.id, user_id=target_id, action="warning")
-                        await write_audit(session, "moderation.unban", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"warnings_reset": True})
+                        await write_audit(session, "moderation.unban", chat_id=message.chat.id, actor_user_id=message.from_user.id, target_type="user", target_id=str(target_id), payload={"warnings_reset": True, "mutes_cleared": cleared_mutes})
                 await message.answer(
                     f"✅ {actor} разбанил {identity}.\n\nАктивных предупреждений: 0.",
                     parse_mode="HTML", disable_web_page_preview=True,
