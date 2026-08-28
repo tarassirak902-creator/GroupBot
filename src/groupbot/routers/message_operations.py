@@ -37,7 +37,7 @@ async def cleanup_user_messages(
     deleted_ids: list[int] = []
     for message_id in rows:
         try:
-            await bot.delete_message(chat_id, message_id)
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
             deleted_ids.append(message_id)
         except Exception:
             continue
@@ -105,9 +105,15 @@ def create_message_operations_router(
                 return
             try:
                 if command == "закрепи":
-                    await bot.pin_chat_message(message.chat.id, message.reply_to_message.message_id)
+                    await bot.pin_chat_message(
+                        chat_id=message.chat.id,
+                        message_id=message.reply_to_message.message_id,
+                    )
                 else:
-                    await bot.unpin_chat_message(message.chat.id, message.reply_to_message.message_id)
+                    await bot.unpin_chat_message(
+                        chat_id=message.chat.id,
+                        message_id=message.reply_to_message.message_id,
+                    )
             except Exception as exc:
                 action = "закрепить" if command == "закрепи" else "открепить"
                 await message.reply(f"Не удалось {action} сообщение через Telegram: {str(exc)[:200]}")
