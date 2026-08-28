@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.models import AdminAssignment, AdminRole
 from groupbot.services.permissions import is_group_owner
+from groupbot.services.special_statuses import is_active_group_member, special_status_ids
 
 
 HELPER_ROLE = "Помощник"
@@ -36,10 +37,12 @@ async def is_protected_member(
     if admin_role is not None and admin_role != HELPER_ROLE:
         return True
 
-    special = dict((moderation_config or {}).get("special_statuses") or {})
-    protected_ids = {
-        int(value)
-        for value in [*(special.get("vip") or []), *(special.get("nedotroga") or [])]
-        if str(value).lstrip("-").isdigit()
-    }
-    return user_id in protected_ids
+    # VIP/Nedotriga are participant statuses, not permanent user flags. A stale
+    # ID left in historical JSON after the user left the group must not grant
+    # immunity after a later rejoin.
+    if not await is_active_group_member(session, chat_id=chat_id, user_id=user_id):
+        return False
+    return (
+        user_id in special_status_ids(moderation_config, "vip")
+        or user_id in special_status_ids(moderation_config, "nedotroga")
+    )
