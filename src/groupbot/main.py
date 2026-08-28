@@ -17,6 +17,7 @@ from groupbot.middleware.antispam import AntiSpamMiddleware
 from groupbot.middleware.content_filters import ContentFiltersMiddleware
 from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
+from groupbot.middleware.subscription_command_notice import SubscriptionCommandNoticeMiddleware
 from groupbot.routers import advertising as advertising_module
 from groupbot.routers import advertising_edit as advertising_edit_module
 from groupbot.routers import advertising_edit_types as advertising_edit_types_module
@@ -139,6 +140,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
+    dp.message.outer_middleware(SubscriptionCommandNoticeMiddleware(session_factory))
     dp.message.outer_middleware(AdvertisingMandatoryMiddleware(session_factory))
     dp.message.outer_middleware(ContentFiltersMiddleware(session_factory))
     dp.message.outer_middleware(AntiFloodMiddleware(session_factory))
