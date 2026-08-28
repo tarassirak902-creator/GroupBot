@@ -4,13 +4,13 @@ from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.types import Message
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import GroupMember
 from groupbot.moderation_models import ObservedMessage
 from groupbot.routers.manual_moderation import _group_ready, _identity_from_tg
 from groupbot.services.audit import write_audit
+from groupbot.services.automatic_moderation import mark_observed_deleted
 from groupbot.services.permissions import has_permission
 
 
@@ -46,23 +46,12 @@ async def cleanup_user_messages(
         now = datetime.now(timezone.utc)
         async with session_factory() as session:
             async with session.begin():
-                await session.execute(
-                    update(ObservedMessage)
-                    .where(
-                        ObservedMessage.chat_id == chat_id,
-                        ObservedMessage.message_id.in_(deleted_ids),
-                    )
-                    .values(deleted_at=now)
+                recorded_deleted = await mark_observed_deleted(
+                    session,
+                    chat_id=chat_id,
+                    message_ids=deleted_ids,
+                    deleted_at=now,
                 )
-                member = (
-                    await session.execute(
-                        select(GroupMember)
-                        .where(GroupMember.chat_id == chat_id, GroupMember.user_id == target_user_id)
-                        .with_for_update()
-                    )
-                ).scalar_one_or_none()
-                if member is not None:
-                    member.deleted_messages += len(deleted_ids)
                 await write_audit(
                     session,
                     "moderation.messages_cleaned",
@@ -70,7 +59,11 @@ async def cleanup_user_messages(
                     actor_user_id=actor_user_id,
                     target_type="user",
                     target_id=str(target_user_id),
-                    payload={"deleted": len(deleted_ids), "attempted": len(rows)},
+                    payload={
+                        "deleted": recorded_deleted,
+                        "telegram_deleted": len(deleted_ids),
+                        "attempted": len(rows),
+                    },
                 )
 
     return len(deleted_ids), len(rows)
