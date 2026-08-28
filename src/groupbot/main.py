@@ -86,6 +86,7 @@ from groupbot.routers.helper_assignment_commands import create_helper_assignment
 from groupbot.routers.helper_private_assignment_hint import create_helper_private_assignment_hint_router
 from groupbot.routers.identity_privacy import create_identity_privacy_router
 from groupbot.routers.manual_moderation import create_manual_moderation_router
+from groupbot.routers.member_status_sync import create_member_status_sync_router
 from groupbot.routers.message_operations import create_message_operations_router
 from groupbot.routers.moderation_release import create_moderation_release_router
 from groupbot.routers.network_admins import create_network_admins_router
@@ -156,6 +157,7 @@ async def main() -> None:
     dp.message.outer_middleware(AntiSpamMiddleware(session_factory))
     dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
 
+    dp.include_router(create_member_status_sync_router(session_factory))
     dp.include_router(create_persistent_entry_runtime_router(session_factory))
     dp.include_router(create_group_startgroup_router(session_factory))
     dp.include_router(create_group_router(session_factory))
