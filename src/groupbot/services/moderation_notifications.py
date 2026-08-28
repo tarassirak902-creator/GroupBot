@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from html import escape
 
 from aiogram import Bot
-from sqlalchemy import update
+from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.moderation_models import ModerationAction
@@ -119,6 +119,55 @@ async def _clear_unban_state(
             )
 
 
+async def _run_base_action_serialized(
+    *,
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+    chat_id: int,
+    actor,
+    target,
+    action: str,
+    reason: str | None,
+    duration_token: str | None,
+) -> None:
+    """Serialize warning count/scale updates for one chat member.
+
+    PostgreSQL advisory locks are transaction-scoped and shared across bot
+    processes. Only warning issuance needs serialization because the base warning
+    executor performs a read-count -> insert -> warning-scale transition.
+    """
+    if action != "warning":
+        await _base_execute_action(
+            bot=bot,
+            session_factory=session_factory,
+            chat_id=chat_id,
+            actor=actor,
+            target=target,
+            action=action,
+            reason=reason,
+            duration_token=duration_token,
+        )
+        return
+
+    lock_key = f"mimorus:warning:{chat_id}:{target.id}"
+    async with session_factory() as lock_session:
+        async with lock_session.begin():
+            await lock_session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
+            )
+            await _base_execute_action(
+                bot=bot,
+                session_factory=session_factory,
+                chat_id=chat_id,
+                actor=actor,
+                target=target,
+                action=action,
+                reason=reason,
+                duration_token=duration_token,
+            )
+
+
 async def unified_execute_action(
     *,
     bot: Bot,
@@ -145,7 +194,7 @@ async def unified_execute_action(
 
     token = _CURRENT_MODERATION_SOURCE.set(source) if source else None
     try:
-        await _base_execute_action(
+        await _run_base_action_serialized(
             bot=bot,
             session_factory=session_factory,
             chat_id=chat_id,
