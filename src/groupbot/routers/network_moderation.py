@@ -91,6 +91,23 @@ async def _network_permission(
     return permission in allowed or "*" in allowed
 
 
+async def _network_actor_is_current_admin(
+    bot: Bot,
+    *,
+    chat_id: int,
+    user_id: int,
+    owner_id: int,
+) -> bool:
+    if user_id == owner_id:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except Exception:
+        return False
+    status = getattr(member.status, "value", str(member.status))
+    return status == "administrator" and not member.user.is_bot
+
+
 async def _protected_in_group(
     bot: Bot,
     session: AsyncSession,
@@ -99,10 +116,6 @@ async def _protected_in_group(
     user_id: int,
     actor_id: int,
 ) -> bool:
-    # Use the same Mimorus punishment policy as local moderation in each
-    # concrete group. This protects active Mimorus administrators and applies
-    # the local VIP/Nedotroga rules. Helper is intentionally not treated as an
-    # administrator and can be punished as a regular participant.
     if await manual_punishment_error(
         session,
         chat_id=chat_id,
@@ -111,9 +124,6 @@ async def _protected_in_group(
     ):
         return True
 
-    # Telegram itself does not allow a bot to ban a current creator/admin.
-    # Keep this technical protection for manually appointed Telegram admins
-    # even when they do not have a Mimorus rank.
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except Exception:
@@ -255,6 +265,14 @@ def create_network_moderation_router(
                     await message.reply("Эта группа не добавлена в сетку.")
                 else:
                     await message.reply("Эта группа не входит в действующую сетку текущего владельца или сетка определена неоднозначно.")
+                return
+            if not await _network_actor_is_current_admin(
+                bot,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                owner_id=network.owner_user_id,
+            ):
+                await message.reply("Сетевые команды доступны только действующему администратору Telegram этой группы.")
                 return
             permission = {
                 "сбан": "ban",
