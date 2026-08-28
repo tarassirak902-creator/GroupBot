@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import sys
 from types import ModuleType
 
 from groupbot.services.protection_schedule import protection_enabled
@@ -39,3 +40,12 @@ def install_entry_schedule(module: ModuleType) -> None:
 
     module._captcha_cfg = captcha_cfg
     module._antiraid_cfg = antiraid_cfg
+
+    # The persistent runtime imports these helpers before main() installs the
+    # schedule adapter. Keep its references synchronized with the wrapped
+    # functions so scheduled captcha/anti-raid activation behaves identically
+    # before and after a bot restart.
+    runtime = sys.modules.get("groupbot.routers.entry_protection_runtime")
+    if runtime is not None:
+        runtime._captcha_cfg = captcha_cfg
+        runtime._antiraid_cfg = antiraid_cfg
