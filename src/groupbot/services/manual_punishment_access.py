@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.models import AdminAssignment, AdminRole, GroupSettings
 from groupbot.services.permissions import is_group_owner
+from groupbot.services.special_statuses import is_active_group_member, special_status_ids
 
 DEPUTY = "Зам. владельца"
 CHIEF = "Глав. админ"
@@ -28,23 +29,12 @@ async def _role_name(session: AsyncSession, *, chat_id: int, user_id: int) -> st
     ).scalar_one_or_none()
 
 
-async def _special_statuses(session: AsyncSession, chat_id: int) -> dict:
-    config = (
+async def _moderation_config(session: AsyncSession, chat_id: int) -> dict:
+    return (
         await session.execute(
             select(GroupSettings.moderation_config).where(GroupSettings.chat_id == chat_id)
         )
     ).scalar_one_or_none() or {}
-    return dict(config.get("special_statuses") or {})
-
-
-def _ids(values) -> set[int]:
-    result: set[int] = set()
-    for value in values or []:
-        try:
-            result.add(int(value))
-        except (TypeError, ValueError):
-            continue
-    return result
 
 
 async def manual_punishment_error(
@@ -58,7 +48,6 @@ async def manual_punishment_error(
     if actor_id == target_id:
         return "Нельзя применить наказание к себе."
 
-    # The Telegram group owner is always protected from moderation punishments.
     if await is_group_owner(session, chat_id, target_id):
         return "⛔ Владельца группы нельзя наказать командами модерации Mimorus."
 
@@ -66,27 +55,27 @@ async def manual_punishment_error(
     if actor_role == HELPER:
         return "Помощник не может выдавать наказания. Используйте ответом на сообщение команду «нарушение»."
 
-    # The owner may punish any other participant, including Mimorus admins and
-    # users with special statuses. This is the top-level moderation override.
+    # Owner is the top-level override for every non-owner target.
     if await is_group_owner(session, chat_id, actor_id):
         return None
 
-    # Other active Mimorus admins are protected from manual punishments by admins.
-    # Helper is not a full administrator and is moderated as a regular participant.
     target_role = await _role_name(session, chat_id=chat_id, user_id=target_id)
     if target_role is not None and target_role != HELPER:
         return "⛔ Нельзя наказать администратора Mimorus. Это может сделать только Владелец группы."
 
-    special = await _special_statuses(session, chat_id)
-    vip_ids = _ids(special.get("vip"))
-    nedotroga_ids = _ids(special.get("nedotroga"))
+    # Special statuses only have meaning while the target is an active group
+    # participant. Exit cleanup normally removes them; this membership guard also
+    # prevents stale historical JSON from granting immunity after a later rejoin.
+    if not await is_active_group_member(session, chat_id=chat_id, user_id=target_id):
+        return None
+    config = await _moderation_config(session, chat_id)
 
-    if target_id in vip_ids:
+    if target_id in special_status_ids(config, "vip"):
         if actor_role == DEPUTY:
             return None
         return "💎 VIP-пользователя может наказать только Владелец группы или Зам. владельца."
 
-    if target_id in nedotroga_ids:
+    if target_id in special_status_ids(config, "nedotroga"):
         if actor_role in {DEPUTY, CHIEF}:
             return None
         return "🛡 Недотрогу может наказать только Владелец группы, Зам. владельца или Глав. админ."
