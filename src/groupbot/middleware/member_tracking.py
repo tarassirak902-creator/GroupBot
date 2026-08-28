@@ -68,6 +68,41 @@ class GroupMemberTrackingMiddleware(BaseMiddleware):
             .on_conflict_do_nothing(index_elements=["chat_id", "message_id"])
         )
 
+    async def _mark_left_from_service_message(self, session: AsyncSession, chat_id: int, telegram_user) -> None:
+        """Treat left_chat_member as a fallback signal without overwriting a known ban."""
+        await upsert_user(session, telegram_user)
+        current_status = (
+            await session.execute(
+                select(GroupMember.status).where(
+                    GroupMember.chat_id == chat_id,
+                    GroupMember.user_id == telegram_user.id,
+                )
+            )
+        ).scalar_one_or_none()
+        target_status = (
+            MemberStatus.banned.value
+            if current_status == MemberStatus.banned.value
+            else MemberStatus.left.value
+        )
+        await session.execute(
+            insert(GroupMember)
+            .values(
+                chat_id=chat_id,
+                user_id=telegram_user.id,
+                status=target_status,
+                joined_at=func.now(),
+                left_at=func.now(),
+                last_activity_at=func.now(),
+            )
+            .on_conflict_do_update(
+                constraint="uq_group_member_chat_user",
+                set_={
+                    "status": target_status,
+                    "left_at": func.now(),
+                },
+            )
+        )
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
@@ -89,24 +124,10 @@ class GroupMemberTrackingMiddleware(BaseMiddleware):
                         await self._touch_member(session, event.chat.id, new_user)
 
                     if event.left_chat_member is not None and not event.left_chat_member.is_bot:
-                        await upsert_user(session, event.left_chat_member)
-                        await session.execute(
-                            insert(GroupMember)
-                            .values(
-                                chat_id=event.chat.id,
-                                user_id=event.left_chat_member.id,
-                                status=MemberStatus.left.value,
-                                joined_at=func.now(),
-                                left_at=func.now(),
-                                last_activity_at=func.now(),
-                            )
-                            .on_conflict_do_update(
-                                constraint="uq_group_member_chat_user",
-                                set_={
-                                    "status": MemberStatus.left.value,
-                                    "left_at": func.now(),
-                                },
-                            )
+                        await self._mark_left_from_service_message(
+                            session,
+                            event.chat.id,
+                            event.left_chat_member,
                         )
                 await session.commit()
 
