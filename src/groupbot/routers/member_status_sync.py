@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.types import ChatMemberUpdated
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -11,9 +11,6 @@ from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import HELPER_ROLE, detach_helpers_from_mentor
 from groupbot.services.users import upsert_user
 from groupbot.telegram_admin_models import TelegramAdminPromotion
-
-
-_PRESENT_STATUSES = {"creator", "administrator", "member"}
 
 
 def _status_value(member) -> str:
@@ -37,6 +34,7 @@ async def _store_member_status(
     chat_id: int,
     user,
     status: str,
+    rejoined: bool,
 ) -> None:
     values = {
         "chat_id": chat_id,
@@ -47,11 +45,12 @@ async def _store_member_status(
     }
     update_values: dict = {"status": status}
     if status == MemberStatus.member.value:
-        update_values.update({
-            "left_at": None,
-            "joined_at": func.now(),
-            "last_activity_at": func.now(),
-        })
+        update_values["left_at"] = None
+        if rejoined:
+            update_values.update({
+                "joined_at": func.now(),
+                "last_activity_at": func.now(),
+            })
     else:
         values["left_at"] = func.now()
         update_values["left_at"] = func.now()
@@ -92,6 +91,7 @@ async def _drop_stale_assignment(
             await session.execute(select(AdminRole).where(AdminRole.id == assignment.role_id))
         ).scalar_one_or_none()
 
+    was_reserve = bool(assignment.is_reserve)
     if role is not None and role.name != HELPER_ROLE:
         await detach_helpers_from_mentor(
             session,
@@ -101,7 +101,7 @@ async def _drop_stale_assignment(
             reason=f"mentor_{status}",
         )
 
-    if assignment.is_reserve:
+    if was_reserve:
         assignment.role_id = None
         assignment.assigned_by_user_id = None
     else:
@@ -130,7 +130,7 @@ async def _drop_stale_assignment(
         payload={
             "member_status": status,
             "role_name": role.name if role is not None else None,
-            "was_reserve": bool(assignment.is_reserve),
+            "was_reserve": was_reserve,
         },
     )
 
@@ -156,19 +156,25 @@ def create_member_status_sync_router(
             return
 
         async with session_factory() as session:
-            known_group = (
-                await session.execute(select(Group.chat_id).where(Group.chat_id == event.chat.id))
-            ).scalar_one_or_none()
-            if known_group is None:
-                return
-
             async with session.begin():
+                known_group = (
+                    await session.execute(select(Group.chat_id).where(Group.chat_id == event.chat.id))
+                ).scalar_one_or_none()
+                if known_group is None:
+                    return
+
                 await upsert_user(session, user)
+                actor_id = None
+                if event.from_user is not None and not event.from_user.is_bot:
+                    await upsert_user(session, event.from_user)
+                    actor_id = event.from_user.id
+
                 await _store_member_status(
                     session,
                     chat_id=event.chat.id,
                     user=user,
                     status=new_status,
+                    rejoined=(old_status != MemberStatus.member.value and new_status == MemberStatus.member.value),
                 )
                 if new_status in {MemberStatus.left.value, MemberStatus.banned.value}:
                     await _drop_stale_assignment(
@@ -182,7 +188,7 @@ def create_member_status_sync_router(
                     session,
                     "group.member_status_changed",
                     chat_id=event.chat.id,
-                    actor_user_id=(event.from_user.id if event.from_user else None),
+                    actor_user_id=actor_id,
                     target_type="user",
                     target_id=str(user.id),
                     payload={
