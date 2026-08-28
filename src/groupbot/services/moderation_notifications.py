@@ -14,7 +14,7 @@ from groupbot.routers.manual_moderation import (
     _execute_action as _base_execute_action,
     _format_expiry,
     _record_action as _base_record_action,
-    _warning_count,
+    _warning_count as _base_warning_count,
     _warning_limit,
     _warning_stage,
 )
@@ -27,6 +27,10 @@ from groupbot.services.permissions import is_group_owner
 _CURRENT_MODERATION_SOURCE: ContextVar[str | None] = ContextVar(
     "mimorus_current_moderation_source",
     default=None,
+)
+_SERIALIZE_WARNING_COUNT: ContextVar[bool] = ContextVar(
+    "mimorus_serialize_warning_count",
+    default=False,
 )
 
 
@@ -42,12 +46,7 @@ async def sourced_record_action(
     expires_at: datetime | None = None,
     source: str = "manual",
 ) -> ModerationAction:
-    """Record the action with the source of the current executor call.
-
-    Warning-scale rows explicitly pass ``warning_scale`` and therefore keep that
-    source. Only legacy/default ``manual`` rows inherit the current automatic
-    middleware source. This avoids the old race-prone "update latest row" step.
-    """
+    """Record the action with the source of the current executor call."""
     effective_source = source
     if source == "manual":
         effective_source = _CURRENT_MODERATION_SOURCE.get() or source
@@ -62,6 +61,21 @@ async def sourced_record_action(
         expires_at=expires_at,
         source=effective_source,
     )
+
+
+async def serialized_warning_count(
+    session: AsyncSession,
+    chat_id: int,
+    target_user_id: int,
+) -> int:
+    """Lock warning read-modify-write in the executor's existing transaction."""
+    if _SERIALIZE_WARNING_COUNT.get():
+        lock_key = f"mimorus:warning:{chat_id}:{target_user_id}"
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+            {"lock_key": lock_key},
+        )
+    return int(await _base_warning_count(session, chat_id, target_user_id))
 
 
 def _notification_identity(user) -> str:
@@ -119,55 +133,6 @@ async def _clear_unban_state(
             )
 
 
-async def _run_base_action_serialized(
-    *,
-    bot: Bot,
-    session_factory: async_sessionmaker[AsyncSession],
-    chat_id: int,
-    actor,
-    target,
-    action: str,
-    reason: str | None,
-    duration_token: str | None,
-) -> None:
-    """Serialize warning count/scale updates for one chat member.
-
-    PostgreSQL advisory locks are transaction-scoped and shared across bot
-    processes. Only warning issuance needs serialization because the base warning
-    executor performs a read-count -> insert -> warning-scale transition.
-    """
-    if action != "warning":
-        await _base_execute_action(
-            bot=bot,
-            session_factory=session_factory,
-            chat_id=chat_id,
-            actor=actor,
-            target=target,
-            action=action,
-            reason=reason,
-            duration_token=duration_token,
-        )
-        return
-
-    lock_key = f"mimorus:warning:{chat_id}:{target.id}"
-    async with session_factory() as lock_session:
-        async with lock_session.begin():
-            await lock_session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": lock_key},
-            )
-            await _base_execute_action(
-                bot=bot,
-                session_factory=session_factory,
-                chat_id=chat_id,
-                actor=actor,
-                target=target,
-                action=action,
-                reason=reason,
-                duration_token=duration_token,
-            )
-
-
 async def unified_execute_action(
     *,
     bot: Bot,
@@ -192,9 +157,10 @@ async def unified_execute_action(
         if access_error:
             raise ValueError(access_error)
 
-    token = _CURRENT_MODERATION_SOURCE.set(source) if source else None
+    source_token = _CURRENT_MODERATION_SOURCE.set(source) if source else None
+    warning_token = _SERIALIZE_WARNING_COUNT.set(action == "warning")
     try:
-        await _run_base_action_serialized(
+        await _base_execute_action(
             bot=bot,
             session_factory=session_factory,
             chat_id=chat_id,
@@ -205,8 +171,9 @@ async def unified_execute_action(
             duration_token=duration_token,
         )
     finally:
-        if token is not None:
-            _CURRENT_MODERATION_SOURCE.reset(token)
+        _SERIALIZE_WARNING_COUNT.reset(warning_token)
+        if source_token is not None:
+            _CURRENT_MODERATION_SOURCE.reset(source_token)
 
     if action == "unmute":
         await restore_member_permissions(bot, chat_id, target.id)
@@ -221,7 +188,7 @@ async def unified_execute_action(
     async with session_factory() as session:
         actor_text = await _actor_title(session, chat_id, actor)
         limit = await _warning_limit(session, chat_id)
-        warnings = min(await _warning_count(session, chat_id, target.id), limit)
+        warnings = min(await _base_warning_count(session, chat_id, target.id), limit)
 
     if action == "warning":
         punishment = _warning_punishment(warnings, limit)
@@ -271,9 +238,10 @@ async def unified_execute_action(
     raise ValueError("Неизвестное действие.")
 
 
-# The legacy executor resolves _record_action through the manual_moderation module
-# globals. Install the source-aware wrapper once at import time so all existing
-# execution paths stay compatible while automatic middleware can pass a source.
+# Legacy executor helpers are resolved through manual_moderation module globals.
+# Install source-aware recording and transaction-local warning serialization once
+# at import time without changing every existing caller.
 from groupbot.routers import manual_moderation as _manual_moderation_module  # noqa: E402
 
 _manual_moderation_module._record_action = sourced_record_action
+_manual_moderation_module._warning_count = serialized_warning_count
