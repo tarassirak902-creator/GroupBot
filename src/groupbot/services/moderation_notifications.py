@@ -16,6 +16,7 @@ from groupbot.routers.manual_moderation import (
 )
 from groupbot.routers.user_display import clickable_identity
 from groupbot.services.manual_punishment_access import manual_punishment_error
+from groupbot.services.moderation_state import restore_member_permissions
 from groupbot.services.permissions import is_group_owner
 
 
@@ -86,6 +87,12 @@ async def unified_execute_action(
         reason=reason,
         duration_token=duration_token,
     )
+
+    # The legacy base executor uses an all-allowed permission set on unmute.
+    # Re-apply the chat's actual default member permissions so Mimorus never
+    # grants more capabilities than the owner configured for ordinary members.
+    if action == "unmute":
+        await restore_member_permissions(bot, chat_id, target.id)
 
     target_text = _notification_identity(target)
     async with session_factory() as session:
