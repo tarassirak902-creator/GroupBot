@@ -10,6 +10,8 @@ The current uploaded MASTER document is the only functional/UX source of truth. 
 
 - Private chat: owner/account management, groups, networks, advertising, tariff, support, creator panel.
 - Group chat: participant commands, moderation, statistics, games, RP and social interactions.
+- Main group features and protection modules are enabled, disabled and configured only from the selected group's private owner settings. Once saved there, the setting immediately applies to that group; no additional `+feature`/`-feature` command in the group is required or allowed.
+- Group chat commands are runtime actions and queries (for example moderation, profiles, statistics, games and social commands), not a second settings layer.
 - PostgreSQL is the durable source for critical state and timers.
 - Telegram user ID is the identity key; username is display data only.
 - Every financial operation uses a wallet plus immutable transaction ledger with unique `transaction_id`.
