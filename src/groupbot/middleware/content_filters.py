@@ -102,10 +102,18 @@ class ContentFiltersMiddleware(BaseMiddleware):
             )
             for key, schedule_key, reason_label, source_label, matcher in checks:
                 lists = _filter_lists(root, key)
-                if not protection_enabled(root, schedule_key, any(bool(row.get("enabled")) for row in lists)):
+                normal_enabled = any(bool(row.get("enabled")) for row in lists)
+                effective_enabled = protection_enabled(root, schedule_key, normal_enabled)
+                if not effective_enabled:
                     continue
+
+                # If the module is normally off but is temporarily enabled by the
+                # protection schedule, its configured lists must actually run.
+                # Their persistent enabled flags remain unchanged, so once the
+                # schedule window ends the ordinary settings are restored.
+                scheduled_only = effective_enabled and not normal_enabled
                 for row in lists:
-                    if not row.get("enabled"):
+                    if not row.get("enabled") and not scheduled_only:
                         continue
                     items = [str(x) for x in (row.get("items") or []) if str(x).strip()]
                     if matcher(normalized, items) is None:
