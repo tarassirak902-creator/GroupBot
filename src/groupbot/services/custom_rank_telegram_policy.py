@@ -6,6 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole
 from groupbot.routers import admin_member_sync as _member_sync_module
 from groupbot.routers import admin_punishment_lists as _punishment_lists_module
+from groupbot.routers import admin_rank_audit_actions as _audit_actions_module
+from groupbot.routers import admin_rank_compact_actions as _compact_actions_module
+from groupbot.routers import admin_rank_target_actions as _target_actions_module
 from groupbot.routers import group_control_role_actions as _role_actions_module
 from groupbot.routers import group_control_ux as _role_ux_module
 from groupbot.routers import manual_moderation as _manual_moderation_module
@@ -308,7 +311,14 @@ async def sync_custom_role_state(
     )
 
 
-_member_sync_module._ensure_telegram_admin_for_role = ensure_telegram_admin_for_custom_role
+for _rank_module in (
+    _member_sync_module,
+    _audit_actions_module,
+    _compact_actions_module,
+    _target_actions_module,
+):
+    _rank_module._ensure_telegram_admin_for_role = ensure_telegram_admin_for_custom_role
+
 _role_actions_module._sync_managed_telegram_admins_for_role = sync_custom_role_permissions
 _role_ux_module._sync_managed_telegram_admins_for_role = sync_custom_role_permissions
 _role_actions_module._sync_managed_telegram_admins_for_role_state = sync_custom_role_state
