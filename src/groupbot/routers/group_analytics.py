@@ -9,11 +9,11 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import Group, GroupMember, MemberStatus, Transaction, User
+from groupbot.models import AdminAssignment, AdminRole, Group, GroupMember, MemberStatus, Transaction, User
 from groupbot.moderation_models import ModerationAction, ObservedMessage
 from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_identity
-from groupbot.services.permissions import has_permission
+from groupbot.services.permissions import is_group_owner
 from groupbot.services.subscriptions import active_subscription_for_group
 
 
@@ -24,11 +24,31 @@ PERIODS: dict[str, tuple[str, timedelta | None]] = {
     "all": ("за всё время", None),
 }
 TOP_LIMITS = {10, 20, 30}
+GROUP_STATS_ROLES = {"Зам. владельца", "Глав. админ", "Администратор чата"}
 
 
 def _period_since(period: str) -> datetime | None:
     _, delta = PERIODS.get(period, PERIODS["all"])
     return datetime.now(timezone.utc) - delta if delta is not None else None
+
+
+async def _can_view_group_stats(session: AsyncSession, *, chat_id: int, user_id: int) -> bool:
+    if await is_group_owner(session, chat_id, user_id):
+        return True
+    role_name = (
+        await session.execute(
+            select(AdminRole.name)
+            .join(AdminAssignment, AdminAssignment.role_id == AdminRole.id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.user_id == user_id,
+                AdminRole.is_active.is_(True),
+                AdminRole.name.in_(GROUP_STATS_ROLES),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return role_name is not None
 
 
 async def _count_messages(session: AsyncSession, chat_id: int, since: datetime | None = None) -> int:
@@ -201,11 +221,14 @@ async def _callback_access(
 ) -> tuple[bool, bool]:
     """Return (allowed, private_screen)."""
     private_screen = bool(callback.message and callback.message.chat.type == "private")
-    if private_screen:
-        return await _owner_access(session, chat_id, callback.from_user.id), True
     if await active_subscription_for_group(session, chat_id) is None:
-        return False, False
-    return await has_permission(session, chat_id, callback.from_user.id, "stats"), False
+        return False, private_screen
+    allowed = await _can_view_group_stats(
+        session,
+        chat_id=chat_id,
+        user_id=callback.from_user.id,
+    )
+    return allowed, private_screen
 
 
 def create_group_analytics_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
@@ -249,7 +272,10 @@ def create_group_analytics_router(session_factory: async_sessionmaker[AsyncSessi
         async with session_factory() as session:
             allowed, private_screen = await _callback_access(session, callback, chat_id)
             if not allowed:
-                await callback.answer("Недостаточно прав Mimorus для просмотра статистики.", show_alert=True)
+                await callback.answer(
+                    "Полную статистику группы могут смотреть только Владелец, Зам. владельца, Глав. админ и Администратор чата.",
+                    show_alert=True,
+                )
                 return
             text = await _build_stats(session, chat_id, period=period, top_limit=top_limit)
         if callback.message is not None:
@@ -268,8 +294,14 @@ def create_group_analytics_router(session_factory: async_sessionmaker[AsyncSessi
         async with session_factory() as session:
             if await active_subscription_for_group(session, message.chat.id) is None:
                 return
-            if not await has_permission(session, message.chat.id, message.from_user.id, "stats"):
-                await message.reply("Недостаточно прав Mimorus для просмотра полной статистики.")
+            if not await _can_view_group_stats(
+                session,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+            ):
+                await message.reply(
+                    "Полную статистику группы могут смотреть только Владелец, Зам. владельца, Глав. админ и Администратор чата."
+                )
                 return
             text = await _build_stats(session, message.chat.id, period="all", top_limit=10)
         await message.answer(
