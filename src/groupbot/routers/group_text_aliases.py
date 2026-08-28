@@ -409,25 +409,6 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
         async with session_factory() as session:
             if not await _access_allowed(session, message.chat.id):
                 return
-            if not await is_group_owner(session, message.chat.id, message.from_user.id):
-                assignment_id = (
-                    await session.execute(
-                        select(AdminAssignment.id)
-                        .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
-                        .where(
-                            AdminAssignment.chat_id == message.chat.id,
-                            AdminAssignment.user_id == message.from_user.id,
-                            AdminRole.is_active.is_(True),
-                            AdminRole.name != HELPER_ROLE,
-                        )
-                        .limit(1)
-                    )
-                ).scalar_one_or_none()
-                if assignment_id is None:
-                    await message.reply(
-                        "Эта команда доступна владельцу и действующим администраторам группы."
-                    )
-                    return
             text = await _admin_leaderboard_text(session, chat_id=message.chat.id)
 
         await message.answer(
