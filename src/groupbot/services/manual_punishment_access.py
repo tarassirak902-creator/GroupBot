@@ -58,23 +58,24 @@ async def manual_punishment_error(
     if actor_id == target_id:
         return "Нельзя применить наказание к себе."
 
-    # Mimorus administration is managed through ranks, not moderation punishments.
-    # Owner and all active administrative ranks are immune to warning/mute/ban.
+    # The Telegram group owner is always protected from moderation punishments.
     if await is_group_owner(session, chat_id, target_id):
-        return "⛔ Нельзя наказать администратора Mimorus. Сначала снимите пользователя с должности администратора."
+        return "⛔ Владельца группы нельзя наказать командами модерации Mimorus."
 
     actor_role = await _role_name(session, chat_id=chat_id, user_id=actor_id)
     if actor_role == HELPER:
         return "Помощник не может выдавать наказания. Используйте ответом на сообщение команду «нарушение»."
 
-    target_role = await _role_name(session, chat_id=chat_id, user_id=target_id)
-    if target_role is not None and target_role != HELPER:
-        return "⛔ Нельзя наказать администратора Mimorus. Сначала снимите пользователя с должности администратора."
-
-    # Helper is not an administrator and is moderated as a regular participant.
-    # Special statuses keep their stricter punishment rules.
+    # The owner may punish any other participant, including Mimorus admins and
+    # users with special statuses. This is the top-level moderation override.
     if await is_group_owner(session, chat_id, actor_id):
         return None
+
+    # Other active Mimorus admins are protected from manual punishments by admins.
+    # Helper is not a full administrator and is moderated as a regular participant.
+    target_role = await _role_name(session, chat_id=chat_id, user_id=target_id)
+    if target_role is not None and target_role != HELPER:
+        return "⛔ Нельзя наказать администратора Mimorus. Это может сделать только Владелец группы."
 
     special = await _special_statuses(session, chat_id)
     vip_ids = _ids(special.get("vip"))
