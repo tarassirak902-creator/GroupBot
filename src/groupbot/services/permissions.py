@@ -4,7 +4,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from groupbot.models import AdminAssignment, AdminPermission, AdminRole, GroupOwner
 
 
-OWNER_PERMISSION = "*"
 HELPER_ROLE = "Помощник"
 HELPER_BLOCKED_PERMISSIONS = {"warning", "mute", "ban", "unmute", "unban", "delete", "pin", "punishment_lists", "stats"}
 
@@ -24,9 +23,11 @@ async def has_permission(session: AsyncSession, chat_id: int, user_id: int, perm
 
     Network-admin permissions are intentionally excluded here. They authorize
     only the dedicated network commands (сбан/сразбан/сбанлист), whose router
-    performs its own network-scoped permission check. Mixing the two scopes
-    would allow a network permission such as ``ban`` or historical ``*`` to
-    grant ordinary local moderation rights.
+    performs its own network-scoped permission check.
+
+    Local role permissions are exact. Historical ``*`` rows are not treated as
+    a wildcard: group owners already receive full access through the explicit
+    owner check above, while ordinary/custom roles must match what the UI shows.
     """
     if await is_group_owner(session, chat_id, user_id):
         return True
@@ -51,7 +52,7 @@ async def has_permission(session: AsyncSession, chat_id: int, user_id: int, perm
     allowed = (await session.execute(
         select(AdminPermission.allowed).where(
             AdminPermission.role_id == role.id,
-            AdminPermission.permission.in_([permission, OWNER_PERMISSION]),
+            AdminPermission.permission == permission,
         )
-    )).scalars().all()
-    return any(allowed)
+    )).scalar_one_or_none()
+    return bool(allowed)
