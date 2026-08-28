@@ -14,20 +14,27 @@ SETTINGS_ONLY_TEXT = (
     "После сохранения настройка сразу действует в группе."
 )
 
+_FEATURE_RE = (
+    r"(?:капча|антирейд|антифлуд|антиспам|антиссылки|"
+    r"запрещ[её]нные\s+слова|запрещ[её]нные\s+фразы|"
+    r"слова|фразы|расписание\s+защиты)"
+)
+_TOGGLE_RE = r"(?:вкл|выкл|включить|выключить|включи|выключи|on|off)"
+
 # Legacy group-chat toggles are intentionally blocked. Feature state has a
 # single source of truth: the selected group's private settings panel.
 _LEGACY_FEATURE_TOGGLE_RE = re.compile(
-    r"^\s*[+-]\s*(?:"
-    r"капча|антирейд|антифлуд|антиспам|антиссылки|"
-    r"запрещ[её]нные\s+слова|запрещ[её]нные\s+фразы|"
-    r"слова|фразы|расписание\s+защиты"
-    r")\s*$",
+    rf"^\s*(?:"
+    rf"[+-]\s*{_FEATURE_RE}"
+    rf"|{_TOGGLE_RE}\s+{_FEATURE_RE}"
+    rf"|{_FEATURE_RE}\s+{_TOGGLE_RE}"
+    rf")\s*$",
     re.IGNORECASE,
 )
 
 
 class GroupSettingsOnlyMiddleware(BaseMiddleware):
-    """Prevent legacy +/- feature toggles from becoming a second settings layer."""
+    """Prevent group-chat feature toggles from becoming a second settings layer."""
 
     async def __call__(
         self,
