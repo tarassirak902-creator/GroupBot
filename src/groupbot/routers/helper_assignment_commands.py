@@ -377,18 +377,7 @@ async def _report_violation(
                 username=None,
             )
         )
-        await write_audit(
-            session,
-            "group.helper_violation_reported",
-            chat_id=chat_id,
-            actor_user_id=message.from_user.id,
-            target_type="user",
-            target_id=str(target.id),
-            payload={
-                "assigned_admin_id": mentor_id,
-                "message_id": message.reply_to_message.message_id,
-            },
-        )
+        # Persist a recovered mentor link if we repaired an old assignment above.
         await session.commit()
 
     url = _violation_message_url(message.reply_to_message)
@@ -437,6 +426,21 @@ async def _report_violation(
             "Ему нужно сначала открыть Mimorus в личке и нажать /start."
         )
         return
+
+    async with session_factory() as session:
+        async with session.begin():
+            await write_audit(
+                session,
+                "group.helper_violation_reported",
+                chat_id=chat_id,
+                actor_user_id=message.from_user.id,
+                target_type="user",
+                target_id=str(target.id),
+                payload={
+                    "assigned_admin_id": mentor_id,
+                    "message_id": message.reply_to_message.message_id,
+                },
+            )
 
     await message.reply("Отправил данное нарушение вашему наставнику в личные сообщения.")
 
