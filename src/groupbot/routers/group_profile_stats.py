@@ -49,7 +49,11 @@ async def _rank_name(session: AsyncSession, chat_id: int, user_id: int) -> str |
     return (await session.execute(
         select(AdminRole.name)
         .join(AdminAssignment, AdminAssignment.role_id == AdminRole.id)
-        .where(AdminAssignment.chat_id == chat_id, AdminAssignment.user_id == user_id)
+        .where(
+            AdminAssignment.chat_id == chat_id,
+            AdminAssignment.user_id == user_id,
+            AdminRole.is_active.is_(True),
+        )
         .limit(1)
     )).scalar_one_or_none()
 
