@@ -13,30 +13,6 @@ from groupbot.services.helper_role_policy import HELPER_ROLE
 from groupbot.services.permissions import is_group_owner
 
 
-async def _can_view_other_profile(
-    session: AsyncSession,
-    *,
-    chat_id: int,
-    actor_id: int,
-) -> bool:
-    if await is_group_owner(session, chat_id, actor_id):
-        return True
-    assignment_id = (
-        await session.execute(
-            select(AdminAssignment.id)
-            .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
-            .where(
-                AdminAssignment.chat_id == chat_id,
-                AdminAssignment.user_id == actor_id,
-                AdminRole.is_active.is_(True),
-                AdminRole.name != HELPER_ROLE,
-            )
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    return assignment_id is not None
-
-
 async def _helper_profile_extra(
     session: AsyncSession,
     *,
@@ -411,15 +387,6 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
         async with session_factory() as session:
             if not await _access_allowed(session, message.chat.id):
                 return
-            if not await _can_view_other_profile(
-                session,
-                chat_id=message.chat.id,
-                actor_id=message.from_user.id,
-            ):
-                await message.reply(
-                    "Эта команда доступна владельцу и действующим администраторам группы."
-                )
-                return
             text = await _profile_text(
                 session,
                 chat_id=message.chat.id,
@@ -442,15 +409,25 @@ def create_group_text_aliases_router(session_factory: async_sessionmaker[AsyncSe
         async with session_factory() as session:
             if not await _access_allowed(session, message.chat.id):
                 return
-            if not await _can_view_other_profile(
-                session,
-                chat_id=message.chat.id,
-                actor_id=message.from_user.id,
-            ):
-                await message.reply(
-                    "Эта команда доступна владельцу и действующим администраторам группы."
-                )
-                return
+            if not await is_group_owner(session, message.chat.id, message.from_user.id):
+                assignment_id = (
+                    await session.execute(
+                        select(AdminAssignment.id)
+                        .join(AdminRole, AdminRole.id == AdminAssignment.role_id)
+                        .where(
+                            AdminAssignment.chat_id == message.chat.id,
+                            AdminAssignment.user_id == message.from_user.id,
+                            AdminRole.is_active.is_(True),
+                            AdminRole.name != HELPER_ROLE,
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if assignment_id is None:
+                    await message.reply(
+                        "Эта команда доступна владельцу и действующим администраторам группы."
+                    )
+                    return
             text = await _admin_leaderboard_text(session, chat_id=message.chat.id)
 
         await message.answer(
