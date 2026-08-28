@@ -8,9 +8,17 @@ from groupbot.routers import admin_member_sync as _member_sync_module
 from groupbot.routers import group_control_role_actions as _role_actions_module
 from groupbot.routers import group_control_ux as _role_ux_module
 from groupbot.routers.admin_hierarchy import STANDARD_NAMES
+from groupbot.routers.group_control import KNOWN_PERMISSIONS
 from groupbot.services.helper_role_policy import NO_ADMIN_RIGHTS
 from groupbot.telegram_admin_models import TelegramAdminPromotion
 
+
+# Full/common group statistics are deliberately rank-based, not a configurable
+# AdminPermission. Remove the historical switch from the shared editor catalog
+# so Voice Admin/custom roles cannot be shown a setting that enforcement ignores.
+KNOWN_PERMISSIONS[:] = [
+    (key, title) for key, title in KNOWN_PERMISSIONS if key != "stats"
+]
 
 CUSTOM_TELEGRAM_PERMISSIONS = {
     "mute",
