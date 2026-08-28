@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import GroupSettings
 from groupbot.routers.manual_moderation import _execute_action, _group_ready
 from groupbot.services.automatic_moderation import (
-    automatic_moderation_claimed,
     claim_automatic_moderation,
     mark_observed_deleted,
 )
@@ -23,7 +22,7 @@ from groupbot.services.protected_members import is_protected_member
 from groupbot.services.protection_schedule import protection_enabled
 
 logger = logging.getLogger(__name__)
-URL_RE = re.compile(r"(?i)(?:(?:https?://)|(?:www\.))[^^\s<>]+")
+URL_RE = re.compile(r"(?i)(?:(?:https?://)|(?:www\.))[^\s<>]+")
 DOMAIN_RE = re.compile(r"(?i)(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:/[^\s<>]*)?")
 
 
@@ -71,8 +70,6 @@ class AntiLinksMiddleware(BaseMiddleware):
             return await handler(event, data)
         if event.from_user is None or event.from_user.is_bot:
             return await handler(event, data)
-        if automatic_moderation_claimed(data):
-            return await handler(event, data)
         text = event.text or event.caption or ""
         hosts = _hosts(text)
         if not hosts:
@@ -117,9 +114,9 @@ class AntiLinksMiddleware(BaseMiddleware):
             if not blocked:
                 return await handler(event, data)
 
-        if not claim_automatic_moderation(data, "antilinks"):
-            return await handler(event, data)
-
+        # Content cleanup is independent from punishment ownership. If another
+        # automatic protection already claimed this message, the prohibited link
+        # still must disappear and deletion statistics must remain truthful.
         deleted = False
         try:
             await bot.delete_message(event.chat.id, event.message_id)
@@ -139,6 +136,9 @@ class AntiLinksMiddleware(BaseMiddleware):
                         message_ids=[event.message_id],
                         deleted_at=datetime.now(timezone.utc),
                     )
+
+        if not claim_automatic_moderation(data, "antilinks"):
+            return await handler(event, data)
 
         try:
             bot_user = await bot.me()
