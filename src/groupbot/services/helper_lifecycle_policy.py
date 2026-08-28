@@ -5,11 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.models import AdminAssignment, AdminRole
 from groupbot.routers import admin_member_sync as _member_sync_module
+from groupbot.routers import admin_punishment_lists as _punishment_lists_module
 from groupbot.routers import admin_rank_audit_actions as _audit_actions_module
 from groupbot.routers import admin_rank_compact_actions as _compact_actions_module
 from groupbot.routers import admin_rank_target_actions as _target_actions_module
 from groupbot.routers import group_control_role_actions as _role_actions_module
 from groupbot.routers import group_control_ux as _role_ux_module
+from groupbot.routers import manual_moderation as _manual_moderation_module
 from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import (
     CHAT_ADMIN_ROLE,
@@ -19,6 +21,7 @@ from groupbot.services.helper_role_policy import (
     VOICE_ADMIN_ROLE,
     detach_helpers_from_mentor,
 )
+from groupbot.services.permissions import is_group_owner
 from groupbot.services.special_statuses import remove_special_statuses_for_user
 
 
@@ -50,6 +53,29 @@ async def _current_role_name(
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def active_admin_access(session: AsyncSession, chat_id: int, user_id: int) -> bool:
+    """Return True only for the owner or a currently active non-Helper rank.
+
+    Reserve-only rows, disabled roles and Helper must not pass legacy admin
+    checks used by personal punishment-list commands.
+    """
+    if await is_group_owner(session, chat_id, user_id):
+        return True
+    role_name = (
+        await session.execute(
+            select(AdminRole.name)
+            .join(AdminAssignment, AdminAssignment.role_id == AdminRole.id)
+            .where(
+                AdminAssignment.chat_id == chat_id,
+                AdminAssignment.user_id == user_id,
+                AdminRole.is_active.is_(True),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return role_name is not None and role_name != HELPER_ROLE
 
 
 async def assign_role_with_mentor_lifecycle(
@@ -175,3 +201,8 @@ _target_actions_module._assign_role = assign_role_with_mentor_lifecycle
 # therefore both references must be replaced.
 _role_actions_module._sync_managed_telegram_admins_for_role_state = sync_role_state_with_helper_lifecycle
 _role_ux_module._sync_managed_telegram_admins_for_role_state = sync_role_state_with_helper_lifecycle
+
+# The new punishment-list router imported the legacy function by value, so patch
+# both namespaces to keep reserve-only, disabled and Helper assignments out.
+_manual_moderation_module._admin_access = active_admin_access
+_punishment_lists_module._admin_access = active_admin_access
