@@ -37,9 +37,11 @@ ROLE_EDITOR_PREFIXES = (
 )
 
 # These callbacks must stay usable even after a tariff expires. They let the
-# owner navigate out of the cabinet or disconnect the group rather than trapping
-# them behind a subscription wall.
+# owner inspect/navigate the group card or disconnect the group rather than
+# trapping them behind a subscription wall. Functional buttons inside the card
+# still pass through the general subscription gate below.
 SUBSCRIPTION_EXEMPT_GROUP_PREFIXES = (
+    "group:open:",
     "group:delete_prompt:",
     "group:delete_confirm:",
 )
