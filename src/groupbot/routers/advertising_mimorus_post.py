@@ -58,8 +58,10 @@ MIMORUS_POST_TEXT = (
 def create_advertising_mimorus_post_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
-    del session_factory
     router = Router(name="advertising_mimorus_post")
+
+    from groupbot.routers.advertising_reviews_nav import create_advertising_reviews_nav_router
+    router.include_router(create_advertising_reviews_nav_router(session_factory))
 
     @router.message(F.chat.type == "private", F.text == "📢 Реклама")
     async def advertising_home_message(message: Message, state: FSMContext) -> None:
