@@ -86,7 +86,27 @@ async def assign_role_with_mentor_lifecycle(
     role: AdminRole,
     actor_id: int,
 ) -> str | None:
-    """Apply rank transition cleanup without breaking eligible mentor changes."""
+    """Apply rank transition cleanup without breaking eligible mentor changes.
+
+    Lock the role row before assignment. Role deletion/toggling uses the same
+    PostgreSQL row lock, so a stale assignment button cannot recreate or attach
+    an assignment while that role is being disabled/deleted.
+    """
+    locked_role = (
+        await session.execute(
+            select(AdminRole)
+            .where(
+                AdminRole.id == role.id,
+                AdminRole.chat_id == chat_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if locked_role is None:
+        return "Ранг больше недоступен. Откройте список рангов заново."
+    if not locked_role.is_active:
+        return "Ранг выключен. Включите его перед назначением."
+
     old_role_name = await _current_role_name(
         session,
         chat_id=chat_id,
@@ -96,13 +116,13 @@ async def assign_role_with_mentor_lifecycle(
         session,
         chat_id=chat_id,
         target_id=target_id,
-        role=role,
+        role=locked_role,
         actor_id=actor_id,
     )
     if error is not None:
         return error
 
-    if old_role_name in MENTOR_ROLE_NAMES and role.name not in MENTOR_ROLE_NAMES:
+    if old_role_name in MENTOR_ROLE_NAMES and locked_role.name not in MENTOR_ROLE_NAMES:
         await detach_helpers_from_mentor(
             session,
             chat_id=chat_id,
@@ -115,7 +135,7 @@ async def assign_role_with_mentor_lifecycle(
     # a full administrative rank, remove stale participant immunity so it cannot
     # silently reappear after a later demotion. Helper intentionally remains an
     # ordinary Telegram participant and is excluded from this cleanup.
-    if role.name != HELPER_ROLE:
+    if locked_role.name != HELPER_ROLE:
         removed_statuses = await remove_special_statuses_for_user(
             session,
             chat_id=chat_id,
@@ -130,7 +150,7 @@ async def assign_role_with_mentor_lifecycle(
                 target_type="user",
                 target_id=str(target_id),
                 payload={
-                    "role_name": role.name,
+                    "role_name": locked_role.name,
                     "statuses": removed_statuses,
                 },
             )
