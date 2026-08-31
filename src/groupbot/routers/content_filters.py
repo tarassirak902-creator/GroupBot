@@ -6,13 +6,11 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import Tariff
 from groupbot.routers.antiflood import ACTION_LABELS, DURATION_RE, _duration_label, _duration_seconds
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
-from groupbot.services.subscriptions import active_subscription_for_owner, effective_limit_for_owner
+from groupbot.services.subscriptions import effective_limit_for_owner
 
 CONTENT_ACTION_LABELS = {
     **ACTION_LABELS,
@@ -29,6 +27,10 @@ class ContentFilterState(StatesGroup):
 
 def _key(kind: str) -> str:
     return "blocked_words" if kind == "words" else "blocked_phrases"
+
+
+def _list_limit_key(kind: str) -> str:
+    return "blocked_word_lists" if kind == "words" else "blocked_phrase_lists"
 
 
 def _title(kind: str) -> str:
@@ -81,16 +83,8 @@ async def _item_limit(session: AsyncSession, owner_id: int, kind: str) -> int | 
     return await effective_limit_for_owner(session, owner_id, _key(kind))
 
 
-async def _category_limit(session: AsyncSession, owner_id: int) -> int | None:
-    subscription = await active_subscription_for_owner(session, owner_id)
-    if subscription is None:
-        return None
-    tariff = (
-        await session.execute(select(Tariff).where(Tariff.id == subscription.tariff_id))
-    ).scalar_one_or_none()
-    if tariff is not None and tariff.code == "TEST":
-        return 1
-    return None
+async def _category_limit(session: AsyncSession, owner_id: int, kind: str) -> int | None:
+    return await effective_limit_for_owner(session, owner_id, _list_limit_key(kind))
 
 
 def _total_items(lists: list[dict]) -> int:
@@ -131,12 +125,13 @@ def _list_keyboard(chat_id: int, kind: str, index: int, row: dict) -> InlineKeyb
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _entries_keyboard(chat_id: int, kind: str, index: int) -> InlineKeyboardMarkup:
+def _entries_keyboard(chat_id: int, kind: str, index: int, *, can_add: bool) -> InlineKeyboardMarkup:
+    action_row: list[InlineKeyboardButton] = []
+    if can_add:
+        action_row.append(InlineKeyboardButton(text="➕ Добавить", callback_data=f"cf:add:{kind}:{chat_id}:{index}"))
+    action_row.append(InlineKeyboardButton(text="➖ Удалить", callback_data=f"cf:remove:{kind}:{chat_id}:{index}"))
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="➕ Добавить", callback_data=f"cf:add:{kind}:{chat_id}:{index}"),
-            InlineKeyboardButton(text="➖ Удалить", callback_data=f"cf:remove:{kind}:{chat_id}:{index}"),
-        ],
+        action_row,
         [InlineKeyboardButton(text="◀️ К списку", callback_data=f"cf:list:{kind}:{chat_id}:{index}")],
     ])
 
@@ -152,10 +147,20 @@ def _category_text(kind: str, lists: list[dict], category_limit: int | None, ite
         f"Всего {_entry_label(kind)}: <b>{item_count}</b>",
         "",
         "Каждый список имеет собственное наказание и собственный срок мута.",
-        "Выберите существующий список или создайте новый.",
     ]
-    if category_limit == 1:
-        lines += ["", "TEST: доступен <b>1 список</b>."]
+    over_lists = category_limit is not None and len(lists) > category_limit
+    over_items = item_limit is not None and total > item_limit
+    if over_lists or over_items:
+        lines += [
+            "",
+            "⚠️ <b>Использование выше лимита текущего тарифа.</b>",
+            "Существующие списки и записи сохранены: их можно редактировать, выключать и удалять. "
+            "Создание новых списков/записей станет доступно после уменьшения использования или повышения тарифа.",
+        ]
+    elif category_limit is not None and len(lists) >= category_limit:
+        lines += ["", "Лимит списков текущего тарифа исчерпан. Существующие списки можно редактировать или удалять."]
+    else:
+        lines += ["", "Выберите существующий список или создайте новый."]
     return "\n".join(lines)
 
 
@@ -165,12 +170,18 @@ def _list_text(kind: str, row: dict, item_limit: int | None, total_items: int) -
     if row.get("action") == "mute":
         duration = f"\nСрок мута: <b>{_duration_label(row.get('mute_duration'))}</b>"
     category_total = str(total_items) if item_limit is None else f"{total_items}/{item_limit}"
+    over_limit = item_limit is not None and total_items > item_limit
+    limit_note = (
+        "\n\n⚠️ Лимит записей текущего тарифа превышен. Удаление и редактирование доступны, добавление новых записей заблокировано."
+        if over_limit
+        else ""
+    )
     return (
         f"{_title(kind)} · <b>{escape(str(row.get('name') or 'Список'))}</b>\n\n"
         f"Статус: <b>{'✅ включён' if row.get('enabled') else '❌ выключен'}</b>\n"
         f"Наказание: <b>{action}</b>{duration}\n"
         f"В этом списке: <b>{len(row.get('items') or [])}</b> {_entry_label(kind)}\n"
-        f"Всего в категории: <b>{category_total}</b>"
+        f"Всего в категории: <b>{category_total}</b>{limit_note}"
     )
 
 
@@ -182,6 +193,8 @@ def _entries_text(kind: str, row: dict, item_limit: int | None, total_items: int
         f"Категория: <b>{escape(str(row.get('name') or 'Список'))}</b>",
         f"Всего в категории: <b>{category_total}</b>",
     ]
+    if item_limit is not None and total_items >= item_limit:
+        lines += ["", "⚠️ Добавление новых записей недоступно: достигнут лимит текущего тарифа. Удаление остаётся доступным."]
     if notice:
         lines += ["", notice]
     items = list(row.get("items") or [])
@@ -201,7 +214,7 @@ async def _load(
         settings = await _ensure_group_settings(session, chat_id)
         lists = _lists(settings.moderation_config, kind)
         item_limit = await _item_limit(session, owner_id, kind)
-        category_limit = await _category_limit(session, owner_id)
+        category_limit = await _category_limit(session, owner_id, kind)
         return lists, item_limit, category_limit
 
 
@@ -237,8 +250,14 @@ async def _restore_entries(
     lists, item_limit, _ = loaded
     if not 0 <= index < len(lists):
         return
-    text = _entries_text(kind, lists[index], item_limit, _total_items(lists), notice)
-    markup = _entries_keyboard(chat_id, kind, index)
+    total_items = _total_items(lists)
+    text = _entries_text(kind, lists[index], item_limit, total_items, notice)
+    markup = _entries_keyboard(
+        chat_id,
+        kind,
+        index,
+        can_add=item_limit is None or total_items < item_limit,
+    )
     panel_id = state_data.get("cf_panel_message_id")
     if panel_id is not None:
         try:
@@ -345,7 +364,7 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
                     return
                 settings = await _ensure_group_settings(session, chat_id)
                 lists = _lists(settings.moderation_config, kind)
-                limit = await _category_limit(session, message.from_user.id)
+                limit = await _category_limit(session, message.from_user.id, kind)
                 if limit is not None and len(lists) >= limit:
                     await state.clear()
                     return
@@ -399,11 +418,17 @@ def create_content_filters_router(session_factory: async_sessionmaker[AsyncSessi
         if not 0 <= index < len(lists):
             await callback.answer("Список не найден.", show_alert=True)
             return
+        total_items = _total_items(lists)
         if callback.message:
             await callback.message.edit_text(
-                _entries_text(kind, lists[index], item_limit, _total_items(lists)),
+                _entries_text(kind, lists[index], item_limit, total_items),
                 parse_mode="HTML",
-                reply_markup=_entries_keyboard(chat_id, kind, index),
+                reply_markup=_entries_keyboard(
+                    chat_id,
+                    kind,
+                    index,
+                    can_add=item_limit is None or total_items < item_limit,
+                ),
             )
         await callback.answer()
 
