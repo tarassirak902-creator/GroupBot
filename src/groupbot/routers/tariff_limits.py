@@ -6,9 +6,10 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, Group, GroupOwner, GroupSettings
+from groupbot.models import AdminAssignment, Group, GroupOwner, GroupSettings, GroupStatus
 from groupbot.network_models import Network, NetworkGroup
 from groupbot.routers.content_filters import _lists
+from groupbot.services.audit import write_audit
 from groupbot.services.protection_schedule import schedule_config
 from groupbot.services.subscriptions import active_subscription_for_owner, effective_limit_for_owner
 
@@ -243,15 +244,73 @@ def create_tariff_limits_router(session_factory: async_sessionmaker[AsyncSession
         if len(parts) != 4:
             raise SkipHandler()
         try:
-            network_id = int(parts[2])
+            network_id, chat_id = int(parts[2]), int(parts[3])
         except ValueError:
             raise SkipHandler()
+        owner_id = callback.from_user.id
         async with session_factory() as session:
-            reached, limit = await _network_group_limit_reached(session, owner_id=callback.from_user.id, network_id=network_id)
-        if reached and limit is not None:
-            await callback.answer(f"В этой сетке достигнут лимит групп: {limit}.", show_alert=True)
-            return
-        raise SkipHandler()
+            async with session.begin():
+                network = (await session.execute(
+                    select(Network).where(Network.id == network_id, Network.owner_user_id == owner_id).with_for_update()
+                )).scalar_one_or_none()
+                if network is None:
+                    await callback.answer("Сетка не найдена.", show_alert=True)
+                    return
+
+                limit = await effective_limit_for_owner(session, owner_id, "network_groups_per_network")
+                exists = (await session.execute(
+                    select(NetworkGroup.id).where(NetworkGroup.network_id == network_id, NetworkGroup.chat_id == chat_id)
+                )).scalar_one_or_none()
+                if exists is not None:
+                    pass
+                else:
+                    owns_group = (await session.execute(
+                        select(GroupOwner.id)
+                        .join(Group, Group.chat_id == GroupOwner.chat_id)
+                        .where(
+                            GroupOwner.chat_id == chat_id,
+                            GroupOwner.user_id == owner_id,
+                            GroupOwner.is_current.is_(True),
+                            Group.status == GroupStatus.active.value,
+                        )
+                        .limit(1)
+                    )).scalar_one_or_none()
+                    if owns_group is None:
+                        await callback.answer("Эта группа недоступна для вашей сетки.", show_alert=True)
+                        return
+
+                    other_network = (await session.execute(
+                        select(NetworkGroup.id)
+                        .join(Network, Network.id == NetworkGroup.network_id)
+                        .where(
+                            NetworkGroup.chat_id == chat_id,
+                            Network.owner_user_id == owner_id,
+                            NetworkGroup.network_id != network_id,
+                        )
+                        .limit(1)
+                    )).scalar_one_or_none()
+                    if other_network is not None:
+                        await callback.answer("Группа уже состоит в другой вашей сетке.", show_alert=True)
+                        return
+
+                    count = int((await session.execute(
+                        select(func.count()).select_from(NetworkGroup).where(NetworkGroup.network_id == network_id)
+                    )).scalar_one())
+                    if limit is not None and count >= limit:
+                        await callback.answer(f"В этой сетке достигнут лимит групп: {limit}.", show_alert=True)
+                        return
+
+                    session.add(NetworkGroup(network_id=network_id, chat_id=chat_id))
+                    await write_audit(
+                        session,
+                        "network.group_added",
+                        chat_id=chat_id,
+                        actor_user_id=owner_id,
+                        target_type="network",
+                        target_id=str(network_id),
+                    )
+        if not await _render_network_card(callback, session_factory, network_id):
+            await callback.answer("Сетка обновлена.")
 
     @router.callback_query(F.data.startswith("reserve:choose:"))
     async def reserve_choose_limit(callback: CallbackQuery) -> None:
