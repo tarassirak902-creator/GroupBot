@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, TelegramObject
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.routers.group_control import _owner_access
+from groupbot.models import AdminPermission, AdminRole
+from groupbot.routers.group_control import KNOWN_PERMISSIONS, _owner_access
 from groupbot.routers.member_status_guard import is_regular_group_member
 
 
@@ -22,16 +25,18 @@ SETTINGS_CALLBACK_PREFIXES = (
     "preason:",  # punishment reasons
 )
 SPECIAL_PICK_PREFIX = "priv:special_pick:"
-RANK_DRAFT_SAVE_PREFIX = "gctl:perm_save:"
+ROLE_EDITOR_PREFIXES = (
+    "gctl:role:",
+    "gctl:perm:",
+    "gctl:perm_save:",
+    "gctl:role_toggle:",
+    "gctl:role_delete:",
+    "gctl:role_delete_confirm:",
+)
+_ROLE_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 
 
 def _settings_chat_id(data: str) -> int | None:
-    """Return the group chat id embedded in a settings callback.
-
-    Telegram group/supergroup ids are negative. Looking for the first negative
-    integer keeps this middleware independent from each router's callback
-    layout while avoiding user ids and numeric setting values.
-    """
     for part in data.split(":"):
         try:
             value = int(part)
@@ -52,18 +57,55 @@ def _special_pick_target(data: str) -> int | None:
         return None
 
 
-def _rank_draft_target(data: str) -> tuple[int, int] | None:
-    parts = data.split(":", 3)
-    if len(parts) != 4:
+def _role_target(data: str) -> tuple[int, int] | None:
+    if not data.startswith(ROLE_EDITOR_PREFIXES):
         return None
+    parts = data.split(":")
     try:
         return int(parts[2]), int(parts[3])
-    except ValueError:
+    except (ValueError, IndexError):
         return None
+
+
+def _permission_keys() -> tuple[str, ...]:
+    return tuple(key for key, _ in KNOWN_PERMISSIONS)
+
+
+def _normalize_permissions(value: Any) -> dict[str, bool] | None:
+    if not isinstance(value, dict):
+        return None
+    return {key: bool(value.get(key, False)) for key in _permission_keys()}
+
+
+async def _permission_snapshot(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    role_id: int,
+) -> dict[str, bool] | None:
+    role_exists = (
+        await session.execute(
+            select(AdminRole.id).where(
+                AdminRole.id == role_id,
+                AdminRole.chat_id == chat_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if role_exists is None:
+        return None
+    rows = (
+        await session.execute(
+            select(AdminPermission.permission, AdminPermission.allowed).where(
+                AdminPermission.role_id == role_id,
+            )
+        )
+    ).all()
+    persisted = {str(key): bool(allowed) for key, allowed in rows}
+    return {key: bool(persisted.get(key, False)) for key in _permission_keys()}
 
 
 class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
-    """Enforce owner access and validate private group-settings callbacks."""
+    """Enforce owner access and guard persistent group-setting editors."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -80,40 +122,21 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
         callback_data = event.data or ""
         is_settings = callback_data.startswith(SETTINGS_CALLBACK_PREFIXES)
         is_special_pick = callback_data.startswith(SPECIAL_PICK_PREFIX)
-        is_rank_draft_save = callback_data.startswith(RANK_DRAFT_SAVE_PREFIX)
-        if not is_settings and not is_special_pick and not is_rank_draft_save:
+        role_target = _role_target(callback_data)
+        if not is_settings and not is_special_pick and role_target is None:
             return await handler(event, data)
 
-        if is_rank_draft_save:
-            target = _rank_draft_target(callback_data)
-            state = data.get("state")
-            if target is None or not isinstance(state, FSMContext):
-                await event.answer(
-                    "Редактор устарел. Откройте нужный ранг заново.",
-                    show_alert=True,
-                )
-                return None
-            chat_id, role_id = target
-            state_data = await state.get_data()
-            if (
-                state_data.get("permission_draft_chat_id") != chat_id
-                or state_data.get("permission_draft_role_id") != role_id
-                or not isinstance(state_data.get("permission_draft"), dict)
-            ):
-                await event.answer(
-                    "Эта кнопка относится к старому редактору. Откройте нужный ранг заново.",
-                    show_alert=True,
-                )
-                return None
+        if role_target is not None:
+            chat_id, role_id = role_target
         else:
             chat_id = _settings_chat_id(callback_data)
             if chat_id is None:
                 await event.answer("Не удалось определить группу для этой настройки.", show_alert=True)
                 return None
+            role_id = None
 
         async with self.session_factory() as session:
             allowed = await _owner_access(session, chat_id, event.from_user.id)
-
         if not allowed:
             await event.answer(
                 "Настройки этой группы доступны только владельцу при активном тарифе.",
@@ -139,4 +162,74 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
                 )
                 return None
 
-        return await handler(event, data)
+        if role_target is None:
+            return await handler(event, data)
+
+        lock = _ROLE_LOCKS.setdefault((chat_id, int(role_id)), asyncio.Lock())
+        async with lock:
+            state = data.get("state")
+            permission_callback = callback_data.startswith(("gctl:perm:", "gctl:perm_save:"))
+            if permission_callback:
+                if not isinstance(state, FSMContext):
+                    await event.answer("Редактор устарел. Откройте нужный ранг заново.", show_alert=True)
+                    return None
+                state_data = await state.get_data()
+                draft = _normalize_permissions(state_data.get("permission_draft"))
+                base = _normalize_permissions(state_data.get("permission_draft_base"))
+                if (
+                    state_data.get("permission_draft_chat_id") != chat_id
+                    or state_data.get("permission_draft_role_id") != role_id
+                    or draft is None
+                ):
+                    await event.answer(
+                        "Эта кнопка относится к старому редактору. Откройте нужный ранг заново.",
+                        show_alert=True,
+                    )
+                    return None
+
+                async with self.session_factory() as session:
+                    current = await _permission_snapshot(session, chat_id=chat_id, role_id=int(role_id))
+                if current is None:
+                    await state.clear()
+                    await event.answer("Ранг уже удалён.", show_alert=True)
+                    return None
+
+                # A screen created before base-version tracking is safe only if
+                # its draft still exactly matches the current DB state.
+                if base is None:
+                    if draft != current:
+                        await state.clear()
+                        await event.answer(
+                            "Права ранга уже изменились. Откройте ранг заново, чтобы не перезаписать новые настройки.",
+                            show_alert=True,
+                        )
+                        return None
+                    await state.update_data(permission_draft_base=current)
+                elif base != current:
+                    await state.clear()
+                    await event.answer(
+                        "Права ранга изменились в другом окне. Откройте ранг заново.",
+                        show_alert=True,
+                    )
+                    return None
+
+            result = await handler(event, data)
+
+            # Opening, toggling role state or successfully saving permissions
+            # establishes a fresh optimistic base for the next editor action.
+            if isinstance(state, FSMContext) and callback_data.startswith((
+                "gctl:role:",
+                "gctl:role_toggle:",
+                "gctl:perm_save:",
+            )):
+                state_data = await state.get_data()
+                if (
+                    state_data.get("permission_draft_chat_id") == chat_id
+                    and state_data.get("permission_draft_role_id") == role_id
+                ):
+                    async with self.session_factory() as session:
+                        current = await _permission_snapshot(session, chat_id=chat_id, role_id=int(role_id))
+                    if current is not None:
+                        await state.update_data(permission_draft_base=current)
+
+            return result
