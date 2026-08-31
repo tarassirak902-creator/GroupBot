@@ -28,7 +28,24 @@ from groupbot.routers import ban_cleanup as ban_cleanup_module
 from groupbot.routers import creator_subscription_duration as creator_subscription_duration_module
 from groupbot.routers import creator_user_profile_links as creator_user_profile_links_module
 from groupbot.routers import entry_protection as entry_protection_module
+from groupbot.routers import group_control as group_control_module
 from groupbot.routers import manual_moderation as manual_moderation_module
+
+# Compatibility for hierarchy/admin modules that historically imported the TEST-only
+# helper. The canonical limit is now tariff-wide. Keep the shared permission catalog
+# normalized in-place because several already-imported modules hold this list object.
+group_control_module._trial_rank_limit = group_control_module._rank_limit
+group_control_module.KNOWN_PERMISSIONS[:] = [
+    ("warning", "⚠️ Предупреждение"),
+    ("mute", "🔇 Мут"),
+    ("ban", "⛔ Бан"),
+    ("unmute", "🔊 Размут"),
+    ("unban", "✅ Разбан"),
+    ("delete", "🗑 Удаление сообщений"),
+    ("pin", "📌 Закрепление сообщений"),
+    ("punishment_lists", "📋 Общие списки наказаний"),
+]
+
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
 from groupbot.routers.admin_punishment_lists import create_admin_punishment_lists_router
