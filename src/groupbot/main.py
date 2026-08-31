@@ -66,6 +66,7 @@ from groupbot.routers.creator_group_profile_links import create_creator_group_pr
 from groupbot.routers.creator_identity_privacy import create_creator_identity_privacy_router
 from groupbot.routers.creator_subscription_duration import create_creator_subscription_duration_router
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
+from groupbot.routers.custom_role_safe_delete import create_custom_role_safe_delete_router
 from groupbot.routers.entry_protection import create_entry_protection_router
 from groupbot.routers.entry_protection_runtime import (
     create_persistent_entry_runtime_router,
@@ -189,6 +190,7 @@ async def main() -> None:
     dp.include_router(create_group_commands_router(session_factory))
     dp.include_router(create_special_status_members_router(session_factory))
     dp.include_router(create_admin_hierarchy_router(session_factory))
+    dp.include_router(create_custom_role_safe_delete_router(session_factory))
     dp.include_router(create_group_control_ux_router(session_factory))
     dp.include_router(create_group_control_role_actions_router(session_factory))
     dp.include_router(create_punishment_reasons_router(session_factory))
