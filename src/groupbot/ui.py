@@ -87,20 +87,24 @@ def group_locked_keyboard(chat_id: int) -> InlineKeyboardMarkup:
 
 
 def group_management_keyboard(chat_id: int, *, active: bool) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="🛡 Модерация", callback_data=f"group:section:{chat_id}:moderation")],
-        [InlineKeyboardButton(text="👮 Администрация", callback_data=f"group:section:{chat_id}:administration")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data=f"group:section:{chat_id}:statistics")],
-        [InlineKeyboardButton(text="📢 Реклама группы", callback_data=f"group:section:{chat_id}:advertising")],
-        [InlineKeyboardButton(text="🤖 Автоматизация (скоро)", callback_data=f"group:section:{chat_id}:automation")],
-        [InlineKeyboardButton(text="🎮 Развлечения (скоро)", callback_data=f"group:section:{chat_id}:games")],
-        [InlineKeyboardButton(text="⚙️ Доп. настройки (скоро)", callback_data=f"group:section:{chat_id}:settings")],
-        [InlineKeyboardButton(text="🔎 Диагностика", callback_data=f"group:diagnostic:{chat_id}")],
-    ]
+    rows: list[list[InlineKeyboardButton]] = []
     if active:
-        rows.append([InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group:delete_prompt:{chat_id}")])
+        rows.extend([
+            [InlineKeyboardButton(text="🛡 Модерация", callback_data=f"group:section:{chat_id}:moderation")],
+            [InlineKeyboardButton(text="👮 Администрация", callback_data=f"group:section:{chat_id}:administration")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data=f"group:section:{chat_id}:statistics")],
+            [InlineKeyboardButton(text="📢 Реклама группы", callback_data=f"group:section:{chat_id}:advertising")],
+            [InlineKeyboardButton(text="🤖 Автоматизация (скоро)", callback_data=f"group:section:{chat_id}:automation")],
+            [InlineKeyboardButton(text="🎮 Развлечения (скоро)", callback_data=f"group:section:{chat_id}:games")],
+            [InlineKeyboardButton(text="⚙️ Доп. настройки (скоро)", callback_data=f"group:section:{chat_id}:settings")],
+            [InlineKeyboardButton(text="🔎 Диагностика", callback_data=f"group:diagnostic:{chat_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group:delete_prompt:{chat_id}")],
+        ])
     else:
-        rows.append([InlineKeyboardButton(text="ℹ️ Как подключить", callback_data=f"group:reconnect:{chat_id}")])
-        rows.append([InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group:delete_prompt:{chat_id}")])
+        rows.extend([
+            [InlineKeyboardButton(text="🔎 Диагностика подключения", callback_data=f"group:diagnostic:{chat_id}")],
+            [InlineKeyboardButton(text="ℹ️ Как подключить", callback_data=f"group:reconnect:{chat_id}")],
+            [InlineKeyboardButton(text="🗑 Удалить группу", callback_data=f"group:delete_prompt:{chat_id}")],
+        ])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="group:list"), InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
