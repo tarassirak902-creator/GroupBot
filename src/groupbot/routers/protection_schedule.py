@@ -6,10 +6,13 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from groupbot.models import GroupOwner, GroupSettings
 from groupbot.routers.group_control import _ensure_group_settings, _owner_access
 from groupbot.services.protection_schedule import MODULES, schedule_active, schedule_config
+from groupbot.services.subscriptions import effective_limit_for_owner
 
 TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})$")
 PRESETS = (("23:00–07:00", "2300", "0700"), ("00:00–08:00", "0000", "0800"), ("01:00–09:00", "0100", "0900"), ("22:00–06:00", "2200", "0600"))
@@ -36,14 +39,36 @@ async def _save(session: AsyncSession, chat_id: int, cfg: dict) -> None:
     settings.moderation_config = root
 
 
-def _main_keyboard(chat_id: int, cfg: dict) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Выключить расписание" if cfg["enabled"] else "⚪ Включить расписание", callback_data=f"ps:toggle:{chat_id}")],
+async def _schedule_usage(session: AsyncSession, owner_id: int) -> tuple[int, int | None]:
+    configs = (
+        await session.execute(
+            select(GroupSettings.moderation_config)
+            .join(
+                GroupOwner,
+                (GroupOwner.chat_id == GroupSettings.chat_id)
+                & (GroupOwner.user_id == owner_id)
+                & (GroupOwner.is_current.is_(True)),
+            )
+        )
+    ).scalars().all()
+    used = sum(1 for config in configs if schedule_config(config or {})["enabled"])
+    limit = await effective_limit_for_owner(session, owner_id, "protection_schedules")
+    return used, limit
+
+
+def _main_keyboard(chat_id: int, cfg: dict, *, can_enable: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if cfg["enabled"]:
+        rows.append([InlineKeyboardButton(text="🟢 Выключить расписание", callback_data=f"ps:toggle:{chat_id}")])
+    elif can_enable:
+        rows.append([InlineKeyboardButton(text="⚪ Включить расписание", callback_data=f"ps:toggle:{chat_id}")])
+    rows.extend([
         [InlineKeyboardButton(text="🕐 Время", callback_data=f"ps:time:{chat_id}"), InlineKeyboardButton(text="📅 Дни", callback_data=f"ps:days:{chat_id}")],
         [InlineKeyboardButton(text="🌍 Часовой пояс", callback_data=f"ps:tz:{chat_id}")],
         [InlineKeyboardButton(text="🛡 Защиты по расписанию", callback_data=f"ps:modules:{chat_id}")],
         [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession], chat_id: int) -> None:
@@ -55,20 +80,39 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         root = dict(settings.moderation_config or {})
         cfg = schedule_config(root)
         active_now = schedule_active(root)
+        used, limit = await _schedule_usage(session, callback.from_user.id)
     selected = [MODULES[key] for key in cfg["modules"]]
     modules_text = ", ".join(selected) if selected else "не выбраны"
+    usage_text = str(used) if limit is None else f"{used}/{limit}"
+    can_enable = cfg["enabled"] or limit is None or used < limit
     text = (
         "🕐 <b>Расписание защиты</b>\n\n"
         f"Статус: <b>{'✅ включено' if cfg['enabled'] else '❌ выключено'}</b>\n"
         f"Сейчас активно: <b>{'✅ да' if active_now else '❌ нет'}</b>\n"
+        f"Использовано расписаний по тарифу: <b>{usage_text}</b>\n"
         f"Время: <b>{cfg['start']}–{cfg['end']}</b>\n"
         f"Дни: <b>{DAY_LABELS.get(cfg['days'], 'Каждый день')}</b>\n"
         f"Часовой пояс: <b>{_fmt_offset(cfg['utc_offset'])}</b>\n"
         f"Защиты: <b>{modules_text}</b>\n\n"
         "В выбранное время отмеченные защиты временно включаются. После окончания окна Mimorus возвращает обычные настройки группы."
     )
+    if limit is not None and used > limit:
+        text += (
+            "\n\n⚠️ <b>Включённых расписаний больше лимита текущего тарифа.</b> "
+            "Существующие расписания сохранены: их можно редактировать или выключать. "
+            "Включение нового расписания станет доступно после уменьшения использования или повышения тарифа."
+        )
+    elif not cfg["enabled"] and limit is not None and used >= limit:
+        text += (
+            "\n\nЛимит расписаний текущего тарифа исчерпан. Настройки этого расписания можно подготовить, "
+            "но включить его получится после выключения расписания в другой группе или повышения тарифа."
+        )
     if callback.message:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_main_keyboard(chat_id, cfg))
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=_main_keyboard(chat_id, cfg, can_enable=can_enable),
+        )
     await callback.answer()
 
 
