@@ -19,8 +19,8 @@ def tariff_center_keyboard(*, has_active: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔷 STANDARD", callback_data="tariff:card:STANDARD")],
         [InlineKeyboardButton(text="💎 PRO", callback_data="tariff:card:PRO")],
         [InlineKeyboardButton(text="👑 MAX", callback_data="tariff:card:MAX")],
-        [InlineKeyboardButton(text="🛠 Собрать свой тариф", callback_data="tariff:custom")],
-        [InlineKeyboardButton(text="📦 Дополнительные покупки", callback_data="tariff:addons")],
+        [InlineKeyboardButton(text="🛠 Свой тариф (скоро)", callback_data="tariff:custom")],
+        [InlineKeyboardButton(text="📦 Доп. покупки (скоро)", callback_data="tariff:addons")],
     ]
     if has_active:
         rows.append([InlineKeyboardButton(text="📜 Моя подписка", callback_data="tariff:subscription")])
