@@ -12,6 +12,10 @@ from groupbot.routers.group_control import STANDARD_ADMIN_ROLE_NAMES, _owner_acc
 from groupbot.services.audit import write_audit
 
 
+class _RemovalBlocked(RuntimeError):
+    pass
+
+
 def create_custom_role_safe_delete_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
@@ -67,37 +71,35 @@ def create_custom_role_safe_delete_router(
         # failure cannot roll back already-applied Telegram changes for earlier
         # users and leave their DB assignments falsely active.
         while True:
-            async with session_factory() as session:
-                async with session.begin():
-                    assignment = (
-                        await session.execute(
-                            select(AdminAssignment)
-                            .where(
-                                AdminAssignment.chat_id == chat_id,
-                                AdminAssignment.role_id == role_id,
+            try:
+                async with session_factory() as session:
+                    async with session.begin():
+                        assignment = (
+                            await session.execute(
+                                select(AdminAssignment)
+                                .where(
+                                    AdminAssignment.chat_id == chat_id,
+                                    AdminAssignment.role_id == role_id,
+                                )
+                                .order_by(AdminAssignment.id.asc())
+                                .limit(1)
+                                .with_for_update()
                             )
-                            .order_by(AdminAssignment.id.asc())
-                            .limit(1)
-                            .with_for_update()
+                        ).scalar_one_or_none()
+                        if assignment is None:
+                            break
+                        error = await _remove_role_and_managed_telegram_admin(
+                            callback,
+                            session,
+                            chat_id=chat_id,
+                            assignment=assignment,
+                            role_id=role_id,
                         )
-                    ).scalar_one_or_none()
-                    if assignment is None:
-                        break
-                    error = await _remove_role_and_managed_telegram_admin(
-                        callback,
-                        session,
-                        chat_id=chat_id,
-                        assignment=assignment,
-                        role_id=role_id,
-                    )
-                    if error:
-                        failure = error
-                        # Force rollback of only this user's transaction.
-                        await session.rollback()
-                        break
-                    removed += 1
-
-            if failure:
+                        if error:
+                            raise _RemovalBlocked(error)
+                        removed += 1
+            except _RemovalBlocked as exc:
+                failure = str(exc)
                 break
 
         if failure:
