@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, TelegramObject
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminPermission, AdminRole
+from groupbot.models import AdminPermission, AdminRole, GroupOwner
 from groupbot.routers.group_control import KNOWN_PERMISSIONS
 from groupbot.routers.member_status_guard import is_regular_group_member
 from groupbot.services.permissions import is_group_owner
@@ -18,13 +18,13 @@ from groupbot.services.subscriptions import active_subscription_for_owner
 
 
 SETTINGS_CALLBACK_PREFIXES = (
-    "af:",       # anti-flood
-    "as:",       # anti-spam
-    "al:",       # anti-links and whitelist
-    "cf:",       # blocked words / phrases
-    "entry:",    # captcha / anti-raid settings
-    "ps:",       # protection schedule
-    "preason:",  # punishment reasons
+    "af:",
+    "as:",
+    "al:",
+    "cf:",
+    "entry:",
+    "ps:",
+    "preason:",
 )
 SPECIAL_PICK_PREFIX = "priv:special_pick:"
 ROLE_EDITOR_PREFIXES = (
@@ -35,10 +35,26 @@ ROLE_EDITOR_PREFIXES = (
     "gctl:role_delete:",
     "gctl:role_delete_confirm:",
 )
+
+# These callbacks must stay usable even after a tariff expires. They let the
+# owner navigate out of the cabinet or disconnect the group rather than trapping
+# them behind a subscription wall.
+SUBSCRIPTION_EXEMPT_GROUP_PREFIXES = (
+    "group:delete_prompt:",
+    "group:delete_confirm:",
+)
+
+EXPIRED_GROUP_CALLBACK_TEXT = (
+    "⚠️ Активная подписка владельца группы закончилась. "
+    "Функции и настройки Mimorus для этой группы временно недоступны. "
+    "Продлите или активируйте тариф в личных сообщениях с ботом."
+)
+
 _ROLE_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 
 
 def _settings_chat_id(data: str) -> int | None:
+    """Extract a Telegram group/supergroup id embedded in callback data."""
     for part in data.split(":"):
         try:
             value = int(part)
@@ -106,8 +122,26 @@ async def _permission_snapshot(
     return {key: bool(persisted.get(key, False)) for key in _permission_keys()}
 
 
+async def _group_subscription_owner(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+) -> tuple[int | None, bool]:
+    owner_id = (
+        await session.execute(
+            select(GroupOwner.user_id).where(
+                GroupOwner.chat_id == chat_id,
+                GroupOwner.is_current.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if owner_id is None:
+        return None, False
+    return int(owner_id), await active_subscription_for_owner(session, int(owner_id)) is not None
+
+
 class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
-    """Enforce owner access and guard persistent group-setting editors."""
+    """Guard private group callbacks, subscriptions and persistent editors."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
@@ -122,6 +156,24 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         callback_data = event.data or ""
+        chat_id_from_callback = _settings_chat_id(callback_data)
+
+        # Central subscription gate for every group-bound private callback. This
+        # prevents individual routers from silently returning or showing a vague
+        # "Недостаточно прав" when the actual reason is an expired tariff.
+        if (
+            chat_id_from_callback is not None
+            and not callback_data.startswith(SUBSCRIPTION_EXEMPT_GROUP_PREFIXES)
+        ):
+            async with self.session_factory() as session:
+                owner_id, has_subscription = await _group_subscription_owner(
+                    session,
+                    chat_id=chat_id_from_callback,
+                )
+            if owner_id is not None and not has_subscription:
+                await event.answer(EXPIRED_GROUP_CALLBACK_TEXT, show_alert=True)
+                return None
+
         is_settings = callback_data.startswith(SETTINGS_CALLBACK_PREFIXES)
         is_special_pick = callback_data.startswith(SPECIAL_PICK_PREFIX)
         role_target = _role_target(callback_data)
@@ -131,7 +183,7 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
         if role_target is not None:
             chat_id, role_id = role_target
         else:
-            chat_id = _settings_chat_id(callback_data)
+            chat_id = chat_id_from_callback
             if chat_id is None:
                 await event.answer("Не удалось определить группу для этой настройки.", show_alert=True)
                 return None
@@ -147,10 +199,7 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
             )
             return None
         if subscription is None:
-            await event.answer(
-                "⚠️ Активная подписка закончилась. Продлите или активируйте тариф, чтобы менять настройки этой группы.",
-                show_alert=True,
-            )
+            await event.answer(EXPIRED_GROUP_CALLBACK_TEXT, show_alert=True)
             return None
 
         if is_special_pick:
