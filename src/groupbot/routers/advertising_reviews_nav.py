@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingDispute, AdvertisingListing, AdvertisingReview
@@ -69,7 +69,7 @@ def create_advertising_reviews_nav_router(
                 .limit(50)
             )).all())
             open_disputes = int((await session.execute(
-                select(AdvertisingDispute.id)
+                select(func.count()).select_from(AdvertisingDispute)
                 .join(AdvertisingDeal, AdvertisingDeal.id == AdvertisingDispute.deal_id)
                 .where(
                     AdvertisingDispute.status == "open",
@@ -78,12 +78,12 @@ def create_advertising_reviews_nav_router(
                         AdvertisingDeal.seller_user_id == callback.from_user.id,
                     ),
                 )
-            )).scalars().unique().all().__len__())
+            )).scalar_one())
             reviews_count = int((await session.execute(
-                select(AdvertisingReview.id).where(
+                select(func.count()).select_from(AdvertisingReview).where(
                     AdvertisingReview.reviewer_user_id == callback.from_user.id
                 )
-            )).scalars().all().__len__())
+            )).scalar_one())
 
         if rows:
             text = (
