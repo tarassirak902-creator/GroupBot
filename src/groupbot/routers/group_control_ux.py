@@ -22,7 +22,12 @@ from groupbot.routers.group_control_role_actions import (
 from groupbot.services.audit import write_audit
 
 
-def _roles_keyboard(chat_id: int, roles: list[AdminRole]) -> InlineKeyboardMarkup:
+def _roles_keyboard(
+    chat_id: int,
+    roles: list[AdminRole],
+    *,
+    can_create: bool,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for role in roles:
         icon = "✅" if role.is_active else "⛔"
@@ -32,7 +37,8 @@ def _roles_keyboard(chat_id: int, roles: list[AdminRole]) -> InlineKeyboardMarku
                 callback_data=f"gctl:role:{chat_id}:{role.id}",
             )
         ])
-    rows.append([InlineKeyboardButton(text="➕ Создать свой ранг", callback_data=f"gctl:role_create:{chat_id}")])
+    if can_create:
+        rows.append([InlineKeyboardButton(text="➕ Создать свой ранг", callback_data=f"gctl:role_create:{chat_id}")])
     rows.append([InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -140,14 +146,25 @@ def create_group_control_ux_router(
             ).scalars().all())
             limit = await _rank_limit(session, callback.from_user.id)
             custom_count = await _custom_rank_count(session, chat_id)
-        suffix = f"\nЛимит тарифа с дополнениями: <b>{limit}</b> ранга." if limit is not None else ""
+        count_text = str(custom_count) if limit is None else f"{custom_count}/{limit}"
+        can_create = limit is None or custom_count < limit
+        notes = ""
+        if limit is not None and custom_count > limit:
+            notes = (
+                "\n\n⚠️ <b>Собственных рангов больше лимита текущего тарифа.</b> "
+                "Существующие ранги сохранены: их можно настраивать, выключать и удалять. "
+                "Создание нового ранга станет доступно после уменьшения количества или повышения тарифа."
+            )
+        elif limit is not None and custom_count == limit:
+            notes = "\n\nЛимит собственных рангов исчерпан. Существующие ранги можно настраивать или удалять."
         if callback.message is not None:
             await callback.message.edit_text(
                 "👑 <b>Ранги администрации</b>\n\n"
-                f"Собственных рангов: <b>{custom_count}</b>.{suffix}\n"
-                "Стандартные ранги не входят в этот лимит. Выберите ранг для настройки или создайте свой.",
+                f"Собственных рангов: <b>{count_text}</b>.\n"
+                "Стандартные ранги не входят в этот лимит. Выберите существующий ранг для настройки."
+                f"{notes}",
                 parse_mode="HTML",
-                reply_markup=_roles_keyboard(chat_id, rows),
+                reply_markup=_roles_keyboard(chat_id, rows, can_create=can_create),
             )
         await callback.answer()
 
@@ -228,11 +245,17 @@ def create_group_control_ux_router(
                     select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id)
                 )
             ).scalars().all())
+            limit = await _rank_limit(session, callback.from_user.id)
+            custom_count = await _custom_rank_count(session, chat_id)
         if callback.message is not None:
             await callback.message.edit_text(
                 f"✅ Ранг «{role_name}» удалён.\n\nНазначения этого ранга сняты: <b>{assignments}</b>.",
                 parse_mode="HTML",
-                reply_markup=_roles_keyboard(chat_id, rows),
+                reply_markup=_roles_keyboard(
+                    chat_id,
+                    rows,
+                    can_create=limit is None or custom_count < limit,
+                ),
             )
         await callback.answer("Ранг удалён")
 
