@@ -25,11 +25,8 @@ _START_CONNECT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Commands without arguments. Keep this catalog deliberately broader than one
-# router so an expired subscription never turns a valid Mimorus command into
-# silence merely because its handler lives in another module.
 _EXACT_COMMANDS = {
-    "кто я", "кто я?", "кто он", "кто он?", "кто она", "кто она?", "кто ты", "кто ты?",
+    "кто я", "кто он", "кто она", "кто ты",
     "топ админов", "топ администрации",
     "инфо", "информация", "профиль", "статистика", "стата",
     "нарушение",
@@ -37,8 +34,6 @@ _EXACT_COMMANDS = {
     "админы", "администрация",
     "очистить пользователя",
     "закрепи", "открепи",
-    # Social/user commands are commands too: when the tariff is unavailable the
-    # user must receive the same explanation instead of silence.
     "брак", "браки", "мой брак", "развод", "развестись",
 }
 
@@ -62,6 +57,11 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.casefold()).strip()
 
 
+def _command_form(text: str) -> str:
+    """Normalize harmless punctuation accepted by human-facing text commands."""
+    return _normalize(text).rstrip(" ?？!！.")
+
+
 def looks_like_mimorus_command(message: Message) -> bool:
     text = message.text or message.caption
     if not text:
@@ -73,9 +73,11 @@ def looks_like_mimorus_command(message: Message) -> bool:
         return False
     if normalized.startswith("/"):
         return True
-    if normalized in _EXACT_COMMANDS or normalized in _COMMAND_WORDS:
+
+    command = _command_form(text)
+    if command in _EXACT_COMMANDS or command in _COMMAND_WORDS:
         return True
-    return normalized.startswith(_COMMAND_PREFIXES)
+    return command.startswith(_COMMAND_PREFIXES)
 
 
 class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
@@ -113,8 +115,6 @@ class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
                     return await handler(event, data)
                 subscription = await active_subscription_for_group(session, event.chat.id)
         except Exception:
-            # A temporary DB error must not swallow commands; let the normal router
-            # produce its own error handling instead.
             return await handler(event, data)
 
         if subscription is not None:
