@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from groupbot.addon_models import SubscriptionAddon
@@ -43,6 +43,12 @@ async def effective_limit_for_owner(
     owner_user_id: int,
     limit_key: str,
 ) -> int | None:
+    # A tariff slot is an owner-wide resource. Keep limit check + subsequent
+    # mutation in the same transaction serialized across bot processes. The lock
+    # is transaction-scoped and re-entrant, so reading several limits in one
+    # transaction is safe and cheap.
+    await session.execute(select(func.pg_advisory_xact_lock(int(owner_user_id))))
+
     subscription = await active_subscription_for_owner(session, owner_user_id)
     if subscription is None:
         return None
