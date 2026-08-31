@@ -42,6 +42,13 @@ def _keyboard(rows: list[tuple[AdvertisingDeal, AdvertisingListing]]) -> InlineK
                 callback_data=f"ads:deal:{deal.id}",
             )
         ])
+        if deal.finished_at is not None:
+            buttons.append([
+                InlineKeyboardButton(
+                    text="⭐ Оставить отзыв",
+                    callback_data=f"ads:settle:review:{deal.id}",
+                )
+            ])
     buttons.append([InlineKeyboardButton(text="◀️ Реклама", callback_data="ads:home")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -91,7 +98,7 @@ def create_advertising_reviews_nav_router(
                 f"Открытых споров: <b>{open_disputes}</b>\n"
                 f"Ваших отзывов: <b>{reviews_count}</b>\n\n"
                 "Выберите сделку. Если размещение завершено и ещё не закрыто, внутри доступны «Претензий нет» и «Открыть спор». "
-                "После завершения можно оставить отзыв."
+                "После завершения можно оставить отзыв отдельной кнопкой."
             )
         else:
             text = (
