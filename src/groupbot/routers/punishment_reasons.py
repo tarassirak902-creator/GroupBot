@@ -51,12 +51,14 @@ def _duration_label(token: str | None) -> str:
     return f"{value} дн."
 
 
-def _keyboard(chat_id: int, reasons: dict[str, list[dict]]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="➕ Причина для пред", callback_data=f"preason:add:{chat_id}:warning")],
-        [InlineKeyboardButton(text="➕ Причина для мута", callback_data=f"preason:add:{chat_id}:mute")],
-        [InlineKeyboardButton(text="➕ Причина для бана", callback_data=f"preason:add:{chat_id}:ban")],
-    ]
+def _keyboard(chat_id: int, reasons: dict[str, list[dict]], *, can_add: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_add:
+        rows.extend([
+            [InlineKeyboardButton(text="➕ Причина для пред", callback_data=f"preason:add:{chat_id}:warning")],
+            [InlineKeyboardButton(text="➕ Причина для мута", callback_data=f"preason:add:{chat_id}:mute")],
+            [InlineKeyboardButton(text="➕ Причина для бана", callback_data=f"preason:add:{chat_id}:ban")],
+        ])
     for action in ("warning", "mute", "ban"):
         for index, item in enumerate(reasons[action]):
             label = str(item.get("text") or "Причина")
@@ -103,11 +105,21 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         lines.append("")
     if limit is not None:
         lines.append(f"Лимит тарифа с дополнениями: <b>{total}/{limit}</b> собственных причин.")
+        if total > limit:
+            lines.extend([
+                "",
+                "⚠️ <b>Причин больше лимита текущего тарифа.</b>",
+                "Существующие причины сохранены и могут использоваться или удаляться. "
+                "Создание новых причин станет доступно после уменьшения количества или повышения тарифа.",
+            ])
+        elif total == limit:
+            lines.extend(["", "Лимит исчерпан. Удаление существующих причин остаётся доступным."])
+    can_add = limit is None or total < limit
     if callback.message is not None:
         await callback.message.edit_text(
             "\n".join(lines),
             parse_mode="HTML",
-            reply_markup=_keyboard(chat_id, reasons),
+            reply_markup=_keyboard(chat_id, reasons, can_add=can_add),
         )
     await callback.answer()
 
