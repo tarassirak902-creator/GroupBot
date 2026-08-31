@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from groupbot.models import AdminAssignment, GroupOwner, GroupSettings
 from groupbot.network_models import Network, NetworkGroup
 from groupbot.routers.content_filters import _lists
+from groupbot.services.protection_schedule import schedule_config
 from groupbot.services.subscriptions import effective_limit_for_owner
 
 
@@ -100,6 +101,45 @@ async def _reserve_limit_reached(
         ).scalar_one()
     )
     return count >= limit, limit
+
+
+async def _schedule_limit_reached(
+    session: AsyncSession,
+    *,
+    owner_id: int,
+    chat_id: int,
+) -> tuple[bool, int | None]:
+    """Limit enabled protection schedules across an owner's current groups.
+
+    A group's already-enabled schedule is grandfathered after downgrade and may
+    still be edited or disabled. Only enabling an additional disabled schedule
+    consumes capacity and can be rejected.
+    """
+    limit = await effective_limit_for_owner(session, owner_id, "protection_schedules")
+    if limit is None:
+        return False, None
+
+    current_config = (
+        await session.execute(
+            select(GroupSettings.moderation_config).where(GroupSettings.chat_id == chat_id)
+        )
+    ).scalar_one_or_none() or {}
+    if schedule_config(current_config)["enabled"]:
+        return False, limit
+
+    configs = (
+        await session.execute(
+            select(GroupSettings.moderation_config)
+            .join(
+                GroupOwner,
+                (GroupOwner.chat_id == GroupSettings.chat_id)
+                & (GroupOwner.user_id == owner_id)
+                & (GroupOwner.is_current.is_(True)),
+            )
+        )
+    ).scalars().all()
+    enabled_count = sum(1 for config in configs if schedule_config(config or {})["enabled"])
+    return enabled_count >= limit, limit
 
 
 def create_tariff_limits_router(
@@ -230,6 +270,27 @@ def create_tariff_limits_router(
             await callback.answer(
                 f"Достигнут лимит резервных администраторов текущего тарифа: {limit}. "
                 "Уже назначенные резервы сохраняются; снимите один из них или повысьте тариф.",
+                show_alert=True,
+            )
+            return
+        raise SkipHandler()
+
+    @router.callback_query(F.data.startswith("ps:toggle:"))
+    async def protection_schedule_limit(callback: CallbackQuery) -> None:
+        try:
+            chat_id = int((callback.data or "").rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            raise SkipHandler()
+        async with session_factory() as session:
+            reached, limit = await _schedule_limit_reached(
+                session,
+                owner_id=callback.from_user.id,
+                chat_id=chat_id,
+            )
+        if reached and limit is not None:
+            await callback.answer(
+                f"Достигнут лимит включённых расписаний защиты текущего тарифа: {limit}. "
+                "Уже включённые расписания сохраняются; выключите одно из них или повысьте тариф.",
                 show_alert=True,
             )
             return
