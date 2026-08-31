@@ -9,7 +9,7 @@ from aiogram import Bot
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.advertising_models import AdvertisingDeal
+from groupbot.advertising_models import AdvertisingDeal, AdvertisingPlacement
 from groupbot.advertising_mutual_models import AdvertisingMutualOpDirection, AdvertisingMutualOpMember
 from groupbot.models import Group, GroupOwner, GroupStatus
 from groupbot.routers.advertising_settlement import settlement_keyboard
@@ -66,7 +66,125 @@ async def _mutual_failure_reason(session: AsyncSession, deal: AdvertisingDeal) -
     return None
 
 
+async def _mandatory_target_failure_reason(
+    bot: Bot,
+    session: AsyncSession,
+    *,
+    deal: AdvertisingDeal,
+    placement: AdvertisingPlacement,
+) -> str | None:
+    cfg = dict(placement.config_json or {})
+    target_chat_id = cfg.get("target_chat_id")
+    if not isinstance(target_chat_id, int):
+        return "в размещении отсутствует корректная целевая группа ОП"
+
+    group = (
+        await session.execute(select(Group).where(Group.chat_id == target_chat_id))
+    ).scalar_one_or_none()
+    if group is not None:
+        current_owner = (
+            await session.execute(
+                select(GroupOwner.user_id).where(
+                    GroupOwner.chat_id == target_chat_id,
+                    GroupOwner.is_current.is_(True),
+                ).limit(1)
+            )
+        ).scalar_one_or_none()
+        if current_owner is None:
+            return "целевая группа ОП больше не имеет текущего владельца в Mimorus"
+        if int(current_owner) != deal.buyer_user_id:
+            return "целевая группа ОП сменила владельца"
+        if group.status != GroupStatus.active.value:
+            return "целевая группа ОП больше не подключена к Mimorus"
+        if await active_subscription_for_group(session, target_chat_id) is None:
+            return "у владельца целевой группы ОП закончилась активная подписка Mimorus"
+        return None
+
+    # Manually entered targets are allowed even when they are not registered as
+    # an owned Mimorus group. They still must remain reachable by the bot because
+    # membership checks and subscriber progress depend on Telegram access.
+    try:
+        await bot.get_chat_member_count(target_chat_id)
+    except Exception:
+        return "Mimorus потерял доступ к внешней целевой группе ОП"
+    return None
+
+
+async def fail_unavailable_mandatory_targets(
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    now = datetime.now(timezone.utc)
+    notifications: list[tuple[int, int, int, str, bool]] = []
+    failed = 0
+    async with session_factory() as session:
+        async with session.begin():
+            rows = list((await session.execute(
+                select(AdvertisingPlacement, AdvertisingDeal)
+                .join(AdvertisingDeal, AdvertisingDeal.id == AdvertisingPlacement.deal_id)
+                .where(
+                    AdvertisingPlacement.kind == "mandatory",
+                    AdvertisingPlacement.status == "active",
+                    AdvertisingDeal.status == "accepted",
+                )
+                .with_for_update(skip_locked=True)
+            )).all())
+            for placement, deal in rows:
+                reason = await _mandatory_target_failure_reason(
+                    bot,
+                    session,
+                    deal=deal,
+                    placement=placement,
+                )
+                if reason is None:
+                    continue
+
+                placement.status = "failed"
+                cfg = dict(placement.config_json or {})
+                cfg["failure_reason"] = reason
+                cfg["failed_at"] = now.isoformat()
+                placement.config_json = cfg
+                failed += 1
+
+                other_active = (
+                    await session.execute(
+                        select(AdvertisingPlacement.id).where(
+                            AdvertisingPlacement.deal_id == deal.id,
+                            AdvertisingPlacement.id != placement.id,
+                            AdvertisingPlacement.status.in_(["pending", "ready", "active"]),
+                        ).limit(1)
+                    )
+                ).scalar_one_or_none()
+                deal_finished = other_active is None
+                if deal_finished:
+                    deal.status = "finished_waiting_confirmation"
+                    deal.finished_at = now
+                notifications.append(
+                    (deal.id, deal.buyer_user_id, deal.seller_user_id, reason, deal_finished)
+                )
+
+    for deal_id, buyer_id, seller_id, reason, deal_finished in notifications:
+        text = (
+            "⚠️ <b>Обязательная подписка остановлена</b>\n\n"
+            f"Причина: <b>{escape(reason)}</b>\n\n"
+            "Mimorus не считает эту часть рекламной сделки успешно выполненной."
+        )
+        markup = None
+        if deal_finished:
+            text += "\n\nСделка передана на подтверждение сторон: можно подтвердить отсутствие претензий или открыть спор."
+            markup = settlement_keyboard(deal_id)
+        else:
+            text += "\n\nДругая активная часть сделки продолжает выполняться. После её завершения сделка перейдёт на подтверждение сторон."
+        for user_id in (buyer_id, seller_id):
+            try:
+                await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=markup)
+            except Exception:
+                pass
+    return failed
+
+
 async def process_mutual_op(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
+    mandatory_failed = await fail_unavailable_mandatory_targets(bot, session_factory)
     now = datetime.now(timezone.utc)
     completed: list[tuple[int, int, int, int, int, str | None, str, str, str, int, int, bool]] = []
     failed: list[tuple[int, int, int, str, list[tuple[int, int, str | None]]]] = []
@@ -211,17 +329,17 @@ async def process_mutual_op(bot: Bot, session_factory: async_sessionmaker[AsyncS
                 )
             except Exception:
                 pass
-    return count + len(failed)
+    return mandatory_failed + count + len(failed)
 
 
 async def advertising_mutual_lifecycle_worker(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
     while True:
         try:
-            completed = await process_mutual_op(bot, session_factory)
-            if completed:
-                logger.info("Processed %s mutual OP direction/deal events", completed)
+            processed = await process_mutual_op(bot, session_factory)
+            if processed:
+                logger.info("Processed %s advertising OP lifecycle events", processed)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("Mutual OP lifecycle iteration failed")
+            logger.exception("Mutual/mandatory OP lifecycle iteration failed")
         await asyncio.sleep(30)
