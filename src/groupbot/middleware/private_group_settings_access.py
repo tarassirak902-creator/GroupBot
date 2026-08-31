@@ -36,19 +36,23 @@ ROLE_EDITOR_PREFIXES = (
     "gctl:role_delete_confirm:",
 )
 
-# These callbacks must stay usable even after a tariff expires. They let the
-# owner inspect/navigate the group card or disconnect the group rather than
-# trapping them behind a subscription wall. Functional buttons inside the card
-# still pass through the general subscription gate below.
 SUBSCRIPTION_EXEMPT_GROUP_PREFIXES = (
     "group:open:",
     "group:delete_prompt:",
     "group:delete_confirm:",
 )
+SUBSCRIPTION_EXEMPT_OWNER_CALLBACKS = {
+    "networks:list",
+}
 
 EXPIRED_GROUP_CALLBACK_TEXT = (
     "⚠️ Активная подписка владельца группы закончилась. "
     "Функции и настройки Mimorus для этой группы временно недоступны. "
+    "Продлите или активируйте тариф в личных сообщениях с ботом."
+)
+EXPIRED_OWNER_CALLBACK_TEXT = (
+    "⚠️ Активная подписка закончилась. "
+    "Эта функция Mimorus временно недоступна. "
     "Продлите или активируйте тариф в личных сообщениях с ботом."
 )
 
@@ -160,9 +164,9 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
         callback_data = event.data or ""
         chat_id_from_callback = _settings_chat_id(callback_data)
 
-        # Central subscription gate for every group-bound private callback. This
-        # prevents individual routers from silently returning or showing a vague
-        # "Недостаточно прав" when the actual reason is an expired tariff.
+        # Every callback carrying a concrete Telegram group id shares one
+        # subscription gate. Navigation to the group card and disconnect actions
+        # stay available after expiry, but functional/settings callbacks do not.
         if (
             chat_id_from_callback is not None
             and not callback_data.startswith(SUBSCRIPTION_EXEMPT_GROUP_PREFIXES)
@@ -174,6 +178,19 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
                 )
             if owner_id is not None and not has_subscription:
                 await event.answer(EXPIRED_GROUP_CALLBACK_TEXT, show_alert=True)
+                return None
+
+        # Network cards use network_id rather than chat_id, so they need an
+        # owner-scoped gate. The list itself remains visible to explain the state
+        # and provide normal navigation; all network actions require a tariff.
+        if (
+            callback_data.startswith("networks:")
+            and callback_data not in SUBSCRIPTION_EXEMPT_OWNER_CALLBACKS
+        ):
+            async with self.session_factory() as session:
+                subscription = await active_subscription_for_owner(session, event.from_user.id)
+            if subscription is None:
+                await event.answer(EXPIRED_OWNER_CALLBACK_TEXT, show_alert=True)
                 return None
 
         is_settings = callback_data.startswith(SETTINGS_CALLBACK_PREFIXES)
