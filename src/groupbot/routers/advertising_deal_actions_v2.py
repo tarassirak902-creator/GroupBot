@@ -8,6 +8,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingPlacement
+from groupbot.models import Group, GroupOwner, GroupStatus
+from groupbot.services.subscriptions import active_subscription_for_group
 
 POST_DAILY_LIMIT = 1
 MANDATORY_DAILY_LIMIT = 3
@@ -45,6 +47,30 @@ def _after_action_keyboard(deal: AdvertisingDeal, viewer_id: int) -> InlineKeybo
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _platform_ready(
+    session: AsyncSession,
+    *,
+    listing: AdvertisingListing,
+    seller_user_id: int,
+) -> bool:
+    current_owner = (
+        await session.execute(
+            select(GroupOwner.user_id)
+            .join(Group, Group.chat_id == GroupOwner.chat_id)
+            .where(
+                GroupOwner.chat_id == listing.chat_id,
+                GroupOwner.user_id == seller_user_id,
+                GroupOwner.is_current.is_(True),
+                Group.status == GroupStatus.active.value,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if current_owner is None:
+        return False
+    return await active_subscription_for_group(session, listing.chat_id) is not None
+
+
 def create_advertising_deal_actions_v2_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="advertising_deal_actions_v2")
 
@@ -73,8 +99,14 @@ def create_advertising_deal_actions_v2_router(session_factory: async_sessionmake
                 if deal.status != "pending":
                     await callback.answer("Эта заявка уже обработана.", show_alert=True); return
                 listing = (await session.execute(select(AdvertisingListing).where(AdvertisingListing.id == deal.listing_id).with_for_update())).scalar_one_or_none()
-                if listing is None or listing.owner_user_id != callback.from_user.id:
+                if listing is None or listing.owner_user_id != callback.from_user.id or not listing.is_active:
                     await callback.answer("Рекламное объявление недоступно.", show_alert=True); return
+                if not await _platform_ready(session, listing=listing, seller_user_id=callback.from_user.id):
+                    await callback.answer(
+                        "Эту заявку нельзя принять: рекламная группа сейчас не подключена, сменила владельца или у владельца нет активной подписки.",
+                        show_alert=True,
+                    )
+                    return
                 if deal.requested_post:
                     used_post = int((await session.execute(select(func.count()).select_from(AdvertisingDeal).where(AdvertisingDeal.listing_id == deal.listing_id, AdvertisingDeal.accepted_at >= day_start, AdvertisingDeal.requested_post.is_(True)))).scalar_one())
                     if used_post >= POST_DAILY_LIMIT:
