@@ -11,7 +11,7 @@ def _advertising_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📣 Купить рекламный пост у Mimorus",
+                    text="📣 Рекламный пост у Mimorus (скоро)",
                     callback_data="ads:mimorus_post",
                 )
             ],
@@ -44,19 +44,17 @@ HOME_TEXT = (
 )
 
 MIMORUS_POST_TEXT = (
-    "📣 <b>Рекламный пост от Mimorus</b>\n\n"
-    "Это отдельный формат от рекламы у владельцев групп.\n\n"
-    "Покупатель собирает рекламный пост и отправляет его на проверку создателю Mimorus. "
-    "После одобрения бот выставляет счёт в Telegram Stars, а оплаченный пост автоматически "
-    "публикуется в активных группах Mimorus по установленным условиям размещения.\n\n"
-    "Следующим блоком здесь будет мастер создания поста, проверка создателем, счёт Stars и запуск публикации."
+    "📣 <b>Рекламный пост от Mimorus — скоро</b>\n\n"
+    "Это отдельный будущий формат от рекламы у владельцев групп.\n\n"
+    "Планируется мастер создания поста, проверка создателем Mimorus, счёт в Telegram Stars "
+    "и автоматическая публикация в активных группах по условиям размещения.\n\n"
+    "Сейчас этот экран информационный: заявка не создаётся, счёт не выставляется и деньги не списываются."
 )
 
 
 def create_advertising_mimorus_post_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
-    # session_factory is accepted to keep router construction consistent with the project.
     del session_factory
     router = Router(name="advertising_mimorus_post")
 
