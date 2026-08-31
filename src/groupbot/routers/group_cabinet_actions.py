@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import Group, GroupOwner, GroupStatus
 from groupbot.services.audit import write_audit
+from groupbot.services.groups import _connected_group_limit
 from groupbot.ui import owned_groups_keyboard
 
 
@@ -44,19 +45,36 @@ def create_group_cabinet_actions_router(
                 )
             ).all()
 
-    async def _markup(bot: Bot, user_id: int) -> tuple[list, InlineKeyboardMarkup]:
+    async def _markup(bot: Bot, user_id: int) -> tuple[list, InlineKeyboardMarkup, int, int]:
         rows = await _owned_groups(user_id)
+        active_count = sum(1 for row in rows if row.status == GroupStatus.active.value)
+        async with session_factory() as session:
+            limit = await _connected_group_limit(session, user_id)
         me = await bot.get_me()
-        add_url = _add_bot_url(me.username) if me.username else None
-        return rows, owned_groups_keyboard(list(rows), add_bot_url=add_url)
+        add_url = _add_bot_url(me.username) if me.username and active_count < limit else None
+        return rows, owned_groups_keyboard(list(rows), add_bot_url=add_url), active_count, limit
+
+    def _usage_note(active_count: int, limit: int) -> str:
+        if active_count > limit:
+            return (
+                f"\n\n⚠️ <b>Активных групп больше лимита текущего тарифа: {active_count}/{limit}.</b> "
+                "Существующие группы сохранены и доступны для управления или удаления. "
+                "Подключение новой группы станет доступно после уменьшения количества или повышения тарифа."
+            )
+        if active_count == limit:
+            return (
+                f"\n\nИспользовано групп по тарифу: <b>{active_count}/{limit}</b>. "
+                "Лимит исчерпан; существующие группы можно управлять или удалять."
+            )
+        return f"\n\nИспользовано групп по тарифу: <b>{active_count}/{limit}</b>."
 
     @router.message(F.chat.type == "private", F.text == "👥 Мои группы")
     async def my_groups(message: Message, bot: Bot) -> None:
         if message.from_user is None:
             return
-        rows, markup = await _markup(bot, message.from_user.id)
+        rows, markup, active_count, limit = await _markup(bot, message.from_user.id)
         if rows:
-            text = "👥 <b>Мои группы</b>\n\nВыберите подключённую группу или добавьте Mimorus в новую."
+            text = "👥 <b>Мои группы</b>\n\nВыберите подключённую группу."
         else:
             text = (
                 "👥 <b>Мои группы</b>\n\n"
@@ -64,18 +82,20 @@ def create_group_cabinet_actions_router(
                 "Нажмите <b>➕ Добавить бота в группу</b> — Telegram покажет группы, "
                 "где вы можете назначать администраторов."
             )
+        text += _usage_note(active_count, limit)
         await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
     @router.callback_query(F.data == "group:list")
     async def group_list(callback: CallbackQuery, bot: Bot) -> None:
         if callback.message is None:
             return
-        rows, markup = await _markup(bot, callback.from_user.id)
+        rows, markup, active_count, limit = await _markup(bot, callback.from_user.id)
         text = (
-            "👥 <b>Мои группы</b>\n\nВыберите подключённую группу или добавьте Mimorus в новую."
+            "👥 <b>Мои группы</b>\n\nВыберите подключённую группу."
             if rows
             else "👥 <b>Мои группы</b>\n\nУ вас пока нет подключённых групп."
         )
+        text += _usage_note(active_count, limit)
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
         await callback.answer()
 
@@ -162,10 +182,7 @@ def create_group_cabinet_actions_router(
                 )
 
         try:
-            await bot.send_message(
-                chat_id,
-                "🗑 Группа отключена от Mimorus владельцем. Бот покидает группу.",
-            )
+            await bot.send_message(chat_id, "🗑 Группа отключена от Mimorus владельцем. Бот покидает группу.")
         except Exception:
             pass
         try:
@@ -173,10 +190,11 @@ def create_group_cabinet_actions_router(
         except Exception:
             pass
 
-        rows, markup = await _markup(bot, callback.from_user.id)
+        rows, markup, active_count, limit = await _markup(bot, callback.from_user.id)
         await callback.message.edit_text(
             f"✅ Группа <b>{group_title or chat_id}</b> удалена из Mimorus.\n\n"
-            + ("Выберите другую группу:" if rows else "Подключённых групп больше нет."),
+            + ("Выберите другую группу:" if rows else "Подключённых групп больше нет.")
+            + _usage_note(active_count, limit),
             parse_mode="HTML",
             reply_markup=markup,
         )
