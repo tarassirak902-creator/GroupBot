@@ -12,7 +12,22 @@ from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing
 from groupbot.advertising_mutual_models import AdvertisingMutualOpDirection
 from groupbot.models import Group, GroupOwner, GroupStatus
 from groupbot.routers import advertising_requests as advertising_requests_module
+from groupbot.routers.advertising_settlement import settlement_keyboard
 from groupbot.services.subscriptions import active_subscription_for_group
+
+
+_base_deal_keyboard = advertising_requests_module._deal_keyboard
+
+
+def _deal_keyboard_with_settlement(deal: AdvertisingDeal, viewer_id: int):
+    if deal.status == "finished_waiting_confirmation":
+        return settlement_keyboard(deal.id)
+    return _base_deal_keyboard(deal, viewer_id)
+
+
+# This module is loaded after advertising_sales_nav has installed its seller controls.
+# Extend that shared keyboard rather than replacing the sales navigation behavior.
+advertising_requests_module._deal_keyboard = _deal_keyboard_with_settlement
 
 
 async def _available_listing(
