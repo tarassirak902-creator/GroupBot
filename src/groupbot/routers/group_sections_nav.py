@@ -13,6 +13,13 @@ from groupbot.ui import tariff_back_keyboard, tariff_card_keyboard
 
 
 HANDLED_SECTIONS = {"automation", "games", "advertising", "settings"}
+TARIFF_ICONS = {
+    "TEST": "🎁",
+    "BASIC": "🔹",
+    "STANDARD": "🔷",
+    "PRO": "💎",
+    "MAX": "👑",
+}
 
 
 def _back_keyboard(chat_id: int) -> InlineKeyboardMarkup:
@@ -27,25 +34,51 @@ def _limit(config: dict, key: str) -> str:
     return "без отдельного лимита" if value is None else str(value)
 
 
-def _test_truth_text(tariff: Tariff) -> str:
+def _stars_price(tariff: Tariff) -> int | None:
+    config = dict(tariff.limits_json or {})
+    raw = config.get("stars_price")
+    if raw is None:
+        raw = config.get("price_label")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if text.endswith("⭐"):
+        text = text[:-1].strip()
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _truthful_tariff_text(tariff: Tariff) -> str:
     limits = dict(tariff.limits_json or {})
+    icon = TARIFF_ICONS.get(tariff.code, "💳")
     groups = tariff.max_groups if tariff.max_groups is not None else "—"
+    duration = f"{tariff.duration_days} дней" if tariff.duration_days else "не настроен"
+    price = "бесплатно" if tariff.code == "TEST" else (
+        f"{_stars_price(tariff)} ⭐" if _stars_price(tariff) is not None else "не настроена"
+    )
+    title = "TEST — 3 дня" if tariff.code == "TEST" else tariff.name
     return (
-        "🎁 <b>TEST — 3 дня</b>\n\n"
+        f"{icon} <b>{title}</b>\n\n"
         "<b>Работает сейчас:</b>\n"
-        f"👥 Основных групп: <b>{groups}</b>\n"
+        f"👥 Подключённых групп: <b>{groups}</b>\n"
         f"🌐 Сеток: <b>{_limit(limits, 'networks')}</b>\n"
         f"🏠 Групп в одной сетке: <b>{_limit(limits, 'network_groups_per_network')}</b>\n"
         f"🚫 Списков запрещённых слов: <b>{_limit(limits, 'blocked_word_lists')}</b>\n"
+        f"🔤 Запрещённых слов всего: <b>{_limit(limits, 'blocked_words')}</b>\n"
         f"📝 Списков запрещённых фраз: <b>{_limit(limits, 'blocked_phrase_lists')}</b>\n"
+        f"💬 Запрещённых фраз всего: <b>{_limit(limits, 'blocked_phrases')}</b>\n"
         f"⚖️ Своих причин наказаний: <b>{_limit(limits, 'custom_reasons')}</b>\n"
         f"👑 Дополнительных админ-рангов: <b>{_limit(limits, 'admin_ranks')}</b>\n"
         f"👮 Резервных администраторов: <b>{_limit(limits, 'reserve_admins')}</b>\n"
         f"🕐 Расписаний защиты: <b>{_limit(limits, 'protection_schedules')}</b>\n\n"
-        "Также доступны текущие рабочие модули модерации, защиты, статистики, администрации и сетевой модерации в пределах тарифа.\n\n"
-        "<b>Зарезервировано в тарифном каталоге, но ещё не реализовано как готовая функция:</b>\n"
+        "Рабочие модули модерации, входной защиты, статистики, администрации и сетевой модерации доступны в пределах тарифа.\n\n"
+        "<b>Ещё не реализовано как готовая функция:</b>\n"
         "автосообщения, автоповторы, шаблоны, собственные достижения, автоматические роли, лог-группы и экспорт статистики.\n\n"
-        "Mimorus не будет показывать эти будущие функции как уже работающие."
+        f"⏳ Срок тарифа: <b>{duration}</b>\n"
+        f"⭐ Цена: <b>{price}</b>"
     )
 
 
@@ -125,34 +158,37 @@ def create_group_sections_nav_router(
             parse_mode="HTML",
         )
 
-    @router.callback_query(F.data == "tariff:card:TEST")
-    async def truthful_test_card(callback: CallbackQuery) -> None:
+    @router.callback_query(F.data.startswith("tariff:card:"))
+    async def truthful_tariff_card(callback: CallbackQuery) -> None:
         if callback.message is None:
             return
+        code = (callback.data or "").split(":", 2)[2].upper()
         async with session_factory() as session:
             tariff = (
                 await session.execute(
-                    select(Tariff).where(Tariff.code == "TEST", Tariff.is_active.is_(True))
+                    select(Tariff).where(Tariff.code == code, Tariff.is_active.is_(True))
                 )
             ).scalar_one_or_none()
             active = await active_subscription_for_owner(session, callback.from_user.id)
-            previous_trial = (
-                await session.execute(
-                    select(Subscription.id).where(
-                        Subscription.owner_user_id == callback.from_user.id,
-                        Subscription.is_trial.is_(True),
-                    ).limit(1)
-                )
-            ).scalar_one_or_none()
+            previous_trial = None
+            if code == "TEST":
+                previous_trial = (
+                    await session.execute(
+                        select(Subscription.id).where(
+                            Subscription.owner_user_id == callback.from_user.id,
+                            Subscription.is_trial.is_(True),
+                        ).limit(1)
+                    )
+                ).scalar_one_or_none()
         if tariff is None:
-            await callback.answer("TEST сейчас недоступен.", show_alert=True)
+            await callback.answer("Тариф сейчас недоступен.", show_alert=True)
             return
         await callback.message.edit_text(
-            _test_truth_text(tariff),
+            _truthful_tariff_text(tariff),
             parse_mode="HTML",
             reply_markup=tariff_card_keyboard(
-                "TEST",
-                can_activate_test=active is None and previous_trial is None,
+                code,
+                can_activate_test=code == "TEST" and active is None and previous_trial is None,
             ),
         )
         await callback.answer()
