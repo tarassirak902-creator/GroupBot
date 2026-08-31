@@ -116,7 +116,10 @@ def _callback_predates_subscription(event: CallbackQuery, subscription: Subscrip
         message_date = message_date.replace(tzinfo=timezone.utc)
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
-    return message_date < started_at
+    # Telegram Message.date is second-precision, while PostgreSQL timestamps can
+    # include microseconds. Round the subscription boundary down to the same
+    # precision so a fresh screen sent in the activation second is not rejected.
+    return message_date < started_at.replace(microsecond=0)
 
 
 async def _permission_snapshot(
