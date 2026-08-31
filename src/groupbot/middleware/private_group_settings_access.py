@@ -11,8 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import AdminPermission, AdminRole
-from groupbot.routers.group_control import KNOWN_PERMISSIONS, _owner_access
+from groupbot.routers.group_control import KNOWN_PERMISSIONS
 from groupbot.routers.member_status_guard import is_regular_group_member
+from groupbot.services.permissions import is_group_owner
+from groupbot.services.subscriptions import active_subscription_for_owner
 
 
 SETTINGS_CALLBACK_PREFIXES = (
@@ -136,10 +138,17 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
             role_id = None
 
         async with self.session_factory() as session:
-            allowed = await _owner_access(session, chat_id, event.from_user.id)
-        if not allowed:
+            owner = await is_group_owner(session, chat_id, event.from_user.id)
+            subscription = await active_subscription_for_owner(session, event.from_user.id) if owner else None
+        if not owner:
             await event.answer(
-                "Настройки этой группы доступны только владельцу при активном тарифе.",
+                "Настройки этой группы доступны только её владельцу.",
+                show_alert=True,
+            )
+            return None
+        if subscription is None:
+            await event.answer(
+                "⚠️ Активная подписка закончилась. Продлите или активируйте тариф, чтобы менять настройки этой группы.",
                 show_alert=True,
             )
             return None
@@ -194,8 +203,6 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
                     await event.answer("Ранг уже удалён.", show_alert=True)
                     return None
 
-                # A screen created before base-version tracking is safe only if
-                # its draft still exactly matches the current DB state.
                 if base is None:
                     if draft != current:
                         await state.clear()
@@ -215,8 +222,6 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
 
             result = await handler(event, data)
 
-            # Opening, toggling role state or successfully saving permissions
-            # establishes a fresh optimistic base for the next editor action.
             if isinstance(state, FSMContext) and callback_data.startswith((
                 "gctl:role:",
                 "gctl:role_toggle:",
