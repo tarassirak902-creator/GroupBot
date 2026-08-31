@@ -52,6 +52,11 @@ def listing_text_with_duration(listing: AdvertisingListing) -> str:
             f"📐 Расчёт: <b>{'по дням' if mode == 'days' else 'по количеству подписчиков'}</b>",
             f"⭐ Цена {unit}: <b>{listing.mandatory_price_stars} ⭐</b>",
         ]
+    lines += [
+        "",
+        "ℹ️ <b>Расчёт:</b> сумма в ⭐ сейчас фиксирует согласованные условия сделки. "
+        "Mimorus не списывает и не переводит Stars между сторонами автоматически.",
+    ]
     return "\n".join(lines)
 
 
