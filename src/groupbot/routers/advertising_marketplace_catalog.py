@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
@@ -7,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingReview
+from groupbot.models import Group, GroupOwner, GroupStatus, Subscription, SubscriptionStatus
 
 
 def _short_title(value: str, limit: int = 38) -> str:
@@ -52,14 +55,30 @@ def create_advertising_marketplace_catalog_router(session_factory: async_session
         if callback.message is None:
             return
         await state.clear()
+        now = datetime.now(timezone.utc)
         async with session_factory() as session:
             rows = list((await session.execute(
                 select(AdvertisingListing)
+                .join(Group, Group.chat_id == AdvertisingListing.chat_id)
+                .join(
+                    GroupOwner,
+                    (GroupOwner.chat_id == AdvertisingListing.chat_id)
+                    & (GroupOwner.user_id == AdvertisingListing.owner_user_id)
+                    & (GroupOwner.is_current.is_(True)),
+                )
+                .join(
+                    Subscription,
+                    (Subscription.owner_user_id == AdvertisingListing.owner_user_id)
+                    & (Subscription.status == SubscriptionStatus.active.value)
+                    & (Subscription.ends_at > now),
+                )
                 .where(
                     AdvertisingListing.is_active.is_(True),
                     AdvertisingListing.owner_user_id != callback.from_user.id,
+                    Group.status == GroupStatus.active.value,
                 )
-                .order_by(AdvertisingListing.updated_at.desc(), AdvertisingListing.id.desc())
+                .distinct(AdvertisingListing.id)
+                .order_by(AdvertisingListing.id, AdvertisingListing.updated_at.desc())
                 .limit(50)
             )).scalars().all())
             ratings: dict[int, float] = {}
