@@ -93,6 +93,9 @@ def post_editor_keyboard_with_cancel(deal_id: int, *, has_photo: bool, has_butto
 def create_advertising_post_duration_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="advertising_post_duration")
 
+    from groupbot.routers.advertising_request_guard import create_advertising_request_guard_router
+    router.include_router(create_advertising_request_guard_router(session_factory))
+
     @router.callback_query(F.data.regexp(r"^ads:listing:\d+$"))
     async def open_listing_with_contact(callback: CallbackQuery) -> None:
         if callback.message is None:
