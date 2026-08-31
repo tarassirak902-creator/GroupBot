@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminAssignment, User
+from groupbot.models import AdminAssignment, GroupOwner, User
 from groupbot.routers.group_control import _owner_access
 from groupbot.routers.user_display import clickable_user_display
 from groupbot.services.audit import write_audit
+from groupbot.services.subscriptions import effective_limit_for_owner
 from groupbot.services.users import upsert_user
 
 
@@ -21,6 +22,22 @@ async def _current_reserve(session: AsyncSession, chat_id: int):
             .limit(1)
         )
     ).first()
+
+
+async def _owner_reserve_usage(session: AsyncSession, owner_id: int) -> tuple[int, int | None]:
+    count = int((await session.execute(
+        select(func.count())
+        .select_from(AdminAssignment)
+        .join(
+            GroupOwner,
+            (GroupOwner.chat_id == AdminAssignment.chat_id)
+            & (GroupOwner.user_id == owner_id)
+            & (GroupOwner.is_current.is_(True)),
+        )
+        .where(AdminAssignment.is_reserve.is_(True))
+    )).scalar_one())
+    limit = await effective_limit_for_owner(session, owner_id, "reserve_admins")
+    return count, limit
 
 
 async def _active_telegram_admins(bot: Bot, chat_id: int):
@@ -47,6 +64,7 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
         current = await _current_reserve(session, chat_id)
+        used, limit = await _owner_reserve_usage(session, callback.from_user.id)
 
     if current is None:
         current_text = "не назначен"
@@ -54,19 +72,43 @@ async def _render(callback: CallbackQuery, session_factory: async_sessionmaker[A
         _, user = current
         current_text = clickable_user_display(user)
 
-    rows = [[InlineKeyboardButton(text="👤 Выбрать резервного администратора", callback_data=f"reserve:choose:{chat_id}")]]
+    can_expand = limit is None or used < limit
+    rows: list[list[InlineKeyboardButton]] = []
+    # Replacing a reserve in this group consumes no new tariff slot, so it stays
+    # available even when the owner is already above a downgraded limit.
+    if current is not None or can_expand:
+        rows.append([InlineKeyboardButton(text="👤 Выбрать резервного администратора", callback_data=f"reserve:choose:{chat_id}")])
     if current is not None:
         rows.append([InlineKeyboardButton(text="❌ Снять резервного администратора", callback_data=f"reserve:clear:{chat_id}")])
     rows.append([InlineKeyboardButton(text="◀️ Администрация", callback_data=f"group:section:{chat_id}:administration")])
 
+    usage_text = str(used) if limit is None else f"{used}/{limit}"
+    notes: list[str] = []
+    if limit is not None and used > limit:
+        notes.append(
+            "⚠️ <b>Резервных администраторов больше лимита текущего тарифа.</b> "
+            "Существующие назначения сохранены. Их можно заменить или снять, но назначить резерв в новой группе нельзя."
+        )
+    elif limit is not None and used == limit and current is None:
+        notes.append(
+            "Лимит текущего тарифа исчерпан. Снимите резерв в другой группе или повысьте тариф, чтобы назначить его здесь."
+        )
+
+    text = (
+        "🧯 <b>Резервный администратор</b>\n\n"
+        f"Текущий резервный администратор: {current_text}\n"
+        f"Использовано по тарифу: <b>{usage_text}</b>\n\n"
+        "Резерв можно назначить только из действующих Telegram-администраторов группы. "
+        "Владелец группы и боты в список выбора не попадают.\n\n"
+        "На группу назначается один резервный администратор. При выборе нового предыдущий резерв автоматически снимается. "
+        "Если у администратора уже есть ранг Mimorus, он сохраняется."
+    )
+    if notes:
+        text += "\n\n" + "\n\n".join(notes)
+
     if callback.message:
         await callback.message.edit_text(
-            "🧯 <b>Резервный администратор</b>\n\n"
-            f"Текущий резервный администратор: {current_text}\n\n"
-            "Резерв можно назначить только из действующих Telegram-администраторов группы. "
-            "Владелец группы и боты в список выбора не попадают.\n\n"
-            "На группу назначается один резервный администратор. При выборе нового предыдущий резерв автоматически снимается. "
-            "Если у администратора уже есть ранг Mimorus, он сохраняется.",
+            text,
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
