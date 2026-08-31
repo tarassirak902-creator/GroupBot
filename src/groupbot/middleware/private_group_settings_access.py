@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import timezone
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
@@ -10,7 +11,7 @@ from aiogram.types import CallbackQuery, TelegramObject
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminPermission, AdminRole, GroupOwner
+from groupbot.models import AdminPermission, AdminRole, GroupOwner, Subscription
 from groupbot.routers.group_control import KNOWN_PERMISSIONS
 from groupbot.routers.member_status_guard import is_regular_group_member
 from groupbot.services.permissions import is_group_owner
@@ -54,6 +55,10 @@ EXPIRED_OWNER_CALLBACK_TEXT = (
     "⚠️ Активная подписка закончилась. "
     "Эта функция Mimorus временно недоступна. "
     "Продлите или активируйте тариф в личных сообщениях с ботом."
+)
+STALE_SUBSCRIPTION_CALLBACK_TEXT = (
+    "⚠️ Этот экран относится к предыдущему периоду подписки и уже устарел. "
+    "Откройте группу или сетку заново в личном кабинете Mimorus."
 )
 
 _ROLE_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
@@ -101,6 +106,19 @@ def _normalize_permissions(value: Any) -> dict[str, bool] | None:
     return {key: bool(value.get(key, False)) for key in _permission_keys()}
 
 
+def _callback_predates_subscription(event: CallbackQuery, subscription: Subscription) -> bool:
+    message = event.message
+    message_date = getattr(message, "date", None)
+    started_at = subscription.started_at
+    if message_date is None or started_at is None:
+        return False
+    if message_date.tzinfo is None:
+        message_date = message_date.replace(tzinfo=timezone.utc)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return message_date < started_at
+
+
 async def _permission_snapshot(
     session: AsyncSession,
     *,
@@ -132,7 +150,7 @@ async def _group_subscription_owner(
     session: AsyncSession,
     *,
     chat_id: int,
-) -> tuple[int | None, bool]:
+) -> tuple[int | None, Subscription | None]:
     owner_id = (
         await session.execute(
             select(GroupOwner.user_id).where(
@@ -142,8 +160,8 @@ async def _group_subscription_owner(
         )
     ).scalar_one_or_none()
     if owner_id is None:
-        return None, False
-    return int(owner_id), await active_subscription_for_owner(session, int(owner_id)) is not None
+        return None, None
+    return int(owner_id), await active_subscription_for_owner(session, int(owner_id))
 
 
 class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
@@ -164,25 +182,22 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
         callback_data = event.data or ""
         chat_id_from_callback = _settings_chat_id(callback_data)
 
-        # Every callback carrying a concrete Telegram group id shares one
-        # subscription gate. Navigation to the group card and disconnect actions
-        # stay available after expiry, but functional/settings callbacks do not.
         if (
             chat_id_from_callback is not None
             and not callback_data.startswith(SUBSCRIPTION_EXEMPT_GROUP_PREFIXES)
         ):
             async with self.session_factory() as session:
-                owner_id, has_subscription = await _group_subscription_owner(
+                owner_id, subscription = await _group_subscription_owner(
                     session,
                     chat_id=chat_id_from_callback,
                 )
-            if owner_id is not None and not has_subscription:
+            if owner_id is not None and subscription is None:
                 await event.answer(EXPIRED_GROUP_CALLBACK_TEXT, show_alert=True)
                 return None
+            if subscription is not None and _callback_predates_subscription(event, subscription):
+                await event.answer(STALE_SUBSCRIPTION_CALLBACK_TEXT, show_alert=True)
+                return None
 
-        # Network cards use network_id rather than chat_id, so they need an
-        # owner-scoped gate. The list itself remains visible to explain the state
-        # and provide normal navigation; all network actions require a tariff.
         if (
             callback_data.startswith("networks:")
             and callback_data not in SUBSCRIPTION_EXEMPT_OWNER_CALLBACKS
@@ -191,6 +206,9 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
                 subscription = await active_subscription_for_owner(session, event.from_user.id)
             if subscription is None:
                 await event.answer(EXPIRED_OWNER_CALLBACK_TEXT, show_alert=True)
+                return None
+            if _callback_predates_subscription(event, subscription):
+                await event.answer(STALE_SUBSCRIPTION_CALLBACK_TEXT, show_alert=True)
                 return None
 
         is_settings = callback_data.startswith(SETTINGS_CALLBACK_PREFIXES)
@@ -219,6 +237,9 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
             return None
         if subscription is None:
             await event.answer(EXPIRED_GROUP_CALLBACK_TEXT, show_alert=True)
+            return None
+        if _callback_predates_subscription(event, subscription):
+            await event.answer(STALE_SUBSCRIPTION_CALLBACK_TEXT, show_alert=True)
             return None
 
         if is_special_pick:
