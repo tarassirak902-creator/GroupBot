@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from groupbot.models import Subscription, Tariff
 from groupbot.routers.advertising import _advertising_keyboard
 from groupbot.routers.group_control import _owner_access
+from groupbot.services.subscriptions import active_subscription_for_owner
+from groupbot.ui import tariff_back_keyboard, tariff_card_keyboard
 
 
 HANDLED_SECTIONS = {"automation", "games", "advertising", "settings"}
@@ -16,6 +20,33 @@ def _back_keyboard(chat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Управление группой", callback_data=f"group:open:{chat_id}")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")],
     ])
+
+
+def _limit(config: dict, key: str) -> str:
+    value = config.get(key)
+    return "без отдельного лимита" if value is None else str(value)
+
+
+def _test_truth_text(tariff: Tariff) -> str:
+    limits = dict(tariff.limits_json or {})
+    groups = tariff.max_groups if tariff.max_groups is not None else "—"
+    return (
+        "🎁 <b>TEST — 3 дня</b>\n\n"
+        "<b>Работает сейчас:</b>\n"
+        f"👥 Основных групп: <b>{groups}</b>\n"
+        f"🌐 Сеток: <b>{_limit(limits, 'networks')}</b>\n"
+        f"🏠 Групп в одной сетке: <b>{_limit(limits, 'network_groups_per_network')}</b>\n"
+        f"🚫 Списков запрещённых слов: <b>{_limit(limits, 'blocked_word_lists')}</b>\n"
+        f"📝 Списков запрещённых фраз: <b>{_limit(limits, 'blocked_phrase_lists')}</b>\n"
+        f"⚖️ Своих причин наказаний: <b>{_limit(limits, 'custom_reasons')}</b>\n"
+        f"👑 Дополнительных админ-рангов: <b>{_limit(limits, 'admin_ranks')}</b>\n"
+        f"👮 Резервных администраторов: <b>{_limit(limits, 'reserve_admins')}</b>\n"
+        f"🕐 Расписаний защиты: <b>{_limit(limits, 'protection_schedules')}</b>\n\n"
+        "Также доступны текущие рабочие модули модерации, защиты, статистики, администрации и сетевой модерации в пределах тарифа.\n\n"
+        "<b>Зарезервировано в тарифном каталоге, но ещё не реализовано как готовая функция:</b>\n"
+        "автосообщения, автоповторы, шаблоны, собственные достижения, автоматические роли, лог-группы и экспорт статистики.\n\n"
+        "Mimorus не будет показывать эти будущие функции как уже работающие."
+    )
 
 
 def create_group_sections_nav_router(
@@ -50,9 +81,6 @@ def create_group_sections_nav_router(
             return
 
         if section_key == "advertising":
-            # Do not introduce a second advertising UX here. The group-management
-            # button opens the same advertising home that was approved for the
-            # private main menu, so every entry point stays consistent.
             await callback.message.edit_text(
                 "🟣 <b>Mimorus · Реклама</b>\n\n"
                 "Покупайте рекламные размещения или выставляйте свою подключённую группу как площадку.",
@@ -61,27 +89,84 @@ def create_group_sections_nav_router(
             )
         elif section_key == "automation":
             await callback.message.edit_text(
-                "🤖 <b>Автоматизация</b>\n\n"
-                "Этот экран зарезервирован для автоматических сообщений, повторов, напоминаний и других сценариев группы.\n\n"
-                "Функции, которые ещё не подключены, не будут имитироваться или менять настройки скрытно.",
+                "🤖 <b>Автоматизация — скоро</b>\n\n"
+                "Автосообщения, повторы, напоминания и другие сценарии группы ещё не подключены как готовые функции.\n\n"
+                "Настройки здесь пока не сохраняются и скрытых действий Mimorus не выполняет.",
                 parse_mode="HTML",
                 reply_markup=_back_keyboard(chat_id),
             )
         elif section_key == "games":
             await callback.message.edit_text(
-                "🎮 <b>Настройки развлечений</b>\n\n"
-                "Здесь будут настройки игр, RP, отношений, заданий и рейтингов этой группы.\n\n"
-                "Игровой блок ещё не подключён к текущему этапу разработки.",
+                "🎮 <b>Развлечения — скоро</b>\n\n"
+                "Настройки игр, RP, отношений, заданий и рейтингов ещё не подключены к текущей версии.\n\n"
+                "Этот экран информационный и ничего в группе не меняет.",
                 parse_mode="HTML",
                 reply_markup=_back_keyboard(chat_id),
             )
         else:
             await callback.message.edit_text(
-                "⚙️ <b>Настройки группы</b>\n\n"
-                "Основные настройки сейчас распределены по рабочим разделам: модерация, администрация, статистика и диагностика.\n\n"
-                "Дополнительные общие настройки группы будут добавляться сюда по мере реализации.",
+                "⚙️ <b>Дополнительные настройки — скоро</b>\n\n"
+                "Рабочие настройки уже находятся в разделах модерации, администрации, статистики, рекламы и диагностики.\n\n"
+                "Этот дополнительный раздел пока информационный и ничего не сохраняет.",
                 parse_mode="HTML",
                 reply_markup=_back_keyboard(chat_id),
+            )
+        await callback.answer()
+
+    @router.message(
+        F.chat.type == "private",
+        F.text.in_({"🛠 Поддержка", "🛠 Поддержка (скоро)"}),
+    )
+    async def support_stub(message: Message) -> None:
+        await message.answer(
+            "🛠 <b>Поддержка — скоро</b>\n\n"
+            "Встроенная система обращений в поддержку пока не подключена. "
+            "Кнопка информационная: тикет не создаётся и сообщение никуда автоматически не отправляется.",
+            parse_mode="HTML",
+        )
+
+    @router.callback_query(F.data == "tariff:card:TEST")
+    async def truthful_test_card(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            return
+        async with session_factory() as session:
+            tariff = (
+                await session.execute(
+                    select(Tariff).where(Tariff.code == "TEST", Tariff.is_active.is_(True))
+                )
+            ).scalar_one_or_none()
+            active = await active_subscription_for_owner(session, callback.from_user.id)
+            previous_trial = (
+                await session.execute(
+                    select(Subscription.id).where(
+                        Subscription.owner_user_id == callback.from_user.id,
+                        Subscription.is_trial.is_(True),
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+        if tariff is None:
+            await callback.answer("TEST сейчас недоступен.", show_alert=True)
+            return
+        await callback.message.edit_text(
+            _test_truth_text(tariff),
+            parse_mode="HTML",
+            reply_markup=tariff_card_keyboard(
+                "TEST",
+                can_activate_test=active is None and previous_trial is None,
+            ),
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "tariff:addons")
+    async def truthful_addons(callback: CallbackQuery) -> None:
+        if callback.message is not None:
+            await callback.message.edit_text(
+                "📦 <b>Дополнительные покупки — пока недоступны</b>\n\n"
+                "Каталог тарифов уже содержит технические ключи дополнительных лимитов, "
+                "но отдельная покупка пакетов и их цены ещё не утверждены и не подключены.\n\n"
+                "Этот экран информационный: нажатие ничего не покупает и не меняет подписку.",
+                parse_mode="HTML",
+                reply_markup=tariff_back_keyboard(),
             )
         await callback.answer()
 
