@@ -19,6 +19,7 @@ from groupbot.middleware.group_settings_only import GroupSettingsOnlyMiddleware
 from groupbot.middleware.idempotency import IdempotencyMiddleware
 from groupbot.middleware.member_tracking import GroupMemberTrackingMiddleware
 from groupbot.middleware.private_group_settings_access import PrivateGroupSettingsAccessMiddleware
+from groupbot.middleware.role_editor_consistency import RoleEditorConsistencyMiddleware
 from groupbot.middleware.subscription_command_notice import SubscriptionCommandNoticeMiddleware
 from groupbot.routers import advertising as advertising_module
 from groupbot.routers import advertising_edit as advertising_edit_module
@@ -148,6 +149,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
     dp.callback_query.outer_middleware(PrivateGroupSettingsAccessMiddleware(session_factory))
+    dp.callback_query.outer_middleware(RoleEditorConsistencyMiddleware(session_factory))
     dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
     dp.message.outer_middleware(GroupSettingsOnlyMiddleware())
     dp.message.outer_middleware(SubscriptionCommandNoticeMiddleware(session_factory))
