@@ -13,375 +13,174 @@ from groupbot.services.protection_schedule import schedule_config
 from groupbot.services.subscriptions import active_subscription_for_owner, effective_limit_for_owner
 
 
-async def _network_group_usage(
-    session: AsyncSession,
-    *,
-    owner_id: int,
-    network_id: int,
-) -> tuple[int, int | None] | None:
-    network = (
-        await session.execute(
-            select(Network.id).where(
-                Network.id == network_id,
-                Network.owner_user_id == owner_id,
-            )
-        )
-    ).scalar_one_or_none()
+async def _network_group_usage(session: AsyncSession, owner_id: int, network_id: int) -> tuple[int, int | None] | None:
+    network = (await session.execute(select(Network.id).where(Network.id == network_id, Network.owner_user_id == owner_id))).scalar_one_or_none()
     if network is None:
         return None
-
-    limit = await effective_limit_for_owner(
-        session,
-        owner_id,
-        "network_groups_per_network",
-    )
-    count = int(
-        (
-            await session.execute(
-                select(func.count())
-                .select_from(NetworkGroup)
-                .where(NetworkGroup.network_id == network_id)
-            )
-        ).scalar_one()
-    )
+    limit = await effective_limit_for_owner(session, owner_id, "network_groups_per_network")
+    count = int((await session.execute(select(func.count()).select_from(NetworkGroup).where(NetworkGroup.network_id == network_id))).scalar_one())
     return count, limit
 
 
-async def _network_group_limit_reached(
-    session: AsyncSession,
-    *,
-    owner_id: int,
-    network_id: int,
-) -> tuple[bool, int | None]:
-    usage = await _network_group_usage(
-        session,
-        owner_id=owner_id,
-        network_id=network_id,
-    )
+async def _network_group_limit_reached(session: AsyncSession, *, owner_id: int, network_id: int) -> tuple[bool, int | None]:
+    usage = await _network_group_usage(session, owner_id, network_id)
     if usage is None:
         return False, None
     count, limit = usage
     return limit is not None and count >= limit, limit
 
 
-async def _render_network_list(
-    message: Message,
-    session_factory: async_sessionmaker[AsyncSession],
-    owner_id: int,
-) -> bool:
-    async with session_factory() as session:
-        subscription = await active_subscription_for_owner(session, owner_id)
-        if subscription is None:
-            return False
-        rows = (
-            await session.execute(
-                select(Network.id, Network.name, func.count(GroupOwner.id).label("groups_count"))
-                .outerjoin(NetworkGroup, NetworkGroup.network_id == Network.id)
-                .outerjoin(
-                    GroupOwner,
-                    (GroupOwner.chat_id == NetworkGroup.chat_id)
-                    & (GroupOwner.user_id == owner_id)
-                    & (GroupOwner.is_current.is_(True)),
-                )
-                .where(Network.owner_user_id == owner_id)
-                .group_by(Network.id, Network.name)
-                .order_by(Network.id.asc())
-            )
-        ).all()
-        limit = await effective_limit_for_owner(session, owner_id, "networks")
+async def _network_rows(session: AsyncSession, owner_id: int, network_id: int):
+    return (await session.execute(
+        select(Group.chat_id, Group.title)
+        .join(NetworkGroup, NetworkGroup.chat_id == Group.chat_id)
+        .join(GroupOwner, (GroupOwner.chat_id == NetworkGroup.chat_id) & (GroupOwner.user_id == owner_id) & (GroupOwner.is_current.is_(True)))
+        .where(NetworkGroup.network_id == network_id)
+        .order_by(NetworkGroup.added_at.asc(), Group.title.asc().nullslast())
+    )).all()
 
+
+async def _render_network_list(message: Message, session_factory: async_sessionmaker[AsyncSession], owner_id: int) -> bool:
+    async with session_factory() as session:
+        if await active_subscription_for_owner(session, owner_id) is None:
+            return False
+        rows = (await session.execute(
+            select(Network.id, Network.name, func.count(GroupOwner.id).label("groups_count"))
+            .outerjoin(NetworkGroup, NetworkGroup.network_id == Network.id)
+            .outerjoin(GroupOwner, (GroupOwner.chat_id == NetworkGroup.chat_id) & (GroupOwner.user_id == owner_id) & (GroupOwner.is_current.is_(True)))
+            .where(Network.owner_user_id == owner_id)
+            .group_by(Network.id, Network.name).order_by(Network.id.asc())
+        )).all()
+        limit = await effective_limit_for_owner(session, owner_id, "networks")
     used = len(rows)
-    usage_text = str(used) if limit is None else f"{used}/{limit}"
-    lines = [
-        "🌐 <b>Сетки групп</b>",
-        "",
-        f"Использовано сеток по тарифу: <b>{usage_text}</b>",
-        "",
-        "Ваши сетки:" if rows else "У вас пока нет сеток групп.",
-    ]
+    usage = str(used) if limit is None else f"{used}/{limit}"
+    lines = ["🌐 <b>Сетки групп</b>", "", f"Использовано сеток по тарифу: <b>{usage}</b>", "", "Ваши сетки:" if rows else "У вас пока нет сеток групп."]
     buttons: list[list[InlineKeyboardButton]] = []
     for row in rows:
         lines.append(f"• {row.name}: <b>{row.groups_count}</b> групп")
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"🌐 {row.name}"[:64],
-                callback_data=f"networks:open:{row.id}",
-            )
-        ])
-
-    can_create = limit is None or used < limit
-    if can_create:
+        buttons.append([InlineKeyboardButton(text=f"🌐 {row.name}"[:64], callback_data=f"networks:open:{row.id}")])
+    if limit is None or used < limit:
         buttons.append([InlineKeyboardButton(text="➕ Создать сетку", callback_data="networks:create")])
     elif limit == 0:
-        lines.extend(["", "Создание сеток недоступно на текущем тарифе."])
+        lines += ["", "Создание сеток недоступно на текущем тарифе."]
     elif used > limit:
-        lines.extend([
-            "",
-            "⚠️ <b>Сеток больше лимита текущего тарифа.</b> ",
-            "Существующие сетки сохранены: их можно открывать, уменьшать и удалять. "
-            "Создание новой сетки станет доступно после уменьшения количества или повышения тарифа.",
-        ])
+        lines += ["", "⚠️ <b>Сеток больше лимита текущего тарифа.</b> Существующие сетки сохранены: их можно открывать, уменьшать и удалять. Создание новой станет доступно после уменьшения количества или повышения тарифа."]
     else:
-        lines.extend(["", "Лимит сеток исчерпан. Существующие сетки можно открывать и удалять."])
-
+        lines += ["", "Лимит сеток исчерпан. Существующие сетки можно открывать и удалять."]
     buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="nav:home")])
-    await message.edit_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
+    await message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     return True
 
 
-async def _render_network_card(
-    callback: CallbackQuery,
-    session_factory: async_sessionmaker[AsyncSession],
-    network_id: int,
-) -> bool:
+async def _render_network_card(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession], network_id: int) -> bool:
     if callback.message is None:
         return False
     owner_id = callback.from_user.id
     async with session_factory() as session:
-        network = (
-            await session.execute(
-                select(Network).where(
-                    Network.id == network_id,
-                    Network.owner_user_id == owner_id,
-                )
-            )
-        ).scalar_one_or_none()
+        network = (await session.execute(select(Network).where(Network.id == network_id, Network.owner_user_id == owner_id))).scalar_one_or_none()
         if network is None:
             return False
-        groups = (
-            await session.execute(
-                select(Group.chat_id, Group.title)
-                .join(NetworkGroup, NetworkGroup.chat_id == Group.chat_id)
-                .join(
-                    GroupOwner,
-                    (GroupOwner.chat_id == NetworkGroup.chat_id)
-                    & (GroupOwner.user_id == owner_id)
-                    & (GroupOwner.is_current.is_(True)),
-                )
-                .where(NetworkGroup.network_id == network_id)
-                .order_by(NetworkGroup.added_at.asc(), Group.title.asc().nullslast())
-            )
-        ).all()
+        groups = await _network_rows(session, owner_id, network_id)
         limit = await effective_limit_for_owner(session, owner_id, "network_groups_per_network")
-
     used = len(groups)
-    usage_text = str(used) if limit is None else f"{used}/{limit}"
-    lines = [
-        f"🌐 <b>{network.name}</b>",
-        "",
-        f"Подключено групп по тарифу: <b>{usage_text}</b>",
-    ]
+    usage = str(used) if limit is None else f"{used}/{limit}"
+    lines = [f"🌐 <b>{network.name}</b>", "", f"Подключено групп по тарифу: <b>{usage}</b>"]
     can_add = limit is None or used < limit
     if limit is not None and used > limit:
-        lines.extend([
-            "",
-            "⚠️ <b>Групп в сетке больше лимита текущего тарифа.</b> ",
-            "Все уже подключённые группы сохранены. Их можно открывать и удалять из сетки; "
-            "добавление новой группы станет доступно после уменьшения количества или повышения тарифа.",
-        ])
+        lines += ["", "⚠️ <b>Групп в сетке больше лимита текущего тарифа.</b> Уже подключённые группы сохранены и могут быть удалены. Добавление новой станет доступно после уменьшения количества или повышения тарифа."]
     elif limit is not None and used == limit:
-        lines.extend([
-            "",
-            "Лимит групп в этой сетке исчерпан. Уже подключённые группы можно открывать и удалять.",
-        ])
-
-    buttons: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="🌐 Подключенные группы", callback_data=f"networks:groups:{network_id}")],
-    ]
+        lines += ["", "Лимит групп в этой сетке исчерпан. Уже подключённые группы можно открывать и удалять."]
+    buttons = [[InlineKeyboardButton(text="🌐 Подключенные группы", callback_data=f"networks:groups:{network_id}")]]
     if can_add:
         buttons.append([InlineKeyboardButton(text="➕ Добавить группу", callback_data=f"networks:add:{network_id}")])
     if groups:
-        buttons.append([
-            InlineKeyboardButton(
-                text="👮 Сетевые администраторы",
-                callback_data=f"gctl:network_admins:{groups[0].chat_id}",
-            )
-        ])
-    buttons.extend([
+        buttons.append([InlineKeyboardButton(text="👮 Сетевые администраторы", callback_data=f"gctl:network_admins:{groups[0].chat_id}")])
+    buttons += [
         [InlineKeyboardButton(text="🛡 Сетевая модерация", callback_data=f"networks:moderation:{network_id}")],
         [InlineKeyboardButton(text="🗑 Удалить сетку", callback_data=f"networks:delete:{network_id}")],
         [InlineKeyboardButton(text="◀️ Все сетки", callback_data="networks:list")],
-    ])
-    await callback.message.edit_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
+    ]
+    await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
     return True
 
 
-async def _render_network_groups(
-    callback: CallbackQuery,
-    session_factory: async_sessionmaker[AsyncSession],
-    network_id: int,
-) -> bool:
+async def _render_network_groups(callback: CallbackQuery, session_factory: async_sessionmaker[AsyncSession], network_id: int) -> bool:
     if callback.message is None:
         return False
     owner_id = callback.from_user.id
     async with session_factory() as session:
-        network = (
-            await session.execute(
-                select(Network).where(
-                    Network.id == network_id,
-                    Network.owner_user_id == owner_id,
-                )
-            )
-        ).scalar_one_or_none()
+        network = (await session.execute(select(Network).where(Network.id == network_id, Network.owner_user_id == owner_id))).scalar_one_or_none()
         if network is None:
             return False
-        groups = (
-            await session.execute(
-                select(Group.chat_id, Group.title)
-                .join(NetworkGroup, NetworkGroup.chat_id == Group.chat_id)
-                .join(
-                    GroupOwner,
-                    (GroupOwner.chat_id == NetworkGroup.chat_id)
-                    & (GroupOwner.user_id == owner_id)
-                    & (GroupOwner.is_current.is_(True)),
-                )
-                .where(NetworkGroup.network_id == network_id)
-                .order_by(NetworkGroup.added_at.asc(), Group.title.asc().nullslast())
-            )
-        ).all()
+        groups = await _network_rows(session, owner_id, network_id)
         limit = await effective_limit_for_owner(session, owner_id, "network_groups_per_network")
-
     used = len(groups)
-    usage_text = str(used) if limit is None else f"{used}/{limit}"
-    lines = [
-        "🌐 <b>Подключенные группы</b>",
-        "",
-        f"Сетка: <b>{network.name}</b>",
-        f"Подключено групп по тарифу: <b>{usage_text}</b>",
-    ]
+    usage = str(used) if limit is None else f"{used}/{limit}"
+    lines = ["🌐 <b>Подключенные группы</b>", "", f"Сетка: <b>{network.name}</b>", f"Подключено групп по тарифу: <b>{usage}</b>"]
     buttons: list[list[InlineKeyboardButton]] = []
     if groups:
-        lines.extend(["", "Выберите группу:"])
+        lines += ["", "Выберите группу:"]
         for row in groups:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=(row.title or "Группа без названия")[:64],
-                    callback_data=f"networks:group:{network_id}:{row.chat_id}",
-                )
-            ])
+            buttons.append([InlineKeyboardButton(text=(row.title or "Группа без названия")[:64], callback_data=f"networks:group:{network_id}:{row.chat_id}")])
     else:
-        lines.extend(["", "В этой сетке пока нет подключённых групп."])
+        lines += ["", "В этой сетке пока нет подключённых групп."]
     if limit is not None and used > limit:
-        lines.extend([
-            "",
-            "⚠️ Чтобы снова добавлять группы, уменьшите количество до лимита тарифа или повысьте тариф.",
-        ])
+        lines += ["", "⚠️ Чтобы снова добавлять группы, уменьшите количество до лимита тарифа или повысьте тариф."]
     buttons.append([InlineKeyboardButton(text="◀️ Назад к сетке", callback_data=f"networks:open:{network_id}")])
-    await callback.message.edit_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-    )
+    await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
     return True
 
 
-async def _reserve_limit_reached(
-    session: AsyncSession,
-    *,
-    owner_id: int,
-    chat_id: int,
-) -> tuple[bool, int | None]:
+async def _reserve_limit_reached(session: AsyncSession, *, owner_id: int, chat_id: int) -> tuple[bool, int | None]:
     limit = await effective_limit_for_owner(session, owner_id, "reserve_admins")
     if limit is None:
         return False, None
-
-    current_group_reserve = (
-        await session.execute(
-            select(AdminAssignment.id)
-            .join(
-                GroupOwner,
-                (GroupOwner.chat_id == AdminAssignment.chat_id)
-                & (GroupOwner.user_id == owner_id)
-                & (GroupOwner.is_current.is_(True)),
-            )
-            .where(
-                AdminAssignment.chat_id == chat_id,
-                AdminAssignment.is_reserve.is_(True),
-            )
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if current_group_reserve is not None:
+    current = (await session.execute(
+        select(AdminAssignment.id).join(GroupOwner, (GroupOwner.chat_id == AdminAssignment.chat_id) & (GroupOwner.user_id == owner_id) & (GroupOwner.is_current.is_(True)))
+        .where(AdminAssignment.chat_id == chat_id, AdminAssignment.is_reserve.is_(True)).limit(1)
+    )).scalar_one_or_none()
+    if current is not None:
         return False, limit
-
-    count = int(
-        (
-            await session.execute(
-                select(func.count())
-                .select_from(AdminAssignment)
-                .join(
-                    GroupOwner,
-                    (GroupOwner.chat_id == AdminAssignment.chat_id)
-                    & (GroupOwner.user_id == owner_id)
-                    & (GroupOwner.is_current.is_(True)),
-                )
-                .where(AdminAssignment.is_reserve.is_(True))
-            )
-        ).scalar_one()
-    )
+    count = int((await session.execute(
+        select(func.count()).select_from(AdminAssignment)
+        .join(GroupOwner, (GroupOwner.chat_id == AdminAssignment.chat_id) & (GroupOwner.user_id == owner_id) & (GroupOwner.is_current.is_(True)))
+        .where(AdminAssignment.is_reserve.is_(True))
+    )).scalar_one())
     return count >= limit, limit
 
 
-async def _schedule_limit_reached(
-    session: AsyncSession,
-    *,
-    owner_id: int,
-    chat_id: int,
-) -> tuple[bool, int | None]:
+async def _schedule_limit_reached(session: AsyncSession, *, owner_id: int, chat_id: int) -> tuple[bool, int | None]:
     limit = await effective_limit_for_owner(session, owner_id, "protection_schedules")
     if limit is None:
         return False, None
-
-    current_config = (
-        await session.execute(
-            select(GroupSettings.moderation_config).where(GroupSettings.chat_id == chat_id)
-        )
-    ).scalar_one_or_none() or {}
-    if schedule_config(current_config)["enabled"]:
+    current = (await session.execute(select(GroupSettings.moderation_config).where(GroupSettings.chat_id == chat_id))).scalar_one_or_none() or {}
+    if schedule_config(current)["enabled"]:
         return False, limit
-
-    configs = (
-        await session.execute(
-            select(GroupSettings.moderation_config)
-            .join(
-                GroupOwner,
-                (GroupOwner.chat_id == GroupSettings.chat_id)
-                & (GroupOwner.user_id == owner_id)
-                & (GroupOwner.is_current.is_(True)),
-            )
-        )
-    ).scalars().all()
-    enabled_count = sum(1 for config in configs if schedule_config(config or {})["enabled"])
-    return enabled_count >= limit, limit
+    configs = (await session.execute(
+        select(GroupSettings.moderation_config).join(GroupOwner, (GroupOwner.chat_id == GroupSettings.chat_id) & (GroupOwner.user_id == owner_id) & (GroupOwner.is_current.is_(True)))
+    )).scalars().all()
+    return sum(1 for config in configs if schedule_config(config or {})["enabled"]) >= limit, limit
 
 
-def create_tariff_limits_router(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> Router:
+def create_tariff_limits_router(session_factory: async_sessionmaker[AsyncSession]) -> Router:
     router = Router(name="tariff_limits")
 
     @router.message(F.chat.type == "private", F.text == "🌐 Сетки групп")
     async def network_list_message(message: Message) -> None:
         if message.from_user is None:
             raise SkipHandler()
-        if not await _render_network_list(message, session_factory, message.from_user.id):
+        async with session_factory() as session:
+            has_subscription = await active_subscription_for_owner(session, message.from_user.id) is not None
+        if not has_subscription:
             raise SkipHandler()
+        sent = await message.answer("🌐 Сетки групп")
+        await _render_network_list(sent, session_factory, message.from_user.id)
 
     @router.callback_query(F.data == "networks:list")
     async def network_list_callback(callback: CallbackQuery) -> None:
-        if callback.message is None:
-            raise SkipHandler()
-        if not await _render_network_list(callback.message, session_factory, callback.from_user.id):
+        if callback.message is None or not await _render_network_list(callback.message, session_factory, callback.from_user.id):
             raise SkipHandler()
         await callback.answer()
 
@@ -413,24 +212,15 @@ def create_tariff_limits_router(
             chat_id = int(parts[3])
         except ValueError:
             raise SkipHandler()
-
         limit_key = "blocked_word_lists" if kind == "words" else "blocked_phrase_lists"
         async with session_factory() as session:
             limit = await effective_limit_for_owner(session, callback.from_user.id, limit_key)
             if limit is None:
                 raise SkipHandler()
-            settings = (
-                await session.execute(
-                    select(GroupSettings).where(GroupSettings.chat_id == chat_id)
-                )
-            ).scalar_one_or_none()
+            settings = (await session.execute(select(GroupSettings).where(GroupSettings.chat_id == chat_id))).scalar_one_or_none()
             lists = _lists(settings.moderation_config if settings else None, kind)
-
         if len(lists) >= limit:
-            await callback.answer(
-                f"Достигнут лимит списков текущего тарифа: {limit}.",
-                show_alert=True,
-            )
+            await callback.answer(f"Достигнут лимит списков текущего тарифа: {limit}.", show_alert=True)
             return
         raise SkipHandler()
 
@@ -440,18 +230,10 @@ def create_tariff_limits_router(
             network_id = int((callback.data or "").rsplit(":", 1)[1])
         except (ValueError, IndexError):
             raise SkipHandler()
-
         async with session_factory() as session:
-            reached, limit = await _network_group_limit_reached(
-                session,
-                owner_id=callback.from_user.id,
-                network_id=network_id,
-            )
+            reached, limit = await _network_group_limit_reached(session, owner_id=callback.from_user.id, network_id=network_id)
         if reached and limit is not None:
-            await callback.answer(
-                f"В этой сетке достигнут лимит групп: {limit}.",
-                show_alert=True,
-            )
+            await callback.answer(f"В этой сетке достигнут лимит групп: {limit}.", show_alert=True)
             return
         raise SkipHandler()
 
@@ -464,18 +246,10 @@ def create_tariff_limits_router(
             network_id = int(parts[2])
         except ValueError:
             raise SkipHandler()
-
         async with session_factory() as session:
-            reached, limit = await _network_group_limit_reached(
-                session,
-                owner_id=callback.from_user.id,
-                network_id=network_id,
-            )
+            reached, limit = await _network_group_limit_reached(session, owner_id=callback.from_user.id, network_id=network_id)
         if reached and limit is not None:
-            await callback.answer(
-                f"В этой сетке достигнут лимит групп: {limit}.",
-                show_alert=True,
-            )
+            await callback.answer(f"В этой сетке достигнут лимит групп: {limit}.", show_alert=True)
             return
         raise SkipHandler()
 
@@ -486,17 +260,9 @@ def create_tariff_limits_router(
         except (ValueError, IndexError):
             raise SkipHandler()
         async with session_factory() as session:
-            reached, limit = await _reserve_limit_reached(
-                session,
-                owner_id=callback.from_user.id,
-                chat_id=chat_id,
-            )
+            reached, limit = await _reserve_limit_reached(session, owner_id=callback.from_user.id, chat_id=chat_id)
         if reached and limit is not None:
-            await callback.answer(
-                f"Достигнут лимит резервных администраторов текущего тарифа: {limit}. "
-                "Уже назначенные резервы сохраняются; снимите один из них или повысьте тариф.",
-                show_alert=True,
-            )
+            await callback.answer(f"Достигнут лимит резервных администраторов текущего тарифа: {limit}. Уже назначенные резервы сохраняются; снимите один из них или повысьте тариф.", show_alert=True)
             return
         raise SkipHandler()
 
@@ -510,17 +276,9 @@ def create_tariff_limits_router(
         except ValueError:
             raise SkipHandler()
         async with session_factory() as session:
-            reached, limit = await _reserve_limit_reached(
-                session,
-                owner_id=callback.from_user.id,
-                chat_id=chat_id,
-            )
+            reached, limit = await _reserve_limit_reached(session, owner_id=callback.from_user.id, chat_id=chat_id)
         if reached and limit is not None:
-            await callback.answer(
-                f"Достигнут лимит резервных администраторов текущего тарифа: {limit}. "
-                "Уже назначенные резервы сохраняются; снимите один из них или повысьте тариф.",
-                show_alert=True,
-            )
+            await callback.answer(f"Достигнут лимит резервных администраторов текущего тарифа: {limit}. Уже назначенные резервы сохраняются; снимите один из них или повысьте тариф.", show_alert=True)
             return
         raise SkipHandler()
 
@@ -531,17 +289,9 @@ def create_tariff_limits_router(
         except (ValueError, IndexError):
             raise SkipHandler()
         async with session_factory() as session:
-            reached, limit = await _schedule_limit_reached(
-                session,
-                owner_id=callback.from_user.id,
-                chat_id=chat_id,
-            )
+            reached, limit = await _schedule_limit_reached(session, owner_id=callback.from_user.id, chat_id=chat_id)
         if reached and limit is not None:
-            await callback.answer(
-                f"Достигнут лимит включённых расписаний защиты текущего тарифа: {limit}. "
-                "Уже включённые расписания сохраняются; выключите одно из них или повысьте тариф.",
-                show_alert=True,
-            )
+            await callback.answer(f"Достигнут лимит включённых расписаний защиты текущего тарифа: {limit}. Уже включённые расписания сохраняются; выключите одно из них или повысьте тариф.", show_alert=True)
             return
         raise SkipHandler()
 
