@@ -215,6 +215,19 @@ def create_reserve_admin_router(session_factory: async_sessionmaker[AsyncSession
                     await callback.answer("Недостаточно прав.", show_alert=True)
                     return
 
+                # Serialize owner-wide slot consumption. Replacement inside a
+                # group is always allowed; only a new reserve consumes a slot.
+                await session.execute(select(func.pg_advisory_xact_lock(callback.from_user.id)))
+                current = await _current_reserve(session, chat_id)
+                if current is None:
+                    used, limit = await _owner_reserve_usage(session, callback.from_user.id)
+                    if limit is not None and used >= limit:
+                        await callback.answer(
+                            f"Достигнут лимит резервных администраторов текущего тарифа: {limit}.",
+                            show_alert=True,
+                        )
+                        return
+
                 await upsert_user(session, selected)
                 await session.flush()
                 await _clear_other_reserves(session, chat_id=chat_id, keep_user_id=user_id)
