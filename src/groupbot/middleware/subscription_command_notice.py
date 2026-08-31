@@ -10,9 +10,13 @@ from aiogram.types import Message, TelegramObject
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import Group, GroupStatus
+from groupbot.models import Group, GroupSettings, GroupStatus
 from groupbot.services.permissions import is_group_owner
-from groupbot.services.subscriptions import active_subscription_for_group, active_subscription_for_owner
+from groupbot.services.subscriptions import (
+    active_subscription_for_group,
+    active_subscription_for_owner,
+    effective_limit_for_owner,
+)
 
 
 EXPIRED_SUBSCRIPTION_TEXT = (
@@ -120,6 +124,19 @@ def _negative_chat_id(value: Any) -> int | None:
     return None
 
 
+def _content_list_count(config: dict | None, kind: str) -> int:
+    key = "blocked_words" if kind == "words" else "blocked_phrases"
+    raw = dict((config or {}).get(key) or {})
+    lists = raw.get("lists")
+    if isinstance(lists, list):
+        return sum(1 for row in lists if isinstance(row, dict))
+    # Legacy single-list config counts as one only when it actually contains a
+    # configured list. This mirrors the content-filter router's migration view.
+    if raw.get("items") or raw.get("enabled") or raw.get("action") or raw.get("mute_duration"):
+        return 1
+    return 0
+
+
 class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
     """Explain subscription expiry for group commands and stale private FSM flows."""
 
@@ -153,6 +170,34 @@ class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
                 else:
                     owner = True
                     subscription = await active_subscription_for_owner(session, event.from_user.id)
+
+                # Creating a content-filter list is a two-step callback -> FSM
+                # flow. Re-check the *current* tariff at commit time so a downgrade
+                # between those steps cannot create an object above the new limit.
+                content_limit: int | None = None
+                content_count = 0
+                if (
+                    owner
+                    and subscription is not None
+                    and chat_id is not None
+                    and state_name.endswith("ContentFilterState:waiting_list_name")
+                ):
+                    kind = str(state_data.get("cf_kind") or "")
+                    if kind in {"words", "phrases"}:
+                        limit_key = "blocked_word_lists" if kind == "words" else "blocked_phrase_lists"
+                        content_limit = await effective_limit_for_owner(
+                            session,
+                            event.from_user.id,
+                            limit_key,
+                        )
+                        config = (
+                            await session.execute(
+                                select(GroupSettings.moderation_config).where(
+                                    GroupSettings.chat_id == chat_id
+                                )
+                            )
+                        ).scalar_one_or_none() or {}
+                        content_count = _content_list_count(config, kind)
         except Exception:
             return False
 
@@ -166,6 +211,13 @@ class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
         if subscription is None:
             await state.clear()
             await event.answer(EXPIRED_PRIVATE_FSM_TEXT)
+            return True
+        if content_limit is not None and content_count >= content_limit:
+            await state.clear()
+            await event.answer(
+                f"⚠️ Текущий тариф разрешает до {content_limit} таких списков. "
+                "Текущая настройка отменена и не была сохранена. Откройте раздел заново."
+            )
             return True
         return False
 
