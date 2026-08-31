@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from html import escape
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +61,7 @@ CUSTOM_TELEGRAM_PERMISSIONS = {
 _original_ensure_telegram_admin_for_role = _member_sync_module._ensure_telegram_admin_for_role
 _original_sync_role_permissions = _role_actions_module._sync_managed_telegram_admins_for_role
 _original_sync_role_state = _role_actions_module._sync_managed_telegram_admins_for_role_state
+_STANDARD_ROLE_IDS: set[int] = set()
 
 
 async def punishment_list_access(
@@ -67,6 +71,62 @@ async def punishment_list_access(
 ) -> bool:
     """All punishment-list commands use the same explicit role permission."""
     return await has_permission(session, chat_id, user_id, "punishment_lists")
+
+
+def role_editor_keyboard(
+    chat_id: int,
+    role_id: int,
+    permissions: dict[str, bool],
+    *,
+    role_active: bool,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, title in KNOWN_PERMISSIONS:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{'✅' if permissions.get(key, False) else '❌'} {title}",
+                callback_data=f"gctl:perm:{chat_id}:{role_id}:{key}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="💾 Сохранить", callback_data=f"gctl:perm_save:{chat_id}:{role_id}")])
+    rows.append([
+        InlineKeyboardButton(
+            text="⛔ Выключить ранг" if role_active else "✅ Включить ранг",
+            callback_data=f"gctl:role_toggle:{chat_id}:{role_id}",
+        )
+    ])
+    if role_id not in _STANDARD_ROLE_IDS:
+        rows.append([InlineKeyboardButton(text="🗑 Удалить ранг", callback_data=f"gctl:role_delete:{chat_id}:{role_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ Все ранги", callback_data=f"gctl:roles:{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def render_role_editor(
+    target: Message,
+    *,
+    chat_id: int,
+    role: AdminRole,
+    assignments: int,
+    permissions: dict[str, bool],
+) -> None:
+    if role.name in STANDARD_NAMES:
+        _STANDARD_ROLE_IDS.add(role.id)
+    else:
+        _STANDARD_ROLE_IDS.discard(role.id)
+    await target.edit_text(
+        "👑 <b>Настройка админ-ранга</b>\n\n"
+        f"Название: <b>{escape(role.name)}</b>\n"
+        f"Статус: {'✅ включён' if role.is_active else '⛔ выключен'}\n"
+        f"Назначено пользователей: <b>{assignments}</b>\n\n"
+        "Выберите нужные разрешения. Изменения применятся только после нажатия <b>💾 Сохранить</b>.",
+        parse_mode="HTML",
+        reply_markup=role_editor_keyboard(
+            chat_id,
+            role.id,
+            permissions,
+            role_active=role.is_active,
+        ),
+    )
 
 
 async def _custom_role_needs_telegram_admin(
@@ -157,8 +217,6 @@ async def ensure_telegram_admin_for_custom_role(
         )
 
     if not await _custom_role_needs_telegram_admin(session, role_id=role.id):
-        # A custom Mimorus rank with no Telegram-relevant permissions must not
-        # silently turn an ordinary participant into a Telegram administrator.
         return await _demote_tracked_custom_admin(
             bot,
             session,
@@ -247,8 +305,6 @@ async def sync_custom_role_permissions(
                 return error
             continue
 
-        # Never overwrite a Telegram administrator that the owner appointed
-        # manually outside Mimorus.
         if status == "administrator" and promotion is None:
             continue
         if status not in {"member", "restricted", "administrator"}:
@@ -299,10 +355,6 @@ async def sync_custom_role_state(
     ).scalar_one_or_none()
     if role is None or role.name in STANDARD_NAMES:
         return None
-
-    # A custom rank may have been disabled while its permissions were edited.
-    # Re-enabling must apply the currently saved Telegram-relevant permissions
-    # even when no tracked promotion row existed before.
     return await sync_custom_role_permissions(
         callback,
         session,
@@ -323,5 +375,7 @@ _role_actions_module._sync_managed_telegram_admins_for_role = sync_custom_role_p
 _role_ux_module._sync_managed_telegram_admins_for_role = sync_custom_role_permissions
 _role_actions_module._sync_managed_telegram_admins_for_role_state = sync_custom_role_state
 _role_ux_module._sync_managed_telegram_admins_for_role_state = sync_custom_role_state
+_role_ux_module._permission_editor_keyboard = role_editor_keyboard
+_role_ux_module._render_permission_editor = render_role_editor
 _manual_moderation_module._admin_access = punishment_list_access
 _punishment_lists_module._admin_access = punishment_list_access
