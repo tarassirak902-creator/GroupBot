@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -21,6 +22,7 @@ SETTINGS_CALLBACK_PREFIXES = (
     "preason:",  # punishment reasons
 )
 SPECIAL_PICK_PREFIX = "priv:special_pick:"
+RANK_DRAFT_SAVE_PREFIX = "gctl:perm_save:"
 
 
 def _settings_chat_id(data: str) -> int | None:
@@ -50,6 +52,16 @@ def _special_pick_target(data: str) -> int | None:
         return None
 
 
+def _rank_draft_target(data: str) -> tuple[int, int] | None:
+    parts = data.split(":", 3)
+    if len(parts) != 4:
+        return None
+    try:
+        return int(parts[2]), int(parts[3])
+    except ValueError:
+        return None
+
+
 class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
     """Enforce owner access and validate private group-settings callbacks."""
 
@@ -68,13 +80,36 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
         callback_data = event.data or ""
         is_settings = callback_data.startswith(SETTINGS_CALLBACK_PREFIXES)
         is_special_pick = callback_data.startswith(SPECIAL_PICK_PREFIX)
-        if not is_settings and not is_special_pick:
+        is_rank_draft_save = callback_data.startswith(RANK_DRAFT_SAVE_PREFIX)
+        if not is_settings and not is_special_pick and not is_rank_draft_save:
             return await handler(event, data)
 
-        chat_id = _settings_chat_id(callback_data)
-        if chat_id is None:
-            await event.answer("Не удалось определить группу для этой настройки.", show_alert=True)
-            return None
+        if is_rank_draft_save:
+            target = _rank_draft_target(callback_data)
+            state = data.get("state")
+            if target is None or not isinstance(state, FSMContext):
+                await event.answer(
+                    "Редактор устарел. Откройте нужный ранг заново.",
+                    show_alert=True,
+                )
+                return None
+            chat_id, role_id = target
+            state_data = await state.get_data()
+            if (
+                state_data.get("permission_draft_chat_id") != chat_id
+                or state_data.get("permission_draft_role_id") != role_id
+                or not isinstance(state_data.get("permission_draft"), dict)
+            ):
+                await event.answer(
+                    "Эта кнопка относится к старому редактору. Откройте нужный ранг заново.",
+                    show_alert=True,
+                )
+                return None
+        else:
+            chat_id = _settings_chat_id(callback_data)
+            if chat_id is None:
+                await event.answer("Не удалось определить группу для этой настройки.", show_alert=True)
+                return None
 
         async with self.session_factory() as session:
             allowed = await _owner_access(session, chat_id, event.from_user.id)
