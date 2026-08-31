@@ -11,7 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingDeal, AdvertisingListing, AdvertisingPlacement
+from groupbot.models import Group, GroupOwner, GroupStatus
 from groupbot.services.audit import write_audit
+from groupbot.services.subscriptions import active_subscription_for_group
 from groupbot.workers.advertising_mutual_lifecycle import process_mutual_op
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,109 @@ async def _finish_deal_if_no_other_active(session: AsyncSession, deal: Advertisi
     return True
 
 
+async def _platform_unavailable_reason(
+    session: AsyncSession,
+    *,
+    listing: AdvertisingListing,
+    seller_user_id: int,
+) -> str | None:
+    owner_row = (
+        await session.execute(
+            select(Group.status, GroupOwner.user_id)
+            .join(GroupOwner, GroupOwner.chat_id == Group.chat_id)
+            .where(
+                Group.chat_id == listing.chat_id,
+                GroupOwner.is_current.is_(True),
+            )
+            .limit(1)
+        )
+    ).first()
+    if owner_row is None:
+        return "у рекламной группы больше нет текущего владельца в Mimorus"
+    if int(owner_row.user_id) != seller_user_id:
+        return "у рекламной группы сменился владелец"
+    if owner_row.status != GroupStatus.active.value:
+        return "рекламная группа больше не подключена к Mimorus"
+    if await active_subscription_for_group(session, listing.chat_id) is None:
+        return "у владельца рекламной группы закончилась активная подписка Mimorus"
+    return None
+
+
+async def fail_unavailable_platforms(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
+    now = datetime.now(timezone.utc)
+    failed = 0
+    notifications: list[tuple[int, int, int, str, str]] = []
+    async with session_factory() as session:
+        async with session.begin():
+            rows = (await session.execute(
+                select(AdvertisingDeal, AdvertisingListing)
+                .join(AdvertisingListing, AdvertisingListing.id == AdvertisingDeal.listing_id)
+                .where(AdvertisingDeal.status == "accepted")
+                .with_for_update(skip_locked=True)
+            )).all()
+            for deal, listing in rows:
+                reason = await _platform_unavailable_reason(
+                    session,
+                    listing=listing,
+                    seller_user_id=deal.seller_user_id,
+                )
+                if reason is None:
+                    continue
+                placements = list((await session.execute(
+                    select(AdvertisingPlacement)
+                    .where(
+                        AdvertisingPlacement.deal_id == deal.id,
+                        AdvertisingPlacement.status.in_(["pending", "ready", "active"]),
+                    )
+                    .with_for_update()
+                )).scalars().all())
+                if not placements:
+                    continue
+                for placement in placements:
+                    placement.status = "failed"
+                    cfg = dict(placement.config_json or {})
+                    cfg["failure_reason"] = reason
+                    cfg["failed_at"] = now.isoformat()
+                    placement.config_json = cfg
+                deal.status = "finished_waiting_confirmation"
+                deal.finished_at = now
+                failed += 1
+                notifications.append((deal.id, deal.buyer_user_id, deal.seller_user_id, listing.group_title_snapshot, reason))
+                await write_audit(
+                    session,
+                    "advertising.deal_failed_platform_unavailable",
+                    actor_user_id=None,
+                    chat_id=listing.chat_id,
+                    target_type="advertising_deal",
+                    target_id=str(deal.id),
+                    payload={
+                        "reason": reason,
+                        "placement_ids": [placement.id for placement in placements],
+                    },
+                )
+
+    for deal_id, buyer_id, seller_id, title, reason in notifications:
+        buyer_text = (
+            "⚠️ <b>Рекламное размещение остановлено</b>\n\n"
+            f"🏠 Площадка: <b>{escape(title)}</b>\n"
+            f"Причина: <b>{escape(reason)}</b>\n\n"
+            "Mimorus не отмечает такую сделку как успешно выполненную. Вы можете подтвердить отсутствие претензий или открыть спор."
+        )
+        seller_text = (
+            "⚠️ <b>Рекламное размещение остановлено</b>\n\n"
+            f"🏠 Ваша площадка: <b>{escape(title)}</b>\n"
+            f"Причина: <b>{escape(reason)}</b>\n\n"
+            "Сделка переведена на подтверждение сторон. Вы можете подтвердить отсутствие претензий или открыть спор."
+        )
+        markup = _settlement_keyboard(deal_id)
+        for user_id, text in ((buyer_id, buyer_text), (seller_id, seller_text)):
+            try:
+                await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=markup)
+            except Exception:
+                pass
+    return failed
+
+
 async def publish_due_posts(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
     now = datetime.now(timezone.utc)
     published = 0
@@ -78,12 +183,11 @@ async def publish_due_posts(bot: Bot, session_factory: async_sessionmaker[AsyncS
                         await bot.send_photo(listing.chat_id, photo=photo, caption=text or None, reply_markup=markup)
                     else:
                         await bot.send_message(listing.chat_id, text, reply_markup=markup)
+                    placement.last_published_at = now
                     published += 1
                     await write_audit(session, "advertising.post_published", actor_user_id=None, chat_id=listing.chat_id, target_type="advertising_deal", target_id=str(deal.id), payload={"placement_id": placement.id})
                 except Exception:
                     logger.exception("Failed to publish advertising post deal=%s chat=%s", deal.id, listing.chat_id)
-                finally:
-                    placement.last_published_at = now
     return published
 
 
@@ -271,11 +375,14 @@ async def close_expired_no_claims_windows(bot: Bot, session_factory: async_sessi
 async def advertising_lifecycle_worker(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> None:
     while True:
         try:
+            failed = await fail_unavailable_platforms(bot, session_factory)
             published = await publish_due_posts(bot, session_factory)
             finished_posts = await finish_expired_posts(bot, session_factory)
             finished_op = await finish_due_mandatory(bot, session_factory)
             finished_mutual = await process_mutual_op(bot, session_factory)
             closed = await close_expired_no_claims_windows(bot, session_factory)
+            if failed:
+                logger.info("Failed %s advertising deals because platform became unavailable", failed)
             if published:
                 logger.info("Published %s advertising posts", published)
             if finished_posts:
