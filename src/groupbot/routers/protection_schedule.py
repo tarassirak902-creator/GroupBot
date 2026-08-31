@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import GroupOwner, GroupSettings
@@ -152,6 +152,17 @@ def create_protection_schedule_router(session_factory: async_sessionmaker[AsyncS
                 if not cfg["enabled"] and not cfg["modules"]:
                     await callback.answer("Сначала выберите хотя бы одну защиту.", show_alert=True)
                     return
+                if not cfg["enabled"]:
+                    # Serialize owner-wide slot consumption. Without this lock two
+                    # groups could concurrently observe the same final free slot.
+                    await session.execute(select(func.pg_advisory_xact_lock(callback.from_user.id)))
+                    used, limit = await _schedule_usage(session, callback.from_user.id)
+                    if limit is not None and used >= limit:
+                        await callback.answer(
+                            f"Достигнут лимит включённых расписаний текущего тарифа: {limit}.",
+                            show_alert=True,
+                        )
+                        return
                 cfg["enabled"] = not cfg["enabled"]
                 await _save(session, chat_id, cfg)
         await _render(callback, session_factory, chat_id)
