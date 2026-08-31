@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery, TelegramObject
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from groupbot.models import AdminPermission, AdminRole, GroupOwner, Subscription
+from groupbot.models import AdminPermission, AdminRole, Group, GroupOwner, GroupStatus, Subscription
 from groupbot.routers.group_control import KNOWN_PERMISSIONS
 from groupbot.routers.member_status_guard import is_regular_group_member
 from groupbot.services.permissions import is_group_owner
@@ -37,11 +37,16 @@ ROLE_EDITOR_PREFIXES = (
     "gctl:role_delete_confirm:",
 )
 
-SUBSCRIPTION_EXEMPT_GROUP_PREFIXES = (
+# Navigation/recovery actions must stay available even when the group is not
+# active or the subscription has expired. They do not mutate paid settings.
+GROUP_RECOVERY_PREFIXES = (
     "group:open:",
     "group:delete_prompt:",
     "group:delete_confirm:",
+    "group:diagnostic:",
+    "group:reconnect:",
 )
+SUBSCRIPTION_EXEMPT_GROUP_PREFIXES = GROUP_RECOVERY_PREFIXES
 SUBSCRIPTION_EXEMPT_OWNER_CALLBACKS = {
     "networks:list",
 }
@@ -59,6 +64,11 @@ EXPIRED_OWNER_CALLBACK_TEXT = (
 STALE_SUBSCRIPTION_CALLBACK_TEXT = (
     "⚠️ Этот экран относится к предыдущему периоду подписки и уже устарел. "
     "Откройте группу или сетку заново в личном кабинете Mimorus."
+)
+INACTIVE_GROUP_CALLBACK_TEXT = (
+    "⚠️ Эта группа сейчас не подключена к Mimorus. "
+    "Старые кнопки настроек и функций больше не выполняются. "
+    "Откройте карточку группы, проверьте диагностику и подключите бота заново."
 )
 
 _ROLE_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
@@ -116,9 +126,6 @@ def _callback_predates_subscription(event: CallbackQuery, subscription: Subscrip
         message_date = message_date.replace(tzinfo=timezone.utc)
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
-    # Telegram Message.date is second-precision, while PostgreSQL timestamps can
-    # include microseconds. Round the subscription boundary down to the same
-    # precision so a fresh screen sent in the activation second is not rejected.
     return message_date < started_at.replace(microsecond=0)
 
 
@@ -167,6 +174,12 @@ async def _group_subscription_owner(
     return int(owner_id), await active_subscription_for_owner(session, int(owner_id))
 
 
+async def _group_status(session: AsyncSession, chat_id: int) -> str | None:
+    return (
+        await session.execute(select(Group.status).where(Group.chat_id == chat_id))
+    ).scalar_one_or_none()
+
+
 class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
     """Guard private group callbacks, subscriptions and persistent editors."""
 
@@ -184,6 +197,16 @@ class PrivateGroupSettingsAccessMiddleware(BaseMiddleware):
 
         callback_data = event.data or ""
         chat_id_from_callback = _settings_chat_id(callback_data)
+
+        if (
+            chat_id_from_callback is not None
+            and not callback_data.startswith(GROUP_RECOVERY_PREFIXES)
+        ):
+            async with self.session_factory() as session:
+                status = await _group_status(session, chat_id_from_callback)
+            if status is not None and status != GroupStatus.active.value:
+                await event.answer(INACTIVE_GROUP_CALLBACK_TEXT, show_alert=True)
+                return None
 
         if (
             chat_id_from_callback is not None
