@@ -5,12 +5,14 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, TelegramObject
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.models import Group, GroupStatus
-from groupbot.services.subscriptions import active_subscription_for_group
+from groupbot.services.permissions import is_group_owner
+from groupbot.services.subscriptions import active_subscription_for_group, active_subscription_for_owner
 
 
 EXPIRED_SUBSCRIPTION_TEXT = (
@@ -19,6 +21,15 @@ EXPIRED_SUBSCRIPTION_TEXT = (
     "Команды и функции Mimorus в этой группе временно недоступны.\n\n"
     "Владельцу нужно продлить или активировать тариф в личных сообщениях с ботом."
 )
+
+EXPIRED_PRIVATE_FSM_TEXT = (
+    "⚠️ Активная подписка закончилась. Текущая настройка отменена и не была сохранена. "
+    "Продлите или активируйте тариф, затем откройте эту настройку заново."
+)
+
+OWNER_WIDE_SUBSCRIPTION_STATES = {
+    "NetworkCreateState:waiting_name",
+}
 
 _START_CONNECT_RE = re.compile(
     r"^/start(?:@[A-Za-z0-9_]+)?\s+connect\s*$",
@@ -58,7 +69,6 @@ def _normalize(text: str) -> str:
 
 
 def _command_form(text: str) -> str:
-    """Normalize harmless punctuation accepted by human-facing text commands."""
     return _normalize(text).rstrip(" ?？!！.")
 
 
@@ -80,16 +90,84 @@ def looks_like_mimorus_command(message: Message) -> bool:
     return command.startswith(_COMMAND_PREFIXES)
 
 
-class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
-    """Explain why Mimorus group commands are unavailable after subscription expiry.
+def _negative_chat_id(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value < 0 else None
+    if isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        return parsed if parsed < 0 else None
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key).casefold()
+            if "chat_id" in key_text or key_text.endswith("_chat"):
+                found = _negative_chat_id(nested)
+                if found is not None:
+                    return found
+        for nested in value.values():
+            found = _negative_chat_id(nested)
+            if found is not None:
+                return found
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            found = _negative_chat_id(nested)
+            if found is not None:
+                return found
+    return None
 
-    Ordinary conversation is never blocked. Only command-like group messages are
-    intercepted, while /start connect remains available so a group can be connected
-    before a tariff is activated.
-    """
+
+class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
+    """Explain subscription expiry for group commands and stale private FSM flows."""
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
+
+    async def _guard_private_fsm(self, event: Message, data: dict[str, Any]) -> bool:
+        if event.chat.type != "private" or event.from_user is None:
+            return False
+        state = data.get("state")
+        if not isinstance(state, FSMContext):
+            return False
+        state_name = await state.get_state()
+        if state_name is None:
+            return False
+        state_data = await state.get_data()
+        chat_id = _negative_chat_id(state_data)
+        owner_wide = state_name in OWNER_WIDE_SUBSCRIPTION_STATES
+        if chat_id is None and not owner_wide:
+            return False
+
+        try:
+            async with self.session_factory() as session:
+                if chat_id is not None:
+                    owner = await is_group_owner(session, chat_id, event.from_user.id)
+                    subscription = (
+                        await active_subscription_for_owner(session, event.from_user.id)
+                        if owner
+                        else None
+                    )
+                else:
+                    owner = True
+                    subscription = await active_subscription_for_owner(session, event.from_user.id)
+        except Exception:
+            return False
+
+        if chat_id is not None and not owner:
+            await state.clear()
+            await event.answer(
+                "⚠️ Эта настройка больше недоступна: вы не являетесь владельцем выбранной группы. "
+                "Откройте нужную группу заново."
+            )
+            return True
+        if subscription is None:
+            await state.clear()
+            await event.answer(EXPIRED_PRIVATE_FSM_TEXT)
+            return True
+        return False
 
     async def __call__(
         self,
@@ -97,6 +175,9 @@ class SubscriptionCommandNoticeMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        if isinstance(event, Message) and await self._guard_private_fsm(event, data):
+            return None
+
         if (
             not isinstance(event, Message)
             or event.chat.type not in {"group", "supergroup"}
