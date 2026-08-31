@@ -15,6 +15,9 @@ class AdvertisingMaterialState(StatesGroup):
     waiting_mandatory = State()
 
 
+TERMINAL_PLACEMENT_STATUSES = {"active", "finished", "rejected", "failed"}
+
+
 def _materials_keyboard(deal: AdvertisingDeal, placements: list[AdvertisingPlacement]) -> InlineKeyboardMarkup:
     by_kind = {row.kind: row for row in placements}
     rows: list[list[InlineKeyboardButton]] = []
@@ -48,6 +51,8 @@ def _materials_text(deal: AdvertisingDeal, listing: AdvertisingListing, placemen
             lines.append("🚀 Рекламный пост: <b>уже запущен</b>")
         elif post is not None and post.status == "finished":
             lines.append("🏁 Рекламный пост: <b>показ завершён</b>")
+        elif post is not None and post.status == "failed":
+            lines.append("⚠️ Рекламный пост: <b>размещение остановлено</b>")
         else:
             ready = post is not None and post.status == "ready"
             lines.append(f"{'✅' if ready else '⏳'} Рекламный пост: <b>{'готов' if ready else 'не передан'}</b>")
@@ -58,12 +63,17 @@ def _materials_text(deal: AdvertisingDeal, listing: AdvertisingListing, placemen
             lines.append(f"🚀 ОП: <b>{title}</b> — запущена")
         elif placement is not None and placement.status == "finished":
             lines.append("🏁 ОП: <b>завершена</b>")
+        elif placement is not None and placement.status == "failed":
+            lines.append("⚠️ ОП: <b>размещение остановлено</b>")
         else:
             ready = placement is not None and placement.status == "ready"
             title = str((placement.config_json or {}).get("sponsor_title") or "спонсор") if ready else "спонсор не указан"
             lines.append(f"{'✅' if ready else '⏳'} ОП: <b>{title}</b>")
     incomplete = [row for row in placements if row.status in {"pending", "draft"}]
-    lines.extend(["", "✅ Все необходимые материалы переданы." if not incomplete else "Выберите материал, который хотите передать или заменить."])
+    if any(row.status == "failed" for row in placements):
+        lines.extend(["", "⚠️ Сделка остановлена. Материалы больше нельзя изменять."])
+    else:
+        lines.extend(["", "✅ Все необходимые материалы переданы." if not incomplete else "Выберите материал, который хотите передать или заменить."])
     return "\n".join(lines)
 
 
@@ -101,7 +111,7 @@ def create_advertising_materials_router(session_factory: async_sessionmaker[Asyn
         if loaded is None:
             return False
         deal, listing, placements = loaded
-        if not placements or any(row.status in {"pending", "draft"} for row in placements):
+        if deal.status != "accepted" or not placements or any(row.status in {"pending", "draft", "failed"} for row in placements):
             return False
         try:
             await bot.send_message(
@@ -156,8 +166,8 @@ def create_advertising_materials_router(session_factory: async_sessionmaker[Asyn
             await callback.answer("Этот материал недоступен.", show_alert=True)
             return
         post = next((row for row in loaded[2] if row.kind == "post"), None)
-        if post is not None and post.status in {"active", "finished", "rejected"}:
-            await callback.answer("После одобрения рекламодателем пост уже нельзя изменять.", show_alert=True)
+        if post is not None and post.status in TERMINAL_PLACEMENT_STATUSES:
+            await callback.answer("После запуска или остановки сделки пост уже нельзя изменять.", show_alert=True)
             return
         await state.set_state(AdvertisingMaterialState.waiting_post)
         await state.update_data(advertising_material_deal_id=deal_id)
@@ -177,17 +187,17 @@ def create_advertising_materials_router(session_factory: async_sessionmaker[Asyn
         if not isinstance(deal_id, int):
             await state.clear()
             return
-        loaded = await _load(deal_id)
-        if loaded is None or message.from_user.id != loaded[0].buyer_user_id or loaded[0].status != "accepted":
-            await state.clear()
-            await message.answer("Эта сделка больше не принимает материалы.")
-            return
         async with session_factory() as session:
             async with session.begin():
-                placement = (await session.execute(select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal_id, AdvertisingPlacement.kind == "post").with_for_update())).scalar_one_or_none()
-                if placement is None or placement.status in {"active", "finished", "rejected"}:
+                deal = (await session.execute(select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update())).scalar_one_or_none()
+                if deal is None or message.from_user.id != deal.buyer_user_id or deal.status != "accepted":
                     await state.clear()
-                    await message.answer("После одобрения рекламодателем пост уже нельзя изменять.")
+                    await message.answer("Эта сделка больше не принимает материалы.")
+                    return
+                placement = (await session.execute(select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal_id, AdvertisingPlacement.kind == "post").with_for_update())).scalar_one_or_none()
+                if placement is None or placement.status in TERMINAL_PLACEMENT_STATUSES:
+                    await state.clear()
+                    await message.answer("После запуска или остановки сделки пост уже нельзя изменять.")
                     return
                 cfg = dict(placement.config_json or {})
                 cfg.update({"source_chat_id": message.chat.id, "source_message_id": message.message_id, "content_type": message.content_type})
@@ -210,8 +220,8 @@ def create_advertising_materials_router(session_factory: async_sessionmaker[Asyn
             await callback.answer("Этот материал недоступен.", show_alert=True)
             return
         mandatory = next((row for row in loaded[2] if row.kind == "mandatory"), None)
-        if mandatory is not None and mandatory.status in {"active", "finished", "rejected"}:
-            await callback.answer("ОП уже запущена или завершена.", show_alert=True)
+        if mandatory is not None and mandatory.status in TERMINAL_PLACEMENT_STATUSES:
+            await callback.answer("ОП уже запущена, завершена или остановлена.", show_alert=True)
             return
         await state.set_state(AdvertisingMaterialState.waiting_mandatory)
         await state.update_data(advertising_material_deal_id=deal_id)
@@ -241,11 +251,6 @@ def create_advertising_materials_router(session_factory: async_sessionmaker[Asyn
         if target is None:
             await message.answer("Укажите публичный @username или ссылку t.me на канал/группу.")
             return
-        loaded = await _load(deal_id)
-        if loaded is None or message.from_user.id != loaded[0].buyer_user_id or loaded[0].status != "accepted":
-            await state.clear()
-            await message.answer("Эта сделка больше не принимает материалы.")
-            return
         try:
             chat = await bot.get_chat(target)
             me = await bot.get_me()
@@ -258,10 +263,15 @@ def create_advertising_materials_router(session_factory: async_sessionmaker[Asyn
             return
         async with session_factory() as session:
             async with session.begin():
-                placement = (await session.execute(select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal_id, AdvertisingPlacement.kind == "mandatory").with_for_update())).scalar_one_or_none()
-                if placement is None:
+                deal = (await session.execute(select(AdvertisingDeal).where(AdvertisingDeal.id == deal_id).with_for_update())).scalar_one_or_none()
+                if deal is None or message.from_user.id != deal.buyer_user_id or deal.status != "accepted":
                     await state.clear()
-                    await message.answer("Размещение ОП не найдено.")
+                    await message.answer("Эта сделка больше не принимает материалы.")
+                    return
+                placement = (await session.execute(select(AdvertisingPlacement).where(AdvertisingPlacement.deal_id == deal_id, AdvertisingPlacement.kind == "mandatory").with_for_update())).scalar_one_or_none()
+                if placement is None or placement.status in TERMINAL_PLACEMENT_STATUSES:
+                    await state.clear()
+                    await message.answer("ОП уже запущена, завершена или остановлена.")
                     return
                 cfg = dict(placement.config_json or {})
                 cfg.update({"sponsor_chat_id": chat.id, "sponsor_title": chat.title or target, "sponsor_username": getattr(chat, "username", None)})
