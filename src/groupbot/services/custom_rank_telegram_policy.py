@@ -23,16 +23,10 @@ from groupbot.services.permissions import has_permission
 from groupbot.telegram_admin_models import TelegramAdminPromotion
 
 
-# Full/common group statistics are deliberately rank-based, not a configurable
-# AdminPermission. Remove the historical switch from the shared editor catalog
-# so Voice Admin/custom roles cannot be shown a setting that enforcement ignores.
 KNOWN_PERMISSIONS[:] = [
     (key, title) for key, title in KNOWN_PERMISSIONS if key != "stats"
 ]
 
-# Keep default role permissions aligned with the same catalog. Historical rows
-# named "stats" may stay in the database, but they are inert and no longer
-# displayed or consulted for full group statistics.
 _helper_role_policy.STANDARD_PERMISSION_KEYS.discard("stats")
 _helper_role_policy.STANDARD_PERMISSION_KEYS.add("punishment_lists")
 for _role_name in (
@@ -69,7 +63,6 @@ async def punishment_list_access(
     chat_id: int,
     user_id: int,
 ) -> bool:
-    """All punishment-list commands use the same explicit role permission."""
     return await has_permission(session, chat_id, user_id, "punishment_lists")
 
 
@@ -206,17 +199,36 @@ async def ensure_telegram_admin_for_custom_role(
     role: AdminRole,
     telegram_member,
 ) -> str | None:
-    if role.name in STANDARD_NAMES:
+    # The Telegram side effect must be serialized with role toggle/delete. Both
+    # those paths lock AdminRole FOR UPDATE. Keeping this lock until the caller's
+    # assignment transaction commits prevents a stale button from promoting a
+    # user after the role was disabled or removed.
+    locked_role = (
+        await session.execute(
+            select(AdminRole)
+            .where(
+                AdminRole.id == role.id,
+                AdminRole.chat_id == chat_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if locked_role is None:
+        return "Ранг больше недоступен. Откройте список рангов заново."
+    if not locked_role.is_active:
+        return "Ранг выключен. Включите его перед назначением."
+
+    if locked_role.name in STANDARD_NAMES:
         return await _original_ensure_telegram_admin_for_role(
             bot,
             session,
             chat_id=chat_id,
             target_id=target_id,
-            role=role,
+            role=locked_role,
             telegram_member=telegram_member,
         )
 
-    if not await _custom_role_needs_telegram_admin(session, role_id=role.id):
+    if not await _custom_role_needs_telegram_admin(session, role_id=locked_role.id):
         return await _demote_tracked_custom_admin(
             bot,
             session,
@@ -230,7 +242,7 @@ async def ensure_telegram_admin_for_custom_role(
         session,
         chat_id=chat_id,
         target_id=target_id,
-        role=role,
+        role=locked_role,
         telegram_member=telegram_member,
     )
 
