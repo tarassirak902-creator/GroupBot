@@ -61,7 +61,7 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
    async with s.begin():
     ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active").order_by(AdvertisingManualOp.id).with_for_update())).scalars().all());active=[]
     for op in ops:
-     done=(op.mode=="days" and op.ends_at is not None and op.ends_at<=now) or (op.mode=="subscribers" and op.progress_count>=op.quantity)
+     done=op.mode=="days" and op.ends_at is not None and op.ends_at<=now
      if done:op.status="completed";op.completed_at=now
      else:active.append(op)
   if not active:return "📭 Активных ОП сейчас нет.",None
