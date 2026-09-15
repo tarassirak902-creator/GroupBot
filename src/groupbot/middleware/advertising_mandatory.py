@@ -84,11 +84,19 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
                         "title": str(cfg.get("target_title") or cfg.get("target_username") or "Группа"),
                     })
 
+            # Mutual OP is enforced only while both the direction and its deal are
+            # active. Membership itself is deliberately checked live in Telegram on
+            # every new message, so leaving the target group immediately removes the
+            # right to write in the source group even if the user joined before.
             mutual = list((await session.execute(
-                select(AdvertisingMutualOpDirection).where(
+                select(AdvertisingMutualOpDirection)
+                .join(AdvertisingDeal, AdvertisingDeal.id == AdvertisingMutualOpDirection.deal_id)
+                .where(
                     AdvertisingMutualOpDirection.source_chat_id == event.chat.id,
                     AdvertisingMutualOpDirection.status == "active",
-                ).order_by(AdvertisingMutualOpDirection.starts_at, AdvertisingMutualOpDirection.id)
+                    AdvertisingDeal.status == "accepted",
+                )
+                .order_by(AdvertisingMutualOpDirection.starts_at, AdvertisingMutualOpDirection.id)
             )).scalars().all())
             for direction in mutual:
                 if direction.invite_link:
