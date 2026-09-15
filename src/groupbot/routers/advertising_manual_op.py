@@ -37,9 +37,6 @@ async def _create_op(sf,bot:Bot,*,source_chat_id:int,owner_user_id:int,target:st
    op=AdvertisingManualOp(source_chat_id=source_chat_id,owner_user_id=owner_user_id,target_chat_id=target_id,target_url=url,target_title=title,mode=mode,quantity=quantity,ends_at=now+timedelta(days=quantity) if mode=="days" else None);s.add(op);await s.flush();oid=op.id
   return (await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==oid))).scalar_one()
 async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:int,target_title:str,user_id:int,reason:str)->None:
- # Known/public targets are matched by chat id. An unresolved private target must
- # match the exact invite link that created that OP; a random update from the same
- # chat must never bind every unresolved campaign to this group.
  known_target=AdvertisingManualOp.target_chat_id==target_chat_id
  private_target=and_(AdvertisingManualOp.target_chat_id.is_(None),AdvertisingManualOp.target_url==invite_url) if invite_url else None
  match=or_(known_target,private_target) if private_target is not None else known_target
@@ -58,6 +55,11 @@ async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:i
    if not credit.counted:
     credit.counted=True
     if op.mode=="subscribers":op.progress_count+=1
+  elif credit.satisfied and credit.reason=="join_request" and reason=="joined":
+   # Acceptance of an already-counted join request is not a second result.
+   # Keep the original reason so a later member update cannot turn this permanent
+   # request credit into a reversible ordinary-join credit.
+   credit.satisfied=True
 
 def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Router:
  r=Router(name="advertising_manual_op")
