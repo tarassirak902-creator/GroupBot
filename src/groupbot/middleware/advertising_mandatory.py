@@ -38,8 +38,9 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
     if d.invite_link:reqs.append({"target_chat_id":d.target_chat_id,"url":d.invite_link,"title":d.target_title})
    manual=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==event.chat.id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))))).scalars().all())
    for op in manual:
-    credited=(await s.execute(select(AdvertisingManualOpCredit.id).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==event.from_user.id,AdvertisingManualOpCredit.satisfied.is_(True)).limit(1))).scalar_one_or_none()
-    if credited is None:reqs.append({"target_chat_id":op.target_chat_id,"url":op.target_url,"title":op.target_title,"manual_op_id":op.id})
+    credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==event.from_user.id).limit(1))).scalar_one_or_none()
+    if credit is not None and credit.satisfied and credit.reason in {"restricted","join_request"}:continue
+    reqs.append({"target_chat_id":op.target_chat_id,"url":op.target_url,"title":op.target_title,"manual_op_id":op.id})
    if not reqs:return await handler(event,data)
    if await _is_op_exempt_in_db(s,event.chat.id,event.from_user.id):return await handler(event,data)
   try:
@@ -51,16 +52,25 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
    target=req.get("target_chat_id")
    if target is None:missing=req;break
    try:member=await bot.get_chat_member(target,event.from_user.id)
-   except Exception:logger.exception("Could not verify OP membership target=%s user=%s",target,event.from_user.id);continue
+   except Exception:
+    logger.exception("Could not verify OP membership target=%s user=%s",target,event.from_user.id);missing=req;break
    joined=member.status in {"member","administrator","creator"} or (member.status=="restricted" and getattr(member,"is_member",True));manual_id=req.get("manual_op_id")
    if manual_id and (joined or member.status in {"kicked","banned"}):
     counted=joined
     async with self.session_factory() as s:
      async with s.begin():
       await upsert_user(s,event.from_user);op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==manual_id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none();credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
-      if op is not None and credit is None:
-       s.add(AdvertisingManualOpCredit(op_id=manual_id,user_id=event.from_user.id,satisfied=True,counted=counted,reason="joined" if joined else "restricted"))
-       if counted and op.mode=="subscribers":op.progress_count+=1
+      if op is not None:
+       if credit is None:
+        s.add(AdvertisingManualOpCredit(op_id=manual_id,user_id=event.from_user.id,satisfied=True,counted=counted,reason="joined" if joined else "restricted"))
+        if counted and op.mode=="subscribers":op.progress_count+=1
+       elif joined:
+        credit.satisfied=True;credit.reason="joined"
+        if not credit.counted:
+         credit.counted=True
+         if op.mode=="subscribers":op.progress_count+=1
+       else:
+        credit.satisfied=True;credit.reason="restricted"
     if not joined:
      try:await bot.send_message(event.chat.id,"⚠️ В Рекламной группе вы ограничены или ваша заявка на вступление была отклонена, поэтому Mimorus засчитывает вам обязательную подписку как выполненную.")
      except Exception:pass
