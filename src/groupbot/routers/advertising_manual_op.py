@@ -19,15 +19,17 @@ async def _bot_admin(bot,chat_id):
  try:m=await bot.get_chat_member(chat_id,(await bot.get_me()).id);return m.status in {"administrator","creator"}
  except Exception:return False
 async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:int,target_title:str,user_id:int,reason:str)->None:
- ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.target_chat_id==target_chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",AdvertisingManualOp.mode=="days",and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).with_for_update())).scalars().all())
+ """Credit subscriber campaigns only when Telegram identifies this OP's invite."""
+ if not invite_url:return
+ ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.target_chat_id==target_chat_id,AdvertisingManualOp.target_url==invite_url,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",AdvertisingManualOp.mode=="days",and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).with_for_update())).scalars().all())
  for op in ops:
   credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==user_id).with_for_update())).scalar_one_or_none()
   if credit is None:
    counted=op.mode=="subscribers";s.add(AdvertisingManualOpCredit(op_id=op.id,user_id=user_id,satisfied=True,counted=counted,reason=reason))
    if counted:op.progress_count=min(op.progress_count+1,op.quantity)
-  elif not credit.satisfied:
+  else:
    credit.satisfied=True;credit.reason=reason
-   if op.mode=="subscribers" and not credit.counted:credit.counted=True;op.progress_count=min(op.progress_count+1,op.quantity)
+   if op.mode=="subscribers" and not credit.counted and op.progress_count<op.quantity:credit.counted=True;op.progress_count+=1
 def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Router:
  r=Router(name="advertising_manual_op")
  @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(_LINK_RE))
