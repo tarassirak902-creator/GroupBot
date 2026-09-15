@@ -38,3 +38,17 @@ class AdvertisingManualOpCredit(Base):
     counted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     reason: Mapped[str] = mapped_column(String(32), nullable=False)
     credited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class AdvertisingManualLink(Base):
+    __tablename__ = "advertising_manual_links"
+    __table_args__ = (UniqueConstraint("invite_url", name="uq_manual_ad_link_url"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    target_chat_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False, index=True)
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False)
+    invite_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    target_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
