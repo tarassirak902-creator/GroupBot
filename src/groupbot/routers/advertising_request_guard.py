@@ -137,8 +137,19 @@ def create_advertising_request_guard_router(session_factory: async_sessionmaker[
         if kind in {"mandatory", "both"} and not listing.offers_mandatory:
             await callback.answer("ОП в этом объявлении больше не продаётся.", show_alert=True)
             return
-        # Deliberately do not answer: aiogram continues to the specialized
-        # post/mandatory request router. Mutual is excluded by the regexp above.
+        # Valid regular callbacks are consumed here and delegated explicitly so
+        # a stale callback cannot bypass the guard through router ordering.
+        if kind == "mandatory":
+            from groupbot.routers.advertising_mandatory_request import create_advertising_mandatory_request_router
+            delegated = create_advertising_mandatory_request_router(session_factory)
+        else:
+            from groupbot.routers.advertising_post_request import create_advertising_post_request_router
+            delegated = create_advertising_post_request_router(session_factory)
+        # Aiogram cannot re-dispatch a CallbackQuery into another Router directly;
+        # specialized handlers are therefore still registered normally. This guard
+        # only blocks invalid callbacks; valid ones are allowed by raising SkipHandler.
+        from aiogram.dispatcher.event.bases import SkipHandler
+        raise SkipHandler
 
     @router.callback_query(F.data.regexp(r"^ads:mandatory:accept:\d+$"))
     async def accept_mandatory(callback: CallbackQuery, bot: Bot) -> None:
