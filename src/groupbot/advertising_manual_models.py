@@ -33,7 +33,7 @@ class AdvertisingManualOpCredit(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     op_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("advertising_manual_ops.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_user_id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     satisfied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     counted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     reason: Mapped[str] = mapped_column(String(32), nullable=False)
