@@ -36,7 +36,7 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
    mutual=list((await s.execute(select(AdvertisingMutualOpDirection).join(AdvertisingDeal,AdvertisingDeal.id==AdvertisingMutualOpDirection.deal_id).where(AdvertisingMutualOpDirection.source_chat_id==event.chat.id,AdvertisingMutualOpDirection.status=="active",AdvertisingDeal.status=="accepted"))).scalars().all())
    for d in mutual:
     if d.invite_link:reqs.append({"target_chat_id":d.target_chat_id,"url":d.invite_link,"title":d.target_title})
-   manual=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==event.chat.id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))))).scalars().all())
+   manual=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==event.chat.id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity),AdvertisingManualOp.mode=="unlimited")))).scalars().all())
    for op in manual:
     credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==event.from_user.id).limit(1))).scalar_one_or_none()
     if credit is not None and credit.satisfied and credit.reason in {"restricted","join_request"}:continue
