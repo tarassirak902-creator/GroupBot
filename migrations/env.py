@@ -9,6 +9,8 @@ from groupbot.config import get_settings
 from groupbot.models import Base
 from groupbot import addon_models  # noqa: F401
 from groupbot import advertising_models  # noqa: F401
+from groupbot import advertising_manual_models  # noqa: F401
+from groupbot import advertising_mutual_models  # noqa: F401
 from groupbot import entry_models  # noqa: F401
 from groupbot import network_models  # noqa: F401
 from groupbot import payment_models  # noqa: F401
