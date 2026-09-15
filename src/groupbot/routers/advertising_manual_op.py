@@ -6,7 +6,7 @@ from aiogram import Bot,F,Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State,StatesGroup
 from aiogram.types import CallbackQuery,ChatJoinRequest,ChatMemberUpdated,InlineKeyboardButton,InlineKeyboardMarkup,Message
-from sqlalchemy import or_,select
+from sqlalchemy import and_,or_,select
 from sqlalchemy.ext.asyncio import AsyncSession,async_sessionmaker
 from groupbot.advertising_manual_models import AdvertisingManualOp,AdvertisingManualOpCredit
 from groupbot.models import Group,GroupOwner,GroupStatus
@@ -37,11 +37,17 @@ async def _create_op(sf,bot:Bot,*,source_chat_id:int,owner_user_id:int,target:st
    op=AdvertisingManualOp(source_chat_id=source_chat_id,owner_user_id=owner_user_id,target_chat_id=target_id,target_url=url,target_title=title,mode=mode,quantity=quantity,ends_at=now+timedelta(days=quantity) if mode=="days" else None);s.add(op);await s.flush();oid=op.id
   return (await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==oid))).scalar_one()
 async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:int,target_title:str,user_id:int,reason:str)->None:
- conditions=[AdvertisingManualOp.target_chat_id==target_chat_id]
- if invite_url:conditions.append(AdvertisingManualOp.target_url==invite_url)
- ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.status=="active",or_(*conditions)).with_for_update())).scalars().all())
+ # Known/public targets are matched by chat id. An unresolved private target must
+ # match the exact invite link that created that OP; a random update from the same
+ # chat must never bind every unresolved campaign to this group.
+ known_target=AdvertisingManualOp.target_chat_id==target_chat_id
+ private_target=and_(AdvertisingManualOp.target_chat_id.is_(None),AdvertisingManualOp.target_url==invite_url) if invite_url else None
+ match=or_(known_target,private_target) if private_target is not None else known_target
+ ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.status=="active",match).with_for_update())).scalars().all())
  for op in ops:
-  if op.target_chat_id is None:op.target_chat_id=target_chat_id;op.target_title=target_title
+  if op.target_chat_id is None:
+   if not invite_url or op.target_url!=invite_url:continue
+   op.target_chat_id=target_chat_id;op.target_title=target_title
   if op.target_chat_id!=target_chat_id:continue
   credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==user_id).with_for_update())).scalar_one_or_none()
   if credit is None:
@@ -58,14 +64,10 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
  async def render(chat_id:int):
   now=datetime.now(timezone.utc)
   async with sf() as s:
-   ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active").order_by(AdvertisingManualOp.id))).scalars().all())
-   # Completion is owned exclusively by advertising_manual_lifecycle so that the
-   # active -> completed transition and its one-time owner notifications cannot be
-   # bypassed merely by opening the "Реклама" screen during the worker interval.
-   active=[op for op in ops if not ((op.mode=="days" and op.ends_at is not None and op.ends_at<=now) or (op.mode=="subscribers" and op.progress_count>=op.quantity))]
-  if not active:return "📭 Активных ОП сейчас нет.",None
-  lines=[f"✅ <b>Ваши активные ОП: {len(active)}</b>",""];buttons=[]
-  for i,op in enumerate(active,1):
+   ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
+  if not ops:return "📭 Активных ОП сейчас нет.",None
+  lines=[f"✅ <b>Ваши активные ОП: {len(ops)}</b>",""];buttons=[]
+  for i,op in enumerate(ops,1):
    lines += [f"{_number_emoji(i)} {escape(op.target_url)}",f"┣ 🆔 {op.target_chat_id if op.target_chat_id is not None else 'ожидает определения'}",f"┣ 🅰️ {escape(op.target_title)}"]
    lines.append(f"┗ 🕐 Активна до: {op.ends_at.strftime('%d.%m.%Y %H:%M') if op.ends_at else '♾️'}" if op.mode=="days" else f"┗ 📍 Цель: {op.progress_count:,}/{op.quantity:,} подписчиков".replace(","," "));lines.append("");buttons.append(InlineKeyboardButton(text=f"❌ ОТКЛ №{i}",callback_data=f"ads:manual:off:{op.id}"))
   return "\n".join(lines).rstrip(),InlineKeyboardMarkup(inline_keyboard=[buttons[i:i+2] for i in range(0,len(buttons),2)])
