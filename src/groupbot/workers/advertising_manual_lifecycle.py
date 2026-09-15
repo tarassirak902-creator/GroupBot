@@ -17,13 +17,7 @@ logger = logging.getLogger(__name__)
 async def run_advertising_manual_lifecycle_once(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> int:
-    """Finish expired day campaigns and stop manual OP whose source is unavailable.
-
-    Subscriber-target campaigns intentionally remain active at the target. Their
-    progress represents the current live subscriber count and can fall again after
-    a voluntary leave (for example 10/10 -> 9/10 -> 10/10). They therefore finish
-    only when the owner stops them or the source group becomes unavailable.
-    """
+    """Complete manual OP at its target/expiry or stop it if source is unavailable."""
     now = datetime.now(timezone.utc)
     changed = 0
 
@@ -37,7 +31,15 @@ async def run_advertising_manual_lifecycle_once(
             )).scalars().all())
 
             for op in ops:
-                if op.mode == "days" and op.ends_at is not None and op.ends_at <= now:
+                completed = (
+                    op.mode == "days"
+                    and op.ends_at is not None
+                    and op.ends_at <= now
+                ) or (
+                    op.mode == "subscribers"
+                    and op.progress_count >= op.quantity
+                )
+                if completed:
                     op.status = "completed"
                     op.completed_at = now
                     changed += 1
