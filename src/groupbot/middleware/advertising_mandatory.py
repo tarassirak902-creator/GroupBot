@@ -39,6 +39,9 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
    manual=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==event.chat.id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))))).scalars().all())
    for op in manual:
     credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==event.from_user.id).limit(1))).scalar_one_or_none()
+    # A satisfied credit means this user has already fulfilled this concrete OP.
+    # joined is revalidated below when possible so a voluntary leave can revoke it;
+    # join_request/restricted are intentionally permanent according to OP rules.
     if credit is not None and credit.satisfied and credit.reason in {"restricted","join_request"}:continue
     reqs.append({"target_chat_id":op.target_chat_id,"url":op.target_url,"title":op.target_title,"manual_op_id":op.id})
    if not reqs:return await handler(event,data)
