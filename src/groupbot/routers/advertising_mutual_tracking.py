@@ -20,29 +20,37 @@ def create_advertising_mutual_tracking_router(session_factory: async_sessionmake
     @router.chat_member()
     async def track(event: ChatMemberUpdated) -> None:
         user = event.new_chat_member.user
-        if user.is_bot: return
+        if user.is_bot:
+            return
         old_is_member = _is_member(event.old_chat_member.status, event.old_chat_member)
         new_is_member = _is_member(event.new_chat_member.status, event.new_chat_member)
-        if old_is_member == new_is_member: return
+        if old_is_member == new_is_member:
+            return
         async with session_factory() as session:
             async with session.begin():
                 await upsert_user(session, user)
                 if new_is_member:
+                    from groupbot.routers.advertising_manual_op import _bind_and_credit
+                    invite = event.invite_link.invite_link if event.invite_link is not None else None
+                    await _bind_and_credit(session, invite_url=invite, target_chat_id=event.chat.id, target_title=event.chat.title or "Рекламная группа", user_id=user.id, reason="joined")
                     previous = list((await session.execute(select(AdvertisingMutualOpMember).join(AdvertisingMutualOpDirection, AdvertisingMutualOpDirection.id == AdvertisingMutualOpMember.direction_id).where(AdvertisingMutualOpDirection.target_chat_id == event.chat.id, AdvertisingMutualOpDirection.status == "active", AdvertisingMutualOpMember.user_id == user.id, AdvertisingMutualOpMember.is_active.is_(False)).with_for_update())).scalars().all())
                     if previous:
-                        for member in previous: member.is_active = True; member.left_at = None
+                        for member in previous:
+                            member.is_active = True
+                            member.left_at = None
                         return
-                    invite = event.invite_link.invite_link if event.invite_link is not None else None
-                    if not invite: return
+                    if not invite:
+                        return
                     direction = (await session.execute(select(AdvertisingMutualOpDirection).where(AdvertisingMutualOpDirection.target_chat_id == event.chat.id, AdvertisingMutualOpDirection.status == "active", AdvertisingMutualOpDirection.invite_link == invite).limit(1))).scalar_one_or_none()
-                    if direction is None: return
+                    if direction is None:
+                        return
                     await session.execute(insert(AdvertisingMutualOpMember).values(direction_id=direction.id, user_id=user.id, is_active=True, left_at=None).on_conflict_do_update(constraint="uq_mutual_op_direction_user", set_={"is_active": True, "left_at": None}))
                 else:
                     rows = list((await session.execute(select(AdvertisingMutualOpMember).join(AdvertisingMutualOpDirection, AdvertisingMutualOpDirection.id == AdvertisingMutualOpMember.direction_id).where(AdvertisingMutualOpDirection.target_chat_id == event.chat.id, AdvertisingMutualOpDirection.status == "active", AdvertisingMutualOpMember.user_id == user.id, AdvertisingMutualOpMember.is_active.is_(True)).with_for_update())).scalars().all())
-                    for member in rows: member.is_active = False; member.left_at = event.date
+                    for member in rows:
+                        member.is_active = False
+                        member.left_at = event.date
 
-    # Keep all membership/join-request advertising tracking ahead of ordinary
-    # group routers without adding another top-level registration in main.py.
     from groupbot.routers.advertising_manual_op import create_advertising_manual_op_router
     router.include_router(create_advertising_manual_op_router(session_factory))
     return router
