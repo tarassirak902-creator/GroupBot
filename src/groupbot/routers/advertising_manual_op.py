@@ -13,6 +13,7 @@ from groupbot.models import Group,GroupOwner,GroupStatus
 from groupbot.services.subscriptions import active_subscription_for_group
 
 _CMD_RE=re.compile(r"(?i)^\s*подключить\s+рекламу\s+(\S+)\s+(\d+)\s+(д(?:ень|ня|ней)|участник(?:а|ов)?|подписчик(?:а|ов)?)\s*$")
+_CMD_PREFIX_RE=re.compile(r"(?i)^\s*подключить\s+рекламу(?:\s+(.*?))?\s*$")
 _SPEC_RE=re.compile(r"(?i)^\s*(\S+)\s+(\d+)\s+(д(?:ень|ня|ней)|участник(?:а|ов)?|подписчик(?:а|ов)?)\s*$")
 class ManualOpPrivateState(StatesGroup):waiting_spec=State()
 def _number_emoji(i:int)->str:return {1:"1️⃣",2:"2️⃣",3:"3️⃣",4:"4️⃣",5:"5️⃣",6:"6️⃣",7:"7️⃣",8:"8️⃣",9:"9️⃣",10:"🔟"}.get(i,f"{i}.")
@@ -20,21 +21,23 @@ def _public_username(v:str)->str|None:
  v=v.strip()
  if v.startswith("@"):return v[1:]
  m=re.match(r"https?://t\.me/([A-Za-z0-9_]{5,})/?$",v,re.I);return m.group(1) if m else None
+def _is_telegram_target(v:str)->bool:
+ return _public_username(v) is not None or bool(re.match(r"https?://t\.me/\+[A-Za-z0-9_-]+$",v,re.I)) or "t.me/joinchat/" in v.lower()
 async def _source_allowed(s:AsyncSession,chat_id:int,user_id:int)->bool:
  row=(await s.execute(select(Group.chat_id).join(GroupOwner,GroupOwner.chat_id==Group.chat_id).where(Group.chat_id==chat_id,Group.status==GroupStatus.active.value,GroupOwner.user_id==user_id,GroupOwner.is_current.is_(True)).limit(1))).scalar_one_or_none();return row is not None and await active_subscription_for_group(s,chat_id) is not None
 async def _resolve_target(bot:Bot,v:str)->tuple[int|None,str,str]:
  u=_public_username(v)
  if u:
   c=await bot.get_chat("@"+u);return c.id,c.title or ("@"+u),f"https://t.me/{u}"
- if re.match(r"https?://t\.me/\+[A-Za-z0-9_-]+$",v,re.I) or "joinchat/" in v:return None,"Закрытая рекламная группа",v
+ if re.match(r"https?://t\.me/\+[A-Za-z0-9_-]+$",v,re.I) or "t.me/joinchat/" in v.lower():return None,"Закрытая рекламная группа",v
  raise ValueError
-async def _create_op(sf,bot:Bot,*,source_chat_id:int,owner_user_id:int,target:str,quantity:int,unit:str)->AdvertisingManualOp:
- target_id,title,url=await _resolve_target(bot,target);mode="days" if unit.lower().startswith("д") else "subscribers";now=datetime.now(timezone.utc)
+async def _create_op(sf,bot:Bot,*,source_chat_id:int,owner_user_id:int,target:str,quantity:int|None=None,unit:str|None=None)->AdvertisingManualOp:
+ target_id,title,url=await _resolve_target(bot,target);mode="unlimited" if quantity is None else ("days" if (unit or "").lower().startswith("д") else "subscribers");now=datetime.now(timezone.utc)
  async with sf() as s:
   async with s.begin():
    if not await _source_allowed(s,source_chat_id,owner_user_id):raise PermissionError
    if target_id==source_chat_id:raise ValueError
-   op=AdvertisingManualOp(source_chat_id=source_chat_id,owner_user_id=owner_user_id,target_chat_id=target_id,target_url=url,target_title=title,mode=mode,quantity=quantity,ends_at=now+timedelta(days=quantity) if mode=="days" else None);s.add(op);await s.flush();oid=op.id
+   op=AdvertisingManualOp(source_chat_id=source_chat_id,owner_user_id=owner_user_id,target_chat_id=target_id,target_url=url,target_title=title,mode=mode,quantity=quantity or 0,ends_at=now+timedelta(days=quantity) if mode=="days" else None);s.add(op);await s.flush();oid=op.id
   return (await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==oid))).scalar_one()
 async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:int,target_title:str,user_id:int,reason:str)->None:
  known_target=AdvertisingManualOp.target_chat_id==target_chat_id
@@ -62,25 +65,41 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
  r=Router(name="advertising_manual_op")
  async def render(chat_id:int):
   now=datetime.now(timezone.utc)
-  async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
+  async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity),AdvertisingManualOp.mode=="unlimited")).order_by(AdvertisingManualOp.id))).scalars().all())
   if not ops:return "📭 Активных ОП сейчас нет.",None
   lines=[f"✅ <b>Ваши активные ОП: {len(ops)}</b>",""];buttons=[]
   for i,op in enumerate(ops,1):
    lines += [f"{_number_emoji(i)} {escape(op.target_url)}",f"┣ 🆔 {op.target_chat_id if op.target_chat_id is not None else 'ожидает определения'}",f"┣ 🅰️ {escape(op.target_title)}"]
-   lines.append(f"┗ 🕐 Активна до: {op.ends_at.strftime('%d.%m.%Y %H:%M') if op.ends_at else '♾️'}" if op.mode=="days" else f"┗ 📍 Цель: {op.progress_count:,}/{op.quantity:,} подписчиков".replace(","," "));lines.append("");buttons.append(InlineKeyboardButton(text=f"❌ ОТКЛ №{i}",callback_data=f"ads:manual:off:{op.id}"))
+   if op.mode=="days":lines.append(f"┗ 🕐 Активна до: {op.ends_at.strftime('%d.%m.%Y %H:%M') if op.ends_at else '♾️'}")
+   elif op.mode=="subscribers":lines.append(f"┗ 📍 Цель: {op.progress_count:,}/{op.quantity:,} подписчиков".replace(","," "))
+   else:lines.append("┗ 🕐 Активна до: ♾️")
+   lines.append("");buttons.append(InlineKeyboardButton(text=f"❌ ОТКЛ №{i}",callback_data=f"ads:manual:off:{op.id}"))
   return "\n".join(lines).rstrip(),InlineKeyboardMarkup(inline_keyboard=[buttons[i:i+2] for i in range(0,len(buttons),2)])
  async def start_private(message:Message,state:FSMContext)->None:
   async with sf() as s:rows=(await s.execute(select(Group.chat_id,Group.title).join(GroupOwner,GroupOwner.chat_id==Group.chat_id).where(GroupOwner.user_id==message.from_user.id,GroupOwner.is_current.is_(True),Group.status==GroupStatus.active.value))).all()
   buttons=[[InlineKeyboardButton(text=(t or "Группа")[:60],callback_data=f"ads:manual:source:{cid}")] for cid,t in rows];await message.answer("Выберите группу, в которой нужно включить ОП:",reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None)
- @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(_CMD_RE))
+ @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(_CMD_PREFIX_RE))
  async def connect(message:Message,bot:Bot):
   if message.from_user is None:return
-  m=_CMD_RE.match(message.text or "");target,q,u=m.groups();q=int(q)
-  if not 1<=q<=1_000_000:await message.reply("Количество должно быть от 1 до 1 000 000.");return
-  try:op=await _create_op(sf,bot,source_chat_id=message.chat.id,owner_user_id=message.from_user.id,target=target,quantity=q,unit=u)
+  raw=(message.text or "").strip();full=_CMD_RE.match(raw);prefix=_CMD_PREFIX_RE.match(raw);rest=(prefix.group(1) or "").strip() if prefix else ""
+  if not rest:
+   await message.reply("📣 Укажите источник рекламы — Telegram-группу или канал.\n\nНапример:\n<code>подключить рекламу @group</code>\n<code>подключить рекламу https://t.me/group 100 участников</code>\n<code>подключить рекламу https://t.me/+invite 7 дней</code>",parse_mode="HTML");return
+  target=rest.split()[0]
+  if not _is_telegram_target(target):
+   await message.reply("⚠️ На сторонние сайты и сервисы рекламу подключить нельзя. Укажите Telegram-ссылку, индивидуальную invite-ссылку или @username.");return
+  if full:
+   target,q,u=full.groups();q=int(q)
+   if not 1<=q<=1_000_000:await message.reply("Количество должно быть от 1 до 1 000 000.");return
+   try:op=await _create_op(sf,bot,source_chat_id=message.chat.id,owner_user_id=message.from_user.id,target=target,quantity=q,unit=u)
+   except PermissionError:await message.reply("Подключать ОП может владелец активной группы с действующей подпиской Mimorus.");return
+   except Exception:await message.reply("Не удалось определить Telegram-группу или канал. Проверьте ссылку и доступ бота.");return
+   await message.reply(f"✅ ОП подключена.\n🏠 {escape(op.target_title)}",parse_mode="HTML");return
+  if len(rest.split())>1:
+   await message.reply("⚠️ Не удалось распознать срок или цель. Используйте, например: <code>100 участников</code> или <code>7 дней</code>.",parse_mode="HTML");return
+  try:op=await _create_op(sf,bot,source_chat_id=message.chat.id,owner_user_id=message.from_user.id,target=target)
   except PermissionError:await message.reply("Подключать ОП может владелец активной группы с действующей подпиской Mimorus.");return
-  except Exception:await message.reply("Не удалось определить цель. Используйте @username, публичную или индивидуальную ссылку Telegram.");return
-  await message.reply(f"✅ ОП подключена.\n🏠 {escape(op.target_title)}",parse_mode="HTML")
+  except Exception:await message.reply("Не удалось определить Telegram-группу или канал. Проверьте ссылку и доступ бота.");return
+  await message.reply(f"⚠️ Период дней или количество подписчиков не указаны. Реклама будет бессрочной.\n\n✅ ОП подключена.\n🏠 {escape(op.target_title)}",parse_mode="HTML")
  @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(r"(?i)^\s*реклама\s*$"))
  async def show(message:Message):
   if message.from_user is None:return
