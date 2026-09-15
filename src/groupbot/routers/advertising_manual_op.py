@@ -46,27 +46,23 @@ async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:i
    if not invite_url or op.target_url!=invite_url:continue
    op.target_chat_id=target_chat_id;op.target_title=target_title
   if op.target_chat_id!=target_chat_id:continue
+  if op.mode=="subscribers" and op.progress_count>=op.quantity:continue
   credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==user_id).with_for_update())).scalar_one_or_none()
   if credit is None:
    s.add(AdvertisingManualOpCredit(op_id=op.id,user_id=user_id,satisfied=True,counted=True,reason=reason))
-   if op.mode=="subscribers":op.progress_count+=1
+   if op.mode=="subscribers":op.progress_count=min(op.progress_count+1,op.quantity)
   elif not credit.satisfied and reason=="joined":
    credit.satisfied=True;credit.reason="joined"
    if not credit.counted:
     credit.counted=True
-    if op.mode=="subscribers":op.progress_count+=1
-  elif credit.satisfied and credit.reason=="join_request" and reason=="joined":
-   # Acceptance of an already-counted join request is not a second result.
-   # Keep the original reason so a later member update cannot turn this permanent
-   # request credit into a reversible ordinary-join credit.
-   credit.satisfied=True
+    if op.mode=="subscribers":op.progress_count=min(op.progress_count+1,op.quantity)
+  elif credit.satisfied and credit.reason=="join_request" and reason=="joined":credit.satisfied=True
 
 def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Router:
  r=Router(name="advertising_manual_op")
  async def render(chat_id:int):
   now=datetime.now(timezone.utc)
-  async with sf() as s:
-   ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
+  async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
   if not ops:return "📭 Активных ОП сейчас нет.",None
   lines=[f"✅ <b>Ваши активные ОП: {len(ops)}</b>",""];buttons=[]
   for i,op in enumerate(ops,1):
