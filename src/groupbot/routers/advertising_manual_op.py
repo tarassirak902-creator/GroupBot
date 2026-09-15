@@ -6,7 +6,7 @@ from aiogram import Bot,F,Router
 from aiogram.types import CallbackQuery,InlineKeyboardButton,InlineKeyboardMarkup,Message
 from sqlalchemy import and_,or_,select
 from sqlalchemy.ext.asyncio import AsyncSession,async_sessionmaker
-from groupbot.advertising_manual_models import AdvertisingManualLink,AdvertisingManualOp
+from groupbot.advertising_manual_models import AdvertisingManualLink,AdvertisingManualOp,AdvertisingManualOpCredit
 from groupbot.models import Group,GroupOwner,GroupStatus
 from groupbot.services.subscriptions import active_subscription_for_group
 
@@ -17,11 +17,21 @@ def _mode(q,u):return "unlimited" if q is None else ("days" if (u or "").lower()
 def _condition(mode,q):return "бессрочно" if mode=="unlimited" else (f"{q} дней" if mode=="days" else f"{q:,} участников".replace(","," "))
 def _is_tg(v):return bool(re.match(r"(?i)^https?://t\.me/(?:\+[A-Za-z0-9_-]+|[A-Za-z0-9_]{5,})/?$",v)) or v.startswith("@")
 async def _owner(s,chat_id,user_id):return (await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==chat_id,GroupOwner.user_id==user_id,GroupOwner.is_current.is_(True)).limit(1))).scalar_one_or_none() is not None
-async def _source_allowed(s,chat_id,user_id):
- return await _owner(s,chat_id,user_id) and (await s.execute(select(Group.status).where(Group.chat_id==chat_id))).scalar_one_or_none()==GroupStatus.active.value and await active_subscription_for_group(s,chat_id) is not None
+async def _source_allowed(s,chat_id,user_id):return await _owner(s,chat_id,user_id) and (await s.execute(select(Group.status).where(Group.chat_id==chat_id))).scalar_one_or_none()==GroupStatus.active.value and await active_subscription_for_group(s,chat_id) is not None
 async def _bot_admin(bot,chat_id):
  try:m=await bot.get_chat_member(chat_id,(await bot.get_me()).id);return m.status in {"administrator","creator"}
  except Exception:return False
+async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:int,target_title:str,user_id:int,reason:str)->None:
+ ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.target_chat_id==target_chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",AdvertisingManualOp.mode=="days",and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).with_for_update())).scalars().all())
+ for op in ops:
+  credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==user_id).with_for_update())).scalar_one_or_none()
+  if credit is None:
+   counted=op.mode=="subscribers"
+   s.add(AdvertisingManualOpCredit(op_id=op.id,user_id=user_id,satisfied=True,counted=counted,reason=reason))
+   if counted:op.progress_count=min(op.progress_count+1,op.quantity)
+  elif not credit.satisfied:
+   credit.satisfied=True;credit.reason=reason
+   if op.mode=="subscribers" and not credit.counted:credit.counted=True;op.progress_count=min(op.progress_count+1,op.quantity)
 
 def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Router:
  r=Router(name="advertising_manual_op")
@@ -64,12 +74,11 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
    if not await _source_allowed(s,m.chat.id,m.from_user.id):await m.reply("Подключать ОП может владелец активной группы с действующей подпиской Mimorus.");return
   if target_id==m.chat.id:await m.reply("Нельзя подключить рекламу группы на саму себя.");return
   if not await _bot_admin(bot,target_id):await m.reply("⛔ ОП не включена: Mimorus должен быть администратором рекламной группы Б.");return
-  mode=requested_mode;now=datetime.now(timezone.utc)
+  now=datetime.now(timezone.utc)
   async with sf() as s:
-   async with s.begin():
-    op=AdvertisingManualOp(source_chat_id=m.chat.id,owner_user_id=m.from_user.id,target_chat_id=target_id,target_url=target,target_title=title,mode=mode,quantity=q or 0,ends_at=now+timedelta(days=q) if mode=="days" and q else None);s.add(op)
-  warning="\n⚠️ Реклама бессрочная: срок или количество участников не указаны." if mode=="unlimited" else ""
-  await m.reply(f"✅ <b>ОП подключена</b>\n🏠 {escape(title)}\n📍 Условие: {_condition(mode,q or 0)}{warning}",parse_mode="HTML",disable_web_page_preview=True)
+   async with s.begin():s.add(AdvertisingManualOp(source_chat_id=m.chat.id,owner_user_id=m.from_user.id,target_chat_id=target_id,target_url=target,target_title=title,mode=requested_mode,quantity=q or 0,ends_at=now+timedelta(days=q) if requested_mode=="days" and q else None))
+  warning="\n⚠️ Реклама бессрочная: срок или количество участников не указаны." if requested_mode=="unlimited" else ""
+  await m.reply(f"✅ <b>ОП подключена</b>\n🏠 {escape(title)}\n📍 Условие: {_condition(requested_mode,q or 0)}{warning}",parse_mode="HTML",disable_web_page_preview=True)
  async def render(chat_id):
   now=datetime.now(timezone.utc)
   async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity),AdvertisingManualOp.mode=="unlimited")).order_by(AdvertisingManualOp.id))).scalars().all())
