@@ -1,12 +1,12 @@
 """manual mandatory advertising
 
-Revision ID: 0018_manual_mandatory_advertising
+Revision ID: 0018_manual_ads
 Revises: 0017_persistent_entry_protection
 """
 from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
-revision: str = "0018_manual_mandatory_advertising"
+revision: str = "0018_manual_ads"
 down_revision: str | None = "0017_persistent_entry_protection"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
