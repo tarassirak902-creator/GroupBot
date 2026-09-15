@@ -33,12 +33,8 @@ async def _available_listing(session: AsyncSession, *, listing_id: int, buyer_us
         select(AdvertisingListing, GroupOwner.user_id)
         .join(Group, Group.chat_id == AdvertisingListing.chat_id)
         .join(GroupOwner, (GroupOwner.chat_id == Group.chat_id) & GroupOwner.is_current.is_(True))
-        .where(
-            AdvertisingListing.id == listing_id,
-            AdvertisingListing.is_active.is_(True),
-            AdvertisingListing.owner_user_id != buyer_user_id,
-            Group.status == GroupStatus.active.value,
-        ).limit(1)
+        .where(AdvertisingListing.id == listing_id, AdvertisingListing.is_active.is_(True), AdvertisingListing.owner_user_id != buyer_user_id, Group.status == GroupStatus.active.value)
+        .limit(1)
     )).first()
     if row is None:
         return None
@@ -53,21 +49,15 @@ async def _available_listing(session: AsyncSession, *, listing_id: int, buyer_us
 async def _owned_active_group(session: AsyncSession, *, chat_id: int, owner_user_id: int) -> bool:
     row = (await session.execute(
         select(Group.chat_id).join(GroupOwner, GroupOwner.chat_id == Group.chat_id).where(
-            Group.chat_id == chat_id,
-            Group.status == GroupStatus.active.value,
-            GroupOwner.user_id == owner_user_id,
-            GroupOwner.is_current.is_(True),
+            Group.chat_id == chat_id, Group.status == GroupStatus.active.value,
+            GroupOwner.user_id == owner_user_id, GroupOwner.is_current.is_(True),
         ).limit(1)
     )).scalar_one_or_none()
-    if row is None:
-        return False
-    return await active_subscription_for_group(session, chat_id) is not None
+    return row is not None and await active_subscription_for_group(session, chat_id) is not None
 
 
 async def _seller_listing_ready(session: AsyncSession, *, listing: AdvertisingListing, seller_user_id: int) -> bool:
-    if not listing.is_active or listing.owner_user_id != seller_user_id:
-        return False
-    return await _owned_active_group(session, chat_id=listing.chat_id, owner_user_id=seller_user_id)
+    return bool(listing.is_active and listing.owner_user_id == seller_user_id and await _owned_active_group(session, chat_id=listing.chat_id, owner_user_id=seller_user_id))
 
 
 async def _mandatory_target_ready(bot: Bot, session: AsyncSession, *, target_chat_id: int, buyer_user_id: int) -> bool:
@@ -82,9 +72,8 @@ async def _mandatory_target_ready(bot: Bot, session: AsyncSession, *, target_cha
 
 
 def _duration_days(deal: AdvertisingDeal) -> int:
-    terms = (deal.agreed_terms_json or {}).get("post_terms") or {}
     try:
-        return max(int(terms.get("duration_days") or 1), 1)
+        return max(int(((deal.agreed_terms_json or {}).get("post_terms") or {}).get("duration_days") or 1), 1)
     except (TypeError, ValueError):
         return 1
 
@@ -103,53 +92,13 @@ def create_advertising_request_guard_router(session_factory: async_sessionmaker[
         try:
             listing_id = int((callback.data or "").rsplit(":", 1)[1])
         except (TypeError, ValueError, IndexError):
-            await callback.answer("Некорректное объявление.", show_alert=True)
-            return
+            await callback.answer("Некорректное объявление.", show_alert=True); return
         async with session_factory() as session:
             listing = await _available_listing(session, listing_id=listing_id, buyer_user_id=callback.from_user.id)
         if listing is None:
-            await callback.answer(_unavailable_text(), show_alert=True)
-            return
-        await callback.message.edit_text(
-            "📨 <b>Отправить запрос</b>\n\nНа какой вид рекламы отправить заявку?",
-            parse_mode="HTML",
-            reply_markup=advertising_requests_module._request_type_keyboard(listing),
-        )
+            await callback.answer(_unavailable_text(), show_alert=True); return
+        await callback.message.edit_text("📨 <b>Отправить запрос</b>\n\nНа какой вид рекламы отправить заявку?", parse_mode="HTML", reply_markup=advertising_requests_module._request_type_keyboard(listing))
         await callback.answer()
-
-    @router.callback_query(F.data.regexp(r"^ads:req:type:\d+:(post|mandatory|both)$"))
-    async def guard_regular_request_type(callback: CallbackQuery) -> None:
-        parts = (callback.data or "").split(":")
-        try:
-            listing_id = int(parts[3])
-        except (IndexError, TypeError, ValueError):
-            await callback.answer("Некорректное объявление.", show_alert=True)
-            return
-        kind = parts[4]
-        async with session_factory() as session:
-            listing = await _available_listing(session, listing_id=listing_id, buyer_user_id=callback.from_user.id)
-        if listing is None:
-            await callback.answer(_unavailable_text(), show_alert=True)
-            return
-        if kind in {"post", "both"} and not listing.offers_post:
-            await callback.answer("Посты в этом объявлении больше не продаются.", show_alert=True)
-            return
-        if kind in {"mandatory", "both"} and not listing.offers_mandatory:
-            await callback.answer("ОП в этом объявлении больше не продаётся.", show_alert=True)
-            return
-        # Valid regular callbacks are consumed here and delegated explicitly so
-        # a stale callback cannot bypass the guard through router ordering.
-        if kind == "mandatory":
-            from groupbot.routers.advertising_mandatory_request import create_advertising_mandatory_request_router
-            delegated = create_advertising_mandatory_request_router(session_factory)
-        else:
-            from groupbot.routers.advertising_post_request import create_advertising_post_request_router
-            delegated = create_advertising_post_request_router(session_factory)
-        # Aiogram cannot re-dispatch a CallbackQuery into another Router directly;
-        # specialized handlers are therefore still registered normally. This guard
-        # only blocks invalid callbacks; valid ones are allowed by raising SkipHandler.
-        from aiogram.dispatcher.event.bases import SkipHandler
-        raise SkipHandler
 
     @router.callback_query(F.data.regexp(r"^ads:mandatory:accept:\d+$"))
     async def accept_mandatory(callback: CallbackQuery, bot: Bot) -> None:
@@ -157,9 +106,7 @@ def create_advertising_request_guard_router(session_factory: async_sessionmaker[
         now = datetime.now(timezone.utc)
         day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
         buyer_id: int | None = None
-        target_title = ""
-        target_url = ""
-        seller_group = ""
+        target_title = target_url = seller_group = ""
         post_started = False
         duration_days = 1
         mode = "days"
