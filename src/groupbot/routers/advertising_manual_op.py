@@ -58,12 +58,11 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
  async def render(chat_id:int):
   now=datetime.now(timezone.utc)
   async with sf() as s:
-   async with s.begin():
-    ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active").order_by(AdvertisingManualOp.id).with_for_update())).scalars().all());active=[]
-    for op in ops:
-     done=(op.mode=="days" and op.ends_at is not None and op.ends_at<=now) or (op.mode=="subscribers" and op.progress_count>=op.quantity)
-     if done:op.status="completed";op.completed_at=now
-     else:active.append(op)
+   ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active").order_by(AdvertisingManualOp.id))).scalars().all())
+   # Completion is owned exclusively by advertising_manual_lifecycle so that the
+   # active -> completed transition and its one-time owner notifications cannot be
+   # bypassed merely by opening the "Реклама" screen during the worker interval.
+   active=[op for op in ops if not ((op.mode=="days" and op.ends_at is not None and op.ends_at<=now) or (op.mode=="subscribers" and op.progress_count>=op.quantity))]
   if not active:return "📭 Активных ОП сейчас нет.",None
   lines=[f"✅ <b>Ваши активные ОП: {len(active)}</b>",""];buttons=[]
   for i,op in enumerate(active,1):
