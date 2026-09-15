@@ -47,6 +47,11 @@ async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:i
   if credit is None:
    s.add(AdvertisingManualOpCredit(op_id=op.id,user_id=user_id,satisfied=True,counted=True,reason=reason))
    if op.mode=="subscribers":op.progress_count+=1
+  elif not credit.satisfied and reason=="joined":
+   credit.satisfied=True;credit.reason="joined"
+   if not credit.counted:
+    credit.counted=True
+    if op.mode=="subscribers":op.progress_count+=1
 
 def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Router:
  r=Router(name="advertising_manual_op")
