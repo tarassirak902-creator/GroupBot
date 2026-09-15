@@ -76,6 +76,16 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
      try:await bot.send_message(event.chat.id,"⚠️ В Рекламной группе вы ограничены или ваша заявка на вступление была отклонена, поэтому Mimorus засчитывает вам обязательную подписку как выполненную.")
      except Exception:pass
     continue
+   if manual_id and not joined:
+    # Reconcile a voluntary leave here as well as in chat_member tracking. This
+    # makes the next attempted message authoritative even if Telegram's member
+    # update was delayed or missed: 1/2 -> 0/2, then the message is blocked.
+    async with self.session_factory() as s:
+     async with s.begin():
+      op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==manual_id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none();credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
+      if op is not None and credit is not None and credit.reason=="joined":
+       if credit.counted and op.mode=="subscribers":op.progress_count=max(op.progress_count-1,0)
+       credit.counted=False;credit.satisfied=False;credit.reason="left"
    if not joined:missing=req;break
   if missing is None:return await handler(event,data)
   try:await bot.delete_message(event.chat.id,event.message_id)
