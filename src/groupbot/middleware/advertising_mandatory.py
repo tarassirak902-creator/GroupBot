@@ -39,9 +39,6 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
    manual=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==event.chat.id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))))).scalars().all())
    for op in manual:
     credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==op.id,AdvertisingManualOpCredit.user_id==event.from_user.id).limit(1))).scalar_one_or_none()
-    # A satisfied credit means this user has already fulfilled this concrete OP.
-    # joined is revalidated below when possible so a voluntary leave can revoke it;
-    # join_request/restricted are intentionally permanent according to OP rules.
     if credit is not None and credit.satisfied and credit.reason in {"restricted","join_request"}:continue
     reqs.append({"target_chat_id":op.target_chat_id,"url":op.target_url,"title":op.target_title,"manual_op_id":op.id})
    if not reqs:return await handler(event,data)
@@ -64,14 +61,15 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
      async with s.begin():
       await upsert_user(s,event.from_user);op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==manual_id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none();credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
       if op is not None:
+       target_open=op.mode!="subscribers" or op.progress_count<op.quantity
        if credit is None:
-        s.add(AdvertisingManualOpCredit(op_id=manual_id,user_id=event.from_user.id,satisfied=True,counted=counted,reason="joined" if joined else "restricted"))
-        if counted and op.mode=="subscribers":op.progress_count+=1
+        s.add(AdvertisingManualOpCredit(op_id=manual_id,user_id=event.from_user.id,satisfied=True,counted=counted and target_open,reason="joined" if joined else "restricted"))
+        if counted and target_open and op.mode=="subscribers":op.progress_count=min(op.progress_count+1,op.quantity)
        elif joined:
         credit.satisfied=True;credit.reason="joined"
-        if not credit.counted:
+        if not credit.counted and target_open:
          credit.counted=True
-         if op.mode=="subscribers":op.progress_count+=1
+         if op.mode=="subscribers":op.progress_count=min(op.progress_count+1,op.quantity)
        else:
         credit.satisfied=True;credit.reason="restricted"
     if not joined:
