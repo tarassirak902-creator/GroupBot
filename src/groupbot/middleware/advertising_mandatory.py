@@ -52,41 +52,29 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
    target=req.get("target_chat_id")
    if target is None:missing=req;break
    try:member=await bot.get_chat_member(target,event.from_user.id)
-   except Exception:
-    logger.exception("Could not verify OP membership target=%s user=%s",target,event.from_user.id);missing=req;break
+   except Exception:logger.exception("Could not verify OP membership target=%s user=%s",target,event.from_user.id);missing=req;break
    joined=member.status in {"member","administrator","creator"} or (member.status=="restricted" and getattr(member,"is_member",True));manual_id=req.get("manual_op_id")
-   if manual_id and (joined or member.status in {"kicked","banned"}):
-    counted=joined
+   if manual_id and member.status in {"kicked","banned"}:
     async with self.session_factory() as s:
      async with s.begin():
-      await upsert_user(s,event.from_user);op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==manual_id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none();credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
-      if op is not None:
-       target_open=op.mode!="subscribers" or op.progress_count<op.quantity
-       if credit is None:
-        s.add(AdvertisingManualOpCredit(op_id=manual_id,user_id=event.from_user.id,satisfied=True,counted=counted and target_open,reason="joined" if joined else "restricted"))
-        if counted and target_open and op.mode=="subscribers":op.progress_count=min(op.progress_count+1,op.quantity)
-       elif joined:
-        credit.satisfied=True;credit.reason="joined"
-        if not credit.counted and target_open:
-         credit.counted=True
-         if op.mode=="subscribers":op.progress_count=min(op.progress_count+1,op.quantity)
-       else:
-        credit.satisfied=True;credit.reason="restricted"
-    if not joined:
-     try:await bot.send_message(event.chat.id,"⚠️ В Рекламной группе вы ограничены или ваша заявка на вступление была отклонена, поэтому Mimorus засчитывает вам обязательную подписку как выполненную.")
-     except Exception:pass
+      await upsert_user(s,event.from_user);credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
+      if credit is None:s.add(AdvertisingManualOpCredit(op_id=manual_id,user_id=event.from_user.id,satisfied=True,counted=False,reason="restricted"))
+      else:credit.satisfied=True;credit.reason="restricted"
+    try:await bot.send_message(event.chat.id,"⚠️ В Рекламной группе вы ограничены или ваша заявка на вступление была отклонена, поэтому Mimorus засчитывает вам обязательную подписку как выполненную.")
+    except Exception:pass
     continue
    if manual_id and not joined:
-    # Reconcile a voluntary leave here as well as in chat_member tracking. This
-    # makes the next attempted message authoritative even if Telegram's member
-    # update was delayed or missed: 1/2 -> 0/2, then the message is blocked.
     async with self.session_factory() as s:
      async with s.begin():
       op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==manual_id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none();credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
       if op is not None and credit is not None and credit.reason=="joined":
        if credit.counted and op.mode=="subscribers":op.progress_count=max(op.progress_count-1,0)
        credit.counted=False;credit.satisfied=False;credit.reason="left"
-   if not joined:missing=req;break
+   # Being an old/existing member of B satisfies mandatory access, but NEVER
+   # creates campaign progress. A +1 is created only by chat_member/join-request
+   # tracking carrying this exact campaign invite link.
+   if joined:continue
+   missing=req;break
   if missing is None:return await handler(event,data)
   try:await bot.delete_message(event.chat.id,event.message_id)
   except Exception:logger.info("Could not delete OP-blocked message chat=%s message=%s",event.chat.id,event.message_id)
