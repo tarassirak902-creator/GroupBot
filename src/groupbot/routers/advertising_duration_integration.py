@@ -9,8 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from groupbot.advertising_models import AdvertisingListing
 from groupbot.models import Group, GroupOwner, GroupStatus
+from groupbot.routers import advertising_requests as advertising_requests_module
 from groupbot.routers.advertising import AdvertisingListingState
+from groupbot.routers.advertising_mutual_op import (
+    create_advertising_mutual_op_router,
+    request_type_keyboard_with_mutual,
+)
 from groupbot.routers.advertising_post_duration import listing_text_with_duration
+from groupbot.routers.advertising_request_guard import create_advertising_request_guard_router
 
 
 class AdvertisingCreationDurationState(StatesGroup):
@@ -140,6 +146,13 @@ def create_advertising_duration_integration_router(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> Router:
     router = Router(name="advertising_duration_integration")
+
+    # This integration router is included before the legacy advertising request
+    # router in main.py. Keep the hardened availability guard and mutual-OP flow
+    # here so their callbacks are reachable without depending on main import order.
+    advertising_requests_module._request_type_keyboard = request_type_keyboard_with_mutual
+    router.include_router(create_advertising_request_guard_router(session_factory))
+    router.include_router(create_advertising_mutual_op_router(session_factory))
 
     @router.message(AdvertisingListingState.waiting_post_interval, F.chat.type == "private")
     async def capture_post_interval(message: Message, state: FSMContext) -> None:
