@@ -100,6 +100,25 @@ def create_advertising_request_guard_router(session_factory: async_sessionmaker[
         await callback.message.edit_text("📨 <b>Отправить запрос</b>\n\nНа какой вид рекламы отправить заявку?", parse_mode="HTML", reply_markup=advertising_requests_module._request_type_keyboard(listing))
         await callback.answer()
 
+    @router.callback_query(F.data.regexp(r"^ads:req:type:\d+:(post|mandatory|both)$"))
+    async def guard_regular_request_type(callback: CallbackQuery) -> None:
+        parts = (callback.data or "").split(":")
+        try:
+            listing_id = int(parts[3])
+        except (IndexError, TypeError, ValueError):
+            await callback.answer("Некорректное объявление.", show_alert=True); return
+        kind = parts[4]
+        async with session_factory() as session:
+            listing = await _available_listing(session, listing_id=listing_id, buyer_user_id=callback.from_user.id)
+        if listing is None:
+            await callback.answer(_unavailable_text(), show_alert=True); return
+        if kind in {"post", "both"} and not listing.offers_post:
+            await callback.answer("Посты в этом объявлении больше не продаются.", show_alert=True); return
+        if kind in {"mandatory", "both"} and not listing.offers_mandatory:
+            await callback.answer("ОП в этом объявлении больше не продаётся.", show_alert=True); return
+        from aiogram.dispatcher.event.bases import SkipHandler
+        raise SkipHandler
+
     @router.callback_query(F.data.regexp(r"^ads:mandatory:accept:\d+$"))
     async def accept_mandatory(callback: CallbackQuery, bot: Bot) -> None:
         deal_id = int((callback.data or "").rsplit(":", 1)[1])
