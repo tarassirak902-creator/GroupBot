@@ -7,13 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession,async_sessionmaker
 from groupbot.advertising_manual_models import AdvertisingManualLink,AdvertisingManualOp
 from groupbot.models import Group,GroupOwner,GroupStatus
-from groupbot.services.subscriptions import active_subscription_for_owner
+from groupbot.services.subscriptions import active_subscription_for_group
 logger=logging.getLogger(__name__)
-
 def _completion_text(op,source_title,now):
- condition=f"{op.quantity:,} участников".replace(","," ") if op.mode=="subscribers" else f"{op.quantity} дней"
- result=f"📊 Результат: {op.progress_count:,}/{op.quantity:,}".replace(","," ") if op.mode=="subscribers" else f"📅 Срок размещения: {op.quantity} дней"
- return f"✅ <b>Реклама выполнена</b>\n\n🅰️ Группа А: {escape(source_title)}\n🅱️ Рекламная группа: {escape(op.target_title)}\n🔗 Ссылка: {escape(op.target_url)}\n📍 Условие: {condition}\n{result}\n🕐 Завершено: {now.strftime('%d.%m.%Y %H:%M')}"
+ condition=f"{op.quantity:,} участников".replace(","," ") if op.mode=="subscribers" else f"{op.quantity} дней";result=f"📊 Результат: {op.progress_count:,}/{op.quantity:,}".replace(","," ") if op.mode=="subscribers" else f"📅 Срок размещения: {op.quantity} дней";return f"✅ <b>Реклама выполнена</b>\n\n🅰️ Группа А: {escape(source_title)}\n🅱️ Рекламная группа: {escape(op.target_title)}\n🔗 Ссылка: {escape(op.target_url)}\n📍 Условие: {condition}\n{result}\n🕐 Завершено: {now.strftime('%d.%m.%Y %H:%M')}"
 async def _notify(bot,op,source_title,target_owner_id,now):
  for uid in {op.owner_user_id,target_owner_id}-{None}:
   try:await bot.send_message(uid,_completion_text(op,source_title,now),parse_mode="HTML",disable_web_page_preview=True)
@@ -21,9 +18,10 @@ async def _notify(bot,op,source_title,target_owner_id,now):
 async def _revoke(bot,op):
  if op.target_chat_id is None:return
  try:await bot.revoke_chat_invite_link(op.target_chat_id,op.target_url)
- except Exception:
-  # Public links and legacy URLs are not bot-created invite links; ignoring them is expected.
-  pass
+ except Exception:pass
+async def _bot_admin(bot,chat_id):
+ try:m=await bot.get_chat_member(chat_id,(await bot.get_me()).id);return m.status in {"administrator","creator"}
+ except Exception:return False
 async def run_advertising_manual_lifecycle_once(bot:Bot,session_factory:async_sessionmaker[AsyncSession])->int:
  now=datetime.now(timezone.utc);changed=0;notifications=[];revoke=[]
  async with session_factory() as s:
@@ -31,22 +29,27 @@ async def run_advertising_manual_lifecycle_once(bot:Bot,session_factory:async_se
    ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.status=="active").order_by(AdvertisingManualOp.id).with_for_update(skip_locked=True))).scalars().all())
    for op in ops:
     completed=(op.mode=="days" and op.ends_at is not None and op.ends_at<=now) or (op.mode=="subscribers" and op.progress_count>=op.quantity)
-    group_status=(await s.execute(select(Group.status).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none()
-    current_owner=(await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==op.source_chat_id,GroupOwner.is_current.is_(True)))).scalar_one_or_none()
-    source_ok=group_status==GroupStatus.active.value and current_owner==op.owner_user_id
-    if source_ok:source_ok=await active_subscription_for_owner(s,op.owner_user_id) is not None
-    target_ok=True
+    source_status=(await s.execute(select(Group.status).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none();source_owner=(await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==op.source_chat_id,GroupOwner.is_current.is_(True)))).scalar_one_or_none();source_ok=source_status==GroupStatus.active.value and source_owner==op.owner_user_id and await active_subscription_for_group(s,op.source_chat_id) is not None
+    target_owner=None;target_ok=False
     if op.target_chat_id is not None:
-     target_status=(await s.execute(select(Group.status).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none()
-     target_ok=target_status==GroupStatus.active.value
+     target_status=(await s.execute(select(Group.status).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none();target_owner=(await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==op.target_chat_id,GroupOwner.is_current.is_(True)))).scalar_one_or_none();link=(await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))).scalar_one_or_none();target_ok=target_status==GroupStatus.active.value and target_owner is not None and (link is None or link.owner_user_id==target_owner)
     if completed:
-     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id)
-     target_owner=(await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==op.target_chat_id,GroupOwner.is_current.is_(True)))).scalar_one_or_none() if op.target_chat_id else None
-     op.status="completed";op.completed_at=now;notifications.append((op,source_title,target_owner));revoke.append(op);changed+=1;continue
+     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id);op.status="completed";op.completed_at=now;notifications.append((op,source_title,target_owner));revoke.append(op);changed+=1;continue
     if not source_ok or not target_ok:
      op.status="stopped";op.completed_at=now;revoke.append(op);changed+=1
+  # Telegram checks are intentionally outside DB decisions but before final commit is impossible here;
+  # re-check active targets below and stop them in a second short transaction when admin rights are lost.
  for op in revoke:await _revoke(bot,op)
  for op,title,owner in notifications:await _notify(bot,op,title,owner,now)
+ async with session_factory() as s:
+  active=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.status=="active",AdvertisingManualOp.target_chat_id.is_not(None)))).scalars().all())
+ for op in active:
+  if await _bot_admin(bot,op.target_chat_id):continue
+  async with session_factory() as s:
+   async with s.begin():
+    locked=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==op.id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none()
+    if locked is not None:locked.status="stopped";locked.completed_at=now;changed+=1
+  await _revoke(bot,op)
  return changed
 async def advertising_manual_lifecycle_worker(bot:Bot,session_factory:async_sessionmaker[AsyncSession],*,interval_seconds:int=30)->None:
  while True:
