@@ -31,20 +31,8 @@ from groupbot.routers import entry_protection as entry_protection_module
 from groupbot.routers import group_control as group_control_module
 from groupbot.routers import manual_moderation as manual_moderation_module
 
-# Compatibility for hierarchy/admin modules that historically imported the TEST-only
-# helper. The canonical limit is now tariff-wide. Keep the shared permission catalog
-# normalized in-place because several already-imported modules hold this list object.
 group_control_module._trial_rank_limit = group_control_module._rank_limit
-group_control_module.KNOWN_PERMISSIONS[:] = [
-    ("warning", "⚠️ Предупреждение"),
-    ("mute", "🔇 Мут"),
-    ("ban", "⛔ Бан"),
-    ("unmute", "🔊 Размут"),
-    ("unban", "✅ Разбан"),
-    ("delete", "🗑 Удаление сообщений"),
-    ("pin", "📌 Закрепление сообщений"),
-    ("punishment_lists", "📋 Общие списки наказаний"),
-]
+group_control_module.KNOWN_PERMISSIONS[:] = [("warning", "⚠️ Предупреждение"), ("mute", "🔇 Мут"), ("ban", "⛔ Бан"), ("unmute", "🔊 Размут"), ("unban", "✅ Разбан"), ("delete", "🗑 Удаление сообщений"), ("pin", "📌 Закрепление сообщений"), ("punishment_lists", "📋 Общие списки наказаний")]
 
 from groupbot.routers.admin_hierarchy import create_admin_hierarchy_router
 from groupbot.routers.admin_member_sync import create_admin_member_sync_router
@@ -63,11 +51,8 @@ from groupbot.routers.advertising_mandatory_request import create_advertising_ma
 from groupbot.routers.advertising_marketplace_catalog import create_advertising_marketplace_catalog_router
 from groupbot.routers.advertising_materials import create_advertising_materials_router
 from groupbot.routers.advertising_mimorus_post import create_advertising_mimorus_post_router
-from groupbot.routers.advertising_post_duration import (
-    create_advertising_post_duration_router,
-    editor_keyboard_with_duration,
-    listing_text_with_duration,
-)
+from groupbot.routers.advertising_mutual_tracking import create_advertising_mutual_tracking_router
+from groupbot.routers.advertising_post_duration import create_advertising_post_duration_router, editor_keyboard_with_duration, listing_text_with_duration
 from groupbot.routers.advertising_post_keyboard import post_editor_keyboard
 from groupbot.routers.advertising_post_request import create_advertising_post_request_router
 from groupbot.routers.advertising_requests import create_advertising_requests_router
@@ -85,10 +70,7 @@ from groupbot.routers.creator_subscription_duration import create_creator_subscr
 from groupbot.routers.creator_user_profile_links import create_creator_user_profile_links_router
 from groupbot.routers.custom_role_safe_delete import create_custom_role_safe_delete_router
 from groupbot.routers.entry_protection import create_entry_protection_router
-from groupbot.routers.entry_protection_runtime import (
-    create_persistent_entry_runtime_router,
-    restore_entry_protection_runtime,
-)
+from groupbot.routers.entry_protection_runtime import create_persistent_entry_runtime_router, restore_entry_protection_runtime
 from groupbot.routers.group_analytics import create_group_analytics_router
 from groupbot.routers.group_cabinet_actions import create_group_cabinet_actions_router
 from groupbot.routers.group_commands import create_group_commands_router
@@ -122,148 +104,29 @@ from groupbot.services.default_punishment_reasons import configured_reasons_with
 from groupbot.services.entry_schedule_adapter import install_entry_schedule
 from groupbot.services.moderation_notifications import unified_execute_action
 from groupbot.workers.advertising_lifecycle import advertising_lifecycle_worker
-from groupbot.workers.advertising_mutual_lifecycle import advertising_mutual_lifecycle_worker
 from groupbot.workers.group_lifecycle import group_lifecycle_worker
 from groupbot.workers.moderation_lifecycle import moderation_lifecycle_worker
 from groupbot.workers.subscription_lifecycle import subscription_lifecycle_worker
 
-
-async def clear_global_group_commands(bot: Bot) -> None:
-    await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
-
+async def clear_global_group_commands(bot: Bot) -> None: await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
 
 async def main() -> None:
-    settings = get_settings()
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    creator_subscription_duration_module._user_link = clickable_user_display
-    creator_user_profile_links_module._user_link = clickable_user_display
-
-    manual_moderation_module._execute_action = unified_execute_action
-    ban_cleanup_module._execute_action = unified_execute_action
-    antiflood_middleware_module._execute_action = unified_execute_action
-    antispam_middleware_module._execute_action = unified_execute_action
-    antilinks_middleware_module._execute_action = unified_execute_action
-    content_filters_middleware_module._execute_action = unified_execute_action
-
-    manual_moderation_module._configured_reasons = configured_reasons_with_defaults
-    manual_moderation_module.ACTION_ALIASES["варн"] = "warning"
-    ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
-
-    advertising_module._listing_text = listing_text_with_duration
-    advertising_edit_module._listing_text = listing_text_with_duration
-    advertising_edit_module._editor_keyboard = editor_keyboard_with_duration
-    advertising_edit_types_module._listing_text = listing_text_with_duration
-    advertising_edit_types_module._editor_keyboard = editor_keyboard_with_duration
-    advertising_post_request_module._editor_keyboard = post_editor_keyboard
-
+    settings = get_settings(); logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    creator_subscription_duration_module._user_link = clickable_user_display; creator_user_profile_links_module._user_link = clickable_user_display
+    manual_moderation_module._execute_action = unified_execute_action; ban_cleanup_module._execute_action = unified_execute_action; antiflood_middleware_module._execute_action = unified_execute_action; antispam_middleware_module._execute_action = unified_execute_action; antilinks_middleware_module._execute_action = unified_execute_action; content_filters_middleware_module._execute_action = unified_execute_action
+    manual_moderation_module._configured_reasons = configured_reasons_with_defaults; manual_moderation_module.ACTION_ALIASES["варн"] = "warning"; ban_cleanup_module._configured_reasons = configured_reasons_with_defaults
+    advertising_module._listing_text = listing_text_with_duration; advertising_edit_module._listing_text = listing_text_with_duration; advertising_edit_module._editor_keyboard = editor_keyboard_with_duration; advertising_edit_types_module._listing_text = listing_text_with_duration; advertising_edit_types_module._editor_keyboard = editor_keyboard_with_duration; advertising_post_request_module._editor_keyboard = post_editor_keyboard
     install_entry_schedule(entry_protection_module)
-
-    bot = Bot(settings.bot_token)
-    session_factory = create_session_factory(settings)
-    dp = Dispatcher()
-    dp.update.outer_middleware(IdempotencyMiddleware(session_factory))
-    dp.callback_query.outer_middleware(PrivateGroupSettingsAccessMiddleware(session_factory))
-    dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory))
-    dp.message.outer_middleware(GroupSettingsOnlyMiddleware())
-    dp.message.outer_middleware(SubscriptionCommandNoticeMiddleware(session_factory))
-    dp.message.outer_middleware(AdvertisingMandatoryMiddleware(session_factory))
-    dp.message.outer_middleware(ContentFiltersMiddleware(session_factory))
-    dp.message.outer_middleware(AntiFloodMiddleware(session_factory))
-    dp.message.outer_middleware(AntiSpamMiddleware(session_factory))
-    dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
-
-    dp.include_router(create_member_status_sync_router(session_factory))
-    dp.include_router(create_persistent_entry_runtime_router(session_factory))
-    dp.include_router(create_group_startgroup_router(session_factory))
-    dp.include_router(create_group_router(session_factory))
-    dp.include_router(create_helper_private_assignment_hint_router(session_factory))
-    dp.include_router(create_helper_assignment_commands_router(session_factory))
-    dp.include_router(create_admin_rank_compact_actions_router(session_factory))
-    dp.include_router(create_admin_rank_target_actions_router(session_factory))
-    dp.include_router(create_admin_rank_group_notifications_router(session_factory))
-    dp.include_router(create_admin_rank_audit_actions_router(session_factory))
-    dp.include_router(create_admin_member_sync_router(session_factory))
-    dp.include_router(create_admins_display_router(session_factory))
-    dp.include_router(create_identity_privacy_router(session_factory, settings))
-    dp.include_router(create_network_moderation_router(session_factory))
-    dp.include_router(create_message_operations_router(session_factory))
-    dp.include_router(create_ban_cleanup_router(session_factory))
-    dp.include_router(create_moderation_release_router(session_factory))
-    dp.include_router(create_admin_punishment_lists_router(session_factory))
-
-    manual_router = create_manual_moderation_router(session_factory)
-    manual_router.message.filter(
-        F.chat.type.in_({"group", "supergroup"}),
-        F.text.regexp(r"(?i)^\s*(?:(?:пред|варн|мут|бан|размут|разбан)(?:\s+.*)?|мои\s+баны|мои\s+муты|выдал\s+пред|банлист|мутлист|преды)\s*$"),
-    )
-    dp.include_router(manual_router)
-
-    dp.include_router(create_group_text_aliases_router(session_factory))
-    dp.include_router(create_group_profile_stats_router(session_factory))
-    dp.include_router(create_group_analytics_router(session_factory))
-    dp.include_router(create_group_commands_router(session_factory))
-    dp.include_router(create_special_status_members_router(session_factory))
-    dp.include_router(create_admin_hierarchy_router(session_factory))
-    dp.include_router(create_custom_role_safe_delete_router(session_factory))
-    dp.include_router(create_group_control_ux_router(session_factory))
-    dp.include_router(create_group_control_role_actions_router(session_factory))
-    dp.include_router(create_punishment_reasons_router(session_factory))
-    dp.include_router(create_tariff_limits_router(session_factory))
-    dp.include_router(create_antiflood_router(session_factory))
-    dp.include_router(create_antispam_router(session_factory))
-    dp.include_router(create_antilinks_router(session_factory))
-    dp.include_router(create_content_filters_router(session_factory))
-    dp.include_router(create_entry_protection_router(session_factory))
-    dp.include_router(create_protection_schedule_router(session_factory))
-    dp.include_router(create_reserve_admin_router(session_factory))
-    dp.include_router(create_network_admins_router(session_factory))
-    dp.include_router(create_group_sections_nav_router(session_factory))
-    dp.include_router(create_group_control_router(session_factory))
-    dp.include_router(create_networks_router(session_factory))
-    dp.include_router(create_creator_subscription_duration_router(session_factory, settings))
-    dp.include_router(create_creator_identity_privacy_router(session_factory, settings))
-    dp.include_router(create_creator_user_profile_links_router(session_factory, settings))
-    dp.include_router(create_creator_group_profile_links_router(session_factory, settings))
-    dp.include_router(create_advertising_post_duration_router(session_factory))
-    dp.include_router(create_advertising_duration_integration_router(session_factory))
-    dp.include_router(create_advertising_edit_types_router(session_factory))
-    dp.include_router(create_advertising_edit_router(session_factory))
-    dp.include_router(create_advertising_mandatory_request_router(session_factory))
-    dp.include_router(create_advertising_post_request_router(session_factory))
-    dp.include_router(create_advertising_materials_router(session_factory))
-    dp.include_router(create_advertising_deal_actions_v2_router(session_factory))
-    dp.include_router(create_advertising_settlement_router(session_factory))
-    dp.include_router(create_advertising_sales_nav_router(session_factory))
-    dp.include_router(create_advertising_requests_router(session_factory))
-    dp.include_router(create_advertising_mimorus_post_router(session_factory))
-    dp.include_router(create_advertising_marketplace_catalog_router(session_factory))
-    dp.include_router(create_advertising_router(session_factory, settings))
-    dp.include_router(create_creator_router(session_factory, settings))
-    dp.include_router(create_subscription_payments_router(session_factory))
-    dp.include_router(create_group_cabinet_actions_router(session_factory))
-    dp.include_router(create_private_router(session_factory, settings))
-
-    await restore_entry_protection_runtime(bot, session_factory)
-    await clear_global_group_commands(bot)
-    lifecycle_task = asyncio.create_task(group_lifecycle_worker(bot, session_factory))
-    subscription_lifecycle_task = asyncio.create_task(subscription_lifecycle_worker(session_factory))
-    advertising_lifecycle_task = asyncio.create_task(advertising_lifecycle_worker(bot, session_factory))
-    advertising_mutual_lifecycle_task = asyncio.create_task(advertising_mutual_lifecycle_worker(bot, session_factory))
-    moderation_lifecycle_task = asyncio.create_task(moderation_lifecycle_worker(session_factory))
-    try:
-        await dp.start_polling(bot)
+    bot = Bot(settings.bot_token); session_factory = create_session_factory(settings); dp = Dispatcher()
+    dp.update.outer_middleware(IdempotencyMiddleware(session_factory)); dp.callback_query.outer_middleware(PrivateGroupSettingsAccessMiddleware(session_factory)); dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory)); dp.message.outer_middleware(GroupSettingsOnlyMiddleware()); dp.message.outer_middleware(SubscriptionCommandNoticeMiddleware(session_factory)); dp.message.outer_middleware(AdvertisingMandatoryMiddleware(session_factory)); dp.message.outer_middleware(ContentFiltersMiddleware(session_factory)); dp.message.outer_middleware(AntiFloodMiddleware(session_factory)); dp.message.outer_middleware(AntiSpamMiddleware(session_factory)); dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
+    for router in [create_member_status_sync_router(session_factory), create_advertising_mutual_tracking_router(session_factory), create_persistent_entry_runtime_router(session_factory), create_group_startgroup_router(session_factory), create_group_router(session_factory), create_helper_private_assignment_hint_router(session_factory), create_helper_assignment_commands_router(session_factory), create_admin_rank_compact_actions_router(session_factory), create_admin_rank_target_actions_router(session_factory), create_admin_rank_group_notifications_router(session_factory), create_admin_rank_audit_actions_router(session_factory), create_admin_member_sync_router(session_factory), create_admins_display_router(session_factory), create_identity_privacy_router(session_factory, settings), create_network_moderation_router(session_factory), create_message_operations_router(session_factory), create_ban_cleanup_router(session_factory), create_moderation_release_router(session_factory), create_admin_punishment_lists_router(session_factory)]: dp.include_router(router)
+    manual_router = create_manual_moderation_router(session_factory); manual_router.message.filter(F.chat.type.in_({"group", "supergroup"}), F.text.regexp(r"(?i)^\s*(?:(?:пред|варн|мут|бан|размут|разбан)(?:\s+.*)?|мои\s+баны|мои\s+муты|выдал\s+пред|банлист|мутлист|преды)\s*$")); dp.include_router(manual_router)
+    for router in [create_group_text_aliases_router(session_factory), create_group_profile_stats_router(session_factory), create_group_analytics_router(session_factory), create_group_commands_router(session_factory), create_special_status_members_router(session_factory), create_admin_hierarchy_router(session_factory), create_custom_role_safe_delete_router(session_factory), create_group_control_ux_router(session_factory), create_group_control_role_actions_router(session_factory), create_punishment_reasons_router(session_factory), create_tariff_limits_router(session_factory), create_antiflood_router(session_factory), create_antispam_router(session_factory), create_antilinks_router(session_factory), create_content_filters_router(session_factory), create_entry_protection_router(session_factory), create_protection_schedule_router(session_factory), create_reserve_admin_router(session_factory), create_network_admins_router(session_factory), create_group_sections_nav_router(session_factory), create_group_control_router(session_factory), create_networks_router(session_factory), create_creator_subscription_duration_router(session_factory, settings), create_creator_identity_privacy_router(session_factory, settings), create_creator_user_profile_links_router(session_factory, settings), create_creator_group_profile_links_router(session_factory, settings), create_advertising_post_duration_router(session_factory), create_advertising_duration_integration_router(session_factory), create_advertising_edit_types_router(session_factory), create_advertising_edit_router(session_factory), create_advertising_mandatory_request_router(session_factory), create_advertising_post_request_router(session_factory), create_advertising_materials_router(session_factory), create_advertising_deal_actions_v2_router(session_factory), create_advertising_settlement_router(session_factory), create_advertising_sales_nav_router(session_factory), create_advertising_requests_router(session_factory), create_advertising_mimorus_post_router(session_factory), create_advertising_marketplace_catalog_router(session_factory), create_advertising_router(session_factory, settings), create_creator_router(session_factory, settings), create_subscription_payments_router(session_factory), create_group_cabinet_actions_router(session_factory), create_private_router(session_factory, settings)]: dp.include_router(router)
+    await restore_entry_protection_runtime(bot, session_factory); await clear_global_group_commands(bot)
+    tasks = [asyncio.create_task(group_lifecycle_worker(bot, session_factory)), asyncio.create_task(subscription_lifecycle_worker(session_factory)), asyncio.create_task(advertising_lifecycle_worker(bot, session_factory)), asyncio.create_task(moderation_lifecycle_worker(session_factory))]
+    try: await dp.start_polling(bot)
     finally:
-        lifecycle_task.cancel()
-        subscription_lifecycle_task.cancel()
-        advertising_lifecycle_task.cancel()
-        advertising_mutual_lifecycle_task.cancel()
-        moderation_lifecycle_task.cancel()
+        for task in tasks: task.cancel()
         await bot.session.close()
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == "__main__": asyncio.run(main())
