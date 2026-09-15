@@ -100,6 +100,8 @@ def create_advertising_post_duration_router(session_factory: async_sessionmaker[
 
     from groupbot.routers.advertising_request_guard import create_advertising_request_guard_router
     router.include_router(create_advertising_request_guard_router(session_factory))
+    from groupbot.routers.advertising_manual_op import create_advertising_manual_op_router
+    router.include_router(create_advertising_manual_op_router(session_factory))
 
     @router.callback_query(F.data.regexp(r"^ads:listing:\d+$"))
     async def open_listing_with_contact(callback: CallbackQuery) -> None:
