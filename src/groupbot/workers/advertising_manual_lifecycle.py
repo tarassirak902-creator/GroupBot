@@ -13,28 +13,29 @@ logger=logging.getLogger(__name__)
 def _group_link(chat_id:int,title:str)->str:
  return f'<a href="https://t.me/MimorusBot?startgroup=manage_{abs(chat_id)}">{escape(title)}</a>'
 
+def _result_text(op):
+ if op.mode=="subscribers":return f"🎯 Цель достигнута: <b>{op.progress_count:,}/{op.quantity:,} подписчиков</b>".replace(","," ")
+ if op.mode=="days":return f"⏱ Срок рекламы завершён: <b>{op.quantity} дней</b>"
+ return "✅ Реклама завершена."
+
 def _completion_text(op,source_title,target_title,recipient_kind):
- source=_group_link(op.source_chat_id,source_title);target=_group_link(op.target_chat_id,target_title) if op.target_chat_id is not None else escape(target_title)
- if op.mode=="subscribers":
-  result=f"🎯 Цель достигнута: <b>{op.progress_count:,}/{op.quantity:,} подписчиков</b>".replace(","," ")
- elif op.mode=="days":
-  result=f"⏱ Срок рекламы завершён: <b>{op.quantity} дней</b>"
+ source=_group_link(op.source_chat_id,source_title);target=_group_link(op.target_chat_id,target_title) if op.target_chat_id is not None else escape(target_title);result=_result_text(op)
+ if recipient_kind=="both":
+  body=f"📢 Реклама между вашими группами завершена.\n\n📤 Рекламировала: {source}\n📥 Рекламировалась: {target}\n\n{result}\n\n🔗 Индивидуальная рекламная ссылка удалена."
+ elif recipient_kind=="source":
+  body=f"📢 Реклама {target} завершена.\n\n📤 Рекламировала: {source}\n📥 Рекламировалась: {target}\n\n{result}\n\n🔗 Рекламная ссылка больше не используется."
  else:
-  result="✅ Реклама завершена."
- if recipient_kind=="source":
-  body=f"📢 Реклама группы {target} завершена.\n{result}\n\n🔗 Рекламная ссылка больше не используется."
- else:
-  body=f"📢 Группа {source} завершила рекламу вашей группы {target}.\n{result}\n\n🔗 Индивидуальная рекламная ссылка удалена."
+  body=f"📢 {source} завершила рекламу вашей группы.\n\n📤 Рекламировала: {source}\n📥 Рекламировалась: {target}\n\n{result}\n\n🔗 Индивидуальная рекламная ссылка удалена."
  return f"✅ <b>Реклама завершена</b>\n\n{body}"
 
 async def _notify(bot,op,source_title,target_title,source_owner_id,target_owner_id):
- recipients=[]
- if source_owner_id is not None:recipients.append((source_owner_id,"source"))
- if target_owner_id is not None:recipients.append((target_owner_id,"target"))
- sent=set()
+ if source_owner_id is not None and source_owner_id==target_owner_id:
+  recipients=[(source_owner_id,"both")]
+ else:
+  recipients=[]
+  if source_owner_id is not None:recipients.append((source_owner_id,"source"))
+  if target_owner_id is not None:recipients.append((target_owner_id,"target"))
  for uid,kind in recipients:
-  if uid in sent:continue
-  sent.add(uid)
   try:await bot.send_message(uid,_completion_text(op,source_title,target_title,kind),parse_mode="HTML",disable_web_page_preview=True)
   except Exception:logger.exception("Could not notify manual advertising completion op=%s user=%s",op.id,uid)
 async def _revoke(bot,op):
