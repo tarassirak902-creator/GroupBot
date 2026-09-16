@@ -102,7 +102,16 @@ async def _retry_finished_link_cleanup(bot: Bot, session_factory: async_sessionm
     for link in links:
         async with session_factory() as s:
             active = (await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url == link.invite_url, AdvertisingManualOp.status == "active").limit(1))).scalar_one_or_none()
-            finished = (await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url == link.invite_url, AdvertisingManualOp.status.in_(("completed", "stopped")).order_by(AdvertisingManualOp.id.desc()).limit(1))).scalar_one_or_none()
+            finished_stmt = (
+                select(AdvertisingManualOp.id)
+                .where(
+                    AdvertisingManualOp.target_url == link.invite_url,
+                    AdvertisingManualOp.status.in_(("completed", "stopped")),
+                )
+                .order_by(AdvertisingManualOp.id.desc())
+                .limit(1)
+            )
+            finished = (await s.execute(finished_stmt)).scalar_one_or_none()
         if active is not None or finished is None:
             continue
         if not await _revoke_url(bot, link.target_chat_id, link.invite_url, op_id=finished):
