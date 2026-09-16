@@ -3,7 +3,7 @@ import asyncio,logging
 from datetime import datetime,timezone
 from html import escape
 from aiogram import Bot
-from sqlalchemy import select
+from sqlalchemy import delete,select
 from sqlalchemy.ext.asyncio import AsyncSession,async_sessionmaker
 from groupbot.advertising_manual_models import AdvertisingManualLink,AdvertisingManualOp
 from groupbot.models import Group,GroupOwner,GroupStatus
@@ -19,6 +19,10 @@ async def _revoke(bot,op):
  if op.target_chat_id is None:return
  try:await bot.revoke_chat_invite_link(op.target_chat_id,op.target_url)
  except Exception:pass
+async def _delete_registered_link(s:AsyncSession,op:AdvertisingManualOp)->None:
+ # Every /ссылка is campaign-specific. Once that OP is finished/stopped,
+ # remove the registration as well as revoking the Telegram invite.
+ await s.execute(delete(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))
 async def _bot_admin(bot,chat_id):
  try:m=await bot.get_chat_member(chat_id,(await bot.get_me()).id);return m.status in {"administrator","creator"}
  except Exception:return False
@@ -34,9 +38,9 @@ async def run_advertising_manual_lifecycle_once(bot:Bot,session_factory:async_se
     if op.target_chat_id is not None:
      target_status=(await s.execute(select(Group.status).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none();target_owner=(await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==op.target_chat_id,GroupOwner.is_current.is_(True)))).scalar_one_or_none();link=(await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))).scalar_one_or_none();target_ok=target_status==GroupStatus.active.value and target_owner is not None and (link is None or link.owner_user_id==target_owner)
     if completed:
-     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id);op.status="completed";op.completed_at=now;notifications.append((op,source_title,target_owner));revoke.append(op);changed+=1;continue
+     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id);op.status="completed";op.completed_at=now;await _delete_registered_link(s,op);notifications.append((op,source_title,target_owner));revoke.append(op);changed+=1;continue
     if not source_ok or not target_ok:
-     op.status="stopped";op.completed_at=now;revoke.append(op);changed+=1
+     op.status="stopped";op.completed_at=now;await _delete_registered_link(s,op);revoke.append(op);changed+=1
   # Telegram checks are intentionally outside DB decisions but before final commit is impossible here;
   # re-check active targets below and stop them in a second short transaction when admin rights are lost.
  for op in revoke:await _revoke(bot,op)
@@ -48,7 +52,7 @@ async def run_advertising_manual_lifecycle_once(bot:Bot,session_factory:async_se
   async with session_factory() as s:
    async with s.begin():
     locked=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==op.id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none()
-    if locked is not None:locked.status="stopped";locked.completed_at=now;changed+=1
+    if locked is not None:locked.status="stopped";locked.completed_at=now;await _delete_registered_link(s,locked);changed+=1
   await _revoke(bot,op)
  return changed
 async def advertising_manual_lifecycle_worker(bot:Bot,session_factory:async_sessionmaker[AsyncSession],*,interval_seconds:int=30)->None:
