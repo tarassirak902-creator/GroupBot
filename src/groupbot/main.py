@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.types import BotCommandScopeAllGroupChats
 
 from groupbot.config import get_settings
@@ -109,6 +109,21 @@ from groupbot.workers.group_lifecycle import group_lifecycle_worker
 from groupbot.workers.moderation_lifecycle import moderation_lifecycle_worker
 from groupbot.workers.subscription_lifecycle import subscription_lifecycle_worker
 
+logger = logging.getLogger(__name__)
+
+
+class UpdateTypeDiagnosticMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        event_type = getattr(event, "event_type", None)
+        if event_type is None:
+            for name in ("chat_join_request", "chat_member", "my_chat_member", "message", "callback_query"):
+                if getattr(event, name, None) is not None:
+                    event_type = name
+                    break
+        logger.info("TELEGRAM_UPDATE_DIAG update_id=%s type=%s", getattr(event, "update_id", None), event_type or "unknown")
+        return await handler(event, data)
+
+
 async def clear_global_group_commands(bot: Bot) -> None: await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
 
 async def main() -> None:
@@ -119,7 +134,7 @@ async def main() -> None:
     advertising_module._listing_text = listing_text_with_duration; advertising_edit_module._listing_text = listing_text_with_duration; advertising_edit_module._editor_keyboard = editor_keyboard_with_duration; advertising_edit_types_module._listing_text = listing_text_with_duration; advertising_edit_types_module._editor_keyboard = editor_keyboard_with_duration; advertising_post_request_module._editor_keyboard = post_editor_keyboard
     install_entry_schedule(entry_protection_module)
     bot = Bot(settings.bot_token); session_factory = create_session_factory(settings); dp = Dispatcher()
-    dp.update.outer_middleware(IdempotencyMiddleware(session_factory)); dp.callback_query.outer_middleware(PrivateGroupSettingsAccessMiddleware(session_factory)); dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory)); dp.message.outer_middleware(GroupSettingsOnlyMiddleware()); dp.message.outer_middleware(SubscriptionCommandNoticeMiddleware(session_factory)); dp.message.outer_middleware(AdvertisingMandatoryMiddleware(session_factory)); dp.message.outer_middleware(ContentFiltersMiddleware(session_factory)); dp.message.outer_middleware(AntiFloodMiddleware(session_factory)); dp.message.outer_middleware(AntiSpamMiddleware(session_factory)); dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
+    dp.update.outer_middleware(UpdateTypeDiagnosticMiddleware()); dp.update.outer_middleware(IdempotencyMiddleware(session_factory)); dp.callback_query.outer_middleware(PrivateGroupSettingsAccessMiddleware(session_factory)); dp.message.outer_middleware(GroupMemberTrackingMiddleware(session_factory)); dp.message.outer_middleware(GroupSettingsOnlyMiddleware()); dp.message.outer_middleware(SubscriptionCommandNoticeMiddleware(session_factory)); dp.message.outer_middleware(AdvertisingMandatoryMiddleware(session_factory)); dp.message.outer_middleware(ContentFiltersMiddleware(session_factory)); dp.message.outer_middleware(AntiFloodMiddleware(session_factory)); dp.message.outer_middleware(AntiSpamMiddleware(session_factory)); dp.message.outer_middleware(AntiLinksMiddleware(session_factory))
     for router in [create_member_status_sync_router(session_factory), create_advertising_mutual_tracking_router(session_factory), create_persistent_entry_runtime_router(session_factory), create_group_startgroup_router(session_factory), create_group_router(session_factory), create_helper_private_assignment_hint_router(session_factory), create_helper_assignment_commands_router(session_factory), create_admin_rank_compact_actions_router(session_factory), create_admin_rank_target_actions_router(session_factory), create_admin_rank_group_notifications_router(session_factory), create_admin_rank_audit_actions_router(session_factory), create_admin_member_sync_router(session_factory), create_admins_display_router(session_factory), create_identity_privacy_router(session_factory, settings), create_network_moderation_router(session_factory), create_message_operations_router(session_factory), create_ban_cleanup_router(session_factory), create_moderation_release_router(session_factory), create_admin_punishment_lists_router(session_factory)]: dp.include_router(router)
     manual_router = create_manual_moderation_router(session_factory); manual_router.message.filter(F.chat.type.in_({"group", "supergroup"}), F.text.regexp(r"(?i)^\s*(?:(?:пред|варн|мут|бан|размут|разбан)(?:\s+.*)?|мои\s+баны|мои\s+муты|выдал\s+пред|банлист|мутлист|преды)\s*$")); dp.include_router(manual_router)
     for router in [create_group_text_aliases_router(session_factory), create_group_profile_stats_router(session_factory), create_group_analytics_router(session_factory), create_group_commands_router(session_factory), create_special_status_members_router(session_factory), create_admin_hierarchy_router(session_factory), create_custom_role_safe_delete_router(session_factory), create_group_control_ux_router(session_factory), create_group_control_role_actions_router(session_factory), create_punishment_reasons_router(session_factory), create_tariff_limits_router(session_factory), create_antiflood_router(session_factory), create_antispam_router(session_factory), create_antilinks_router(session_factory), create_content_filters_router(session_factory), create_entry_protection_router(session_factory), create_protection_schedule_router(session_factory), create_reserve_admin_router(session_factory), create_network_admins_router(session_factory), create_group_sections_nav_router(session_factory), create_group_control_router(session_factory), create_networks_router(session_factory), create_creator_subscription_duration_router(session_factory, settings), create_creator_identity_privacy_router(session_factory, settings), create_creator_user_profile_links_router(session_factory, settings), create_creator_group_profile_links_router(session_factory, settings), create_advertising_post_duration_router(session_factory), create_advertising_duration_integration_router(session_factory), create_advertising_edit_types_router(session_factory), create_advertising_edit_router(session_factory), create_advertising_mandatory_request_router(session_factory), create_advertising_post_request_router(session_factory), create_advertising_materials_router(session_factory), create_advertising_deal_actions_v2_router(session_factory), create_advertising_settlement_router(session_factory), create_advertising_sales_nav_router(session_factory), create_advertising_requests_router(session_factory), create_advertising_mimorus_post_router(session_factory), create_advertising_marketplace_catalog_router(session_factory), create_advertising_router(session_factory, settings), create_creator_router(session_factory, settings), create_subscription_payments_router(session_factory), create_group_cabinet_actions_router(session_factory), create_private_router(session_factory, settings)]: dp.include_router(router)
