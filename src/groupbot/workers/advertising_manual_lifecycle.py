@@ -9,11 +9,33 @@ from groupbot.advertising_manual_models import AdvertisingManualLink,Advertising
 from groupbot.models import Group,GroupOwner,GroupStatus
 from groupbot.services.subscriptions import active_subscription_for_group
 logger=logging.getLogger(__name__)
-def _completion_text(op,source_title,now):
- condition=f"{op.quantity:,} участников".replace(","," ") if op.mode=="subscribers" else f"{op.quantity} дней";result=f"📊 Результат: {op.progress_count:,}/{op.quantity:,}".replace(","," ") if op.mode=="subscribers" else f"📅 Срок размещения: {op.quantity} дней";return f"✅ <b>Реклама выполнена</b>\n\n🅰️ Группа А: {escape(source_title)}\n🅱️ Рекламная группа: {escape(op.target_title)}\n🔗 Ссылка: {escape(op.target_url)}\n📍 Условие: {condition}\n{result}\n🕐 Завершено: {now.strftime('%d.%m.%Y %H:%M')}"
-async def _notify(bot,op,source_title,target_owner_id,now):
- for uid in {op.owner_user_id,target_owner_id}-{None}:
-  try:await bot.send_message(uid,_completion_text(op,source_title,now),parse_mode="HTML",disable_web_page_preview=True)
+
+def _group_link(chat_id:int,title:str)->str:
+ return f'<a href="https://t.me/MimorusBot?startgroup=manage_{abs(chat_id)}">{escape(title)}</a>'
+
+def _completion_text(op,source_title,target_title,recipient_kind):
+ source=_group_link(op.source_chat_id,source_title);target=_group_link(op.target_chat_id,target_title) if op.target_chat_id is not None else escape(target_title)
+ if op.mode=="subscribers":
+  result=f"🎯 Цель достигнута: <b>{op.progress_count:,}/{op.quantity:,} подписчиков</b>".replace(","," ")
+ elif op.mode=="days":
+  result=f"⏱ Срок рекламы завершён: <b>{op.quantity} дней</b>"
+ else:
+  result="✅ Реклама завершена."
+ if recipient_kind=="source":
+  body=f"📢 Реклама группы {target} завершена.\n{result}\n\n🔗 Рекламная ссылка больше не используется."
+ else:
+  body=f"📢 Группа {source} завершила рекламу вашей группы {target}.\n{result}\n\n🔗 Индивидуальная рекламная ссылка удалена."
+ return f"✅ <b>Реклама завершена</b>\n\n{body}"
+
+async def _notify(bot,op,source_title,target_title,source_owner_id,target_owner_id):
+ recipients=[]
+ if source_owner_id is not None:recipients.append((source_owner_id,"source"))
+ if target_owner_id is not None:recipients.append((target_owner_id,"target"))
+ sent=set()
+ for uid,kind in recipients:
+  if uid in sent:continue
+  sent.add(uid)
+  try:await bot.send_message(uid,_completion_text(op,source_title,target_title,kind),parse_mode="HTML",disable_web_page_preview=True)
   except Exception:logger.exception("Could not notify manual advertising completion op=%s user=%s",op.id,uid)
 async def _revoke(bot,op):
  if op.target_chat_id is None:return
@@ -22,9 +44,6 @@ async def _revoke(bot,op):
 async def _delete_registered_link(s:AsyncSession,op:AdvertisingManualOp)->None:
  await s.execute(delete(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))
 async def _cleanup_finished_links(s:AsyncSession)->int:
- # Manual stop callbacks revoke the Telegram invite immediately. The lifecycle
- # also removes its DB registration, while preserving links that were created
- # but have never yet been used in an OP.
  links=list((await s.execute(select(AdvertisingManualLink))).scalars().all());removed=0
  for link in links:
   active=(await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url==link.invite_url,AdvertisingManualOp.status=="active").limit(1))).scalar_one_or_none()
@@ -47,13 +66,11 @@ async def run_advertising_manual_lifecycle_once(bot:Bot,session_factory:async_se
     if op.target_chat_id is not None:
      target_status=(await s.execute(select(Group.status).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none();target_owner=(await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==op.target_chat_id,GroupOwner.is_current.is_(True)))).scalar_one_or_none();link=(await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))).scalar_one_or_none();target_ok=target_status==GroupStatus.active.value and target_owner is not None and (link is None or link.owner_user_id==target_owner)
     if completed:
-     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id);op.status="completed";op.completed_at=now;await _delete_registered_link(s,op);notifications.append((op,source_title,target_owner));revoke.append(op);changed+=1;continue
+     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id);target_title=(await s.execute(select(Group.title).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none() if op.target_chat_id is not None else None;target_title=target_title or op.target_title;op.status="completed";op.completed_at=now;await _delete_registered_link(s,op);notifications.append((op,source_title,target_title,source_owner,target_owner));revoke.append(op);changed+=1;continue
     if not source_ok or not target_ok:
      op.status="stopped";op.completed_at=now;await _delete_registered_link(s,op);revoke.append(op);changed+=1
-  # Telegram checks are intentionally outside DB decisions but before final commit is impossible here;
-  # re-check active targets below and stop them in a second short transaction when admin rights are lost.
  for op in revoke:await _revoke(bot,op)
- for op,title,owner in notifications:await _notify(bot,op,title,owner,now)
+ for op,source_title,target_title,source_owner,target_owner in notifications:await _notify(bot,op,source_title,target_title,source_owner,target_owner)
  async with session_factory() as s:
   active=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.status=="active",AdvertisingManualOp.target_chat_id.is_not(None)))).scalars().all())
  for op in active:
