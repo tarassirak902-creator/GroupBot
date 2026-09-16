@@ -35,6 +35,7 @@ KNOWN_PERMISSIONS = [
     ("pin", "📌 Закрепление сообщений"),
     ("punishment_lists", "📋 Общие списки наказаний"),
 ]
+DEPUTY_OWNER_PERMISSION = ("advertising", "📢 Управление рекламой")
 WARNING_LIMIT_CHOICES = (3, 4, 5, 6, 7, 8, 9, 10, 15, 20)
 STANDARD_ADMIN_ROLE_NAMES = frozenset({
     "Зам. владельца",
@@ -113,6 +114,13 @@ def _warning_scale_text(limit: int) -> str:
     return "\n".join(lines)
 
 
+def _role_permissions(role: AdminRole) -> list[tuple[str, str]]:
+    permissions = list(KNOWN_PERMISSIONS)
+    if role.name == "Зам. владельца":
+        permissions.append(DEPUTY_OWNER_PERMISSION)
+    return permissions
+
+
 def _roles_keyboard(chat_id: int, roles: list[AdminRole], *, can_create: bool = True) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"{'✅' if role.is_active else '⛔'} {role.name}"[:64], callback_data=f"gctl:role:{chat_id}:{role.id}")] for role in roles]
     if can_create:
@@ -122,7 +130,7 @@ def _roles_keyboard(chat_id: int, roles: list[AdminRole], *, can_create: bool = 
 
 
 def _role_keyboard(chat_id: int, role: AdminRole, permissions: dict[str, bool]) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"{'✅' if permissions.get(key, False) else '❌'} {title}", callback_data=f"gctl:perm:{chat_id}:{role.id}:{key}")] for key, title in KNOWN_PERMISSIONS]
+    rows = [[InlineKeyboardButton(text=f"{'✅' if permissions.get(key, False) else '❌'} {title}", callback_data=f"gctl:perm:{chat_id}:{role.id}:{key}")] for key, title in _role_permissions(role)]
     rows.append([InlineKeyboardButton(text="💾 Сохранить", callback_data=f"gctl:perm_save:{chat_id}:{role.id}")])
     rows.append([InlineKeyboardButton(text="⛔ Выключить ранг" if role.is_active else "✅ Включить ранг", callback_data=f"gctl:role_toggle:{chat_id}:{role.id}")])
     if role.name not in STANDARD_ADMIN_ROLE_NAMES:
@@ -150,7 +158,6 @@ async def _rank_limit(session: AsyncSession, owner_id: int) -> int | None:
     return await effective_limit_for_owner(session, owner_id, "admin_ranks")
 
 
-# Backward-compatible name used by the hierarchy router; the limit is no longer TEST-only.
 _trial_rank_limit = _rank_limit
 
 
@@ -164,30 +171,20 @@ def create_group_control_router(session_factory: async_sessionmaker[AsyncSession
     @router.callback_query(F.data.startswith("group:section:"))
     async def section(callback: CallbackQuery) -> None:
         parts = (callback.data or "").split(":", 3)
-        if len(parts) != 4:
-            return
-        try:
-            chat_id = int(parts[2])
-        except ValueError:
-            return
+        if len(parts) != 4: return
+        try: chat_id = int(parts[2])
+        except ValueError: return
         section_key = parts[3]
-        if section_key not in {"moderation", "administration"}:
-            return
+        if section_key not in {"moderation", "administration"}: return
         async with session_factory() as session:
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Нужны права владельца и активный тариф.", show_alert=True)
-                return
+            if not await _owner_access(session, chat_id, callback.from_user.id): await callback.answer("Нужны права владельца и активный тариф.", show_alert=True); return
             group = (await session.execute(select(Group).where(Group.chat_id == chat_id))).scalar_one_or_none()
-            settings = await _ensure_group_settings(session, chat_id)
-            moderation_config = settings.moderation_config or {}
-            roles_count = await _custom_rank_count(session, chat_id)
+            settings = await _ensure_group_settings(session, chat_id); moderation_config = settings.moderation_config or {}; roles_count = await _custom_rank_count(session, chat_id)
             assignments_count = int((await session.execute(select(func.count()).select_from(AdminAssignment).where(AdminAssignment.chat_id == chat_id))).scalar_one())
-        if callback.message is None:
-            return
+        if callback.message is None: return
         title = group.title if group and group.title else str(chat_id)
         if section_key == "moderation":
-            mode = moderation_config.get("admin_command_mode", "both")
-            mode_name = {"text": "Текстовый", "buttons": "Кнопки", "both": "Оба режима"}.get(mode, "Оба режима")
+            mode = moderation_config.get("admin_command_mode", "both"); mode_name = {"text":"Текстовый","buttons":"Кнопки","both":"Оба режима"}.get(mode,"Оба режима")
             await callback.message.edit_text("🛡 <b>Модерация</b>\n\n" f"Группа: <b>{title}</b>\n" f"Режим админ-команд: <b>{mode_name}</b>\n\n" "Здесь настраиваются ручные наказания, причины, предупреждения и защитные модули группы.", parse_mode="HTML", reply_markup=_moderation_keyboard(chat_id))
         else:
             await callback.message.edit_text("👮 <b>Администрация</b>\n\n" f"Группа: <b>{title}</b>\n" f"Собственных рангов: <b>{roles_count}</b>\n" f"Назначений в Mimorus: <b>{assignments_count}</b>\n\n" "Владелец может создавать собственные ранги и отдельно задавать доступные действия.", parse_mode="HTML", reply_markup=_administration_keyboard(chat_id))
@@ -196,26 +193,22 @@ def create_group_control_router(session_factory: async_sessionmaker[AsyncSession
     @router.callback_query(F.data.startswith("gctl:content_filters:"))
     async def content_filters(callback: CallbackQuery) -> None:
         chat_id = int((callback.data or "").split(":", 2)[2])
-        if callback.message:
-            await callback.message.edit_text("🚫 <b>Запрещённые слова/фразы</b>\n\nВыберите список, который хотите посмотреть или изменить.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚫 Запрещённые слова", callback_data=f"gctl:feature:{chat_id}:words")], [InlineKeyboardButton(text="📝 Запрещённые фразы", callback_data=f"gctl:feature:{chat_id}:phrases")], [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]]))
+        if callback.message: await callback.message.edit_text("🚫 <b>Запрещённые слова/фразы</b>\n\nВыберите список, который хотите посмотреть или изменить.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚫 Запрещённые слова", callback_data=f"gctl:feature:{chat_id}:words")], [InlineKeyboardButton(text="📝 Запрещённые фразы", callback_data=f"gctl:feature:{chat_id}:phrases")], [InlineKeyboardButton(text="◀️ Модерация", callback_data=f"group:section:{chat_id}:moderation")]]))
         await callback.answer()
 
     @router.callback_query(F.data.startswith("gctl:mode:"))
     async def mode_screen(callback: CallbackQuery) -> None:
         chat_id = int((callback.data or "").split(":", 2)[2])
         async with session_factory() as session:
-            if not await _owner_access(session, chat_id, callback.from_user.id):
-                await callback.answer("Недостаточно прав.", show_alert=True); return
+            if not await _owner_access(session, chat_id, callback.from_user.id): await callback.answer("Недостаточно прав.", show_alert=True); return
             current = ((await _ensure_group_settings(session, chat_id)).moderation_config or {}).get("admin_command_mode", "both")
-        if callback.message:
-            await callback.message.edit_text("🎚 <b>Режим админ-команд</b>\n\nТекстовый — действие и причина пишутся ответом на сообщение.\nКнопки — после команды бот предлагает срок/причину.\nОба режима — работают оба варианта.", parse_mode="HTML", reply_markup=_mode_keyboard(chat_id, current))
+        if callback.message: await callback.message.edit_text("🎚 <b>Режим админ-команд</b>\n\nТекстовый — действие и причина пишутся ответом на сообщение.\nКнопки — после команды бот предлагает срок/причину.\nОба режима — работают оба варианта.", parse_mode="HTML", reply_markup=_mode_keyboard(chat_id, current))
         await callback.answer()
 
     @router.callback_query(F.data.startswith("gctl:setmode:"))
     async def set_mode(callback: CallbackQuery) -> None:
         _, _, chat_raw, mode = (callback.data or "").split(":", 3); chat_id = int(chat_raw)
-        if mode not in {"text", "buttons", "both"}:
-            await callback.answer("Некорректный режим.", show_alert=True); return
+        if mode not in {"text", "buttons", "both"}: await callback.answer("Некорректный режим.", show_alert=True); return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id): return
@@ -278,11 +271,8 @@ def create_group_control_router(session_factory: async_sessionmaker[AsyncSession
         chat_id = int((callback.data or "").split(":", 2)[2])
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id): return
-            rows = list((await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))).scalars().all())
-            limit = await _rank_limit(session, callback.from_user.id)
-        custom_count = sum(1 for role in rows if role.name not in STANDARD_ADMIN_ROLE_NAMES)
-        usage = str(custom_count) if limit is None else f"{custom_count}/{limit}"
-        over = limit is not None and custom_count > limit
+            rows = list((await session.execute(select(AdminRole).where(AdminRole.chat_id == chat_id).order_by(AdminRole.id))).scalars().all()); limit = await _rank_limit(session, callback.from_user.id)
+        custom_count = sum(1 for role in rows if role.name not in STANDARD_ADMIN_ROLE_NAMES); usage = str(custom_count) if limit is None else f"{custom_count}/{limit}"; over = limit is not None and custom_count > limit
         text = f"👑 <b>Ранги администрации</b>\n\nСобственных рангов: <b>{usage}</b>.\nНовые ранги создаются без автоматически выданных прав: владелец включает каждое действие сам."
         if over: text += "\n\n⚠️ <b>Количество рангов выше лимита текущего тарифа.</b> Существующие ранги сохранены: их можно редактировать, выключать и удалять. Новый ранг можно создать после уменьшения количества или повышения тарифа."
         elif limit is not None and custom_count >= limit: text += "\n\nЛимит рангов текущего тарифа исчерпан. Существующие ранги можно редактировать или удалять."
@@ -295,11 +285,9 @@ def create_group_control_router(session_factory: async_sessionmaker[AsyncSession
         async with session_factory() as session:
             if not await _owner_access(session, chat_id, callback.from_user.id): return
             limit = await _rank_limit(session, callback.from_user.id); count = await _custom_rank_count(session, chat_id)
-        if limit is not None and count >= limit:
-            await callback.answer(f"Достигнут лимит дополнительных административных рангов: {limit}.", show_alert=True); return
+        if limit is not None and count >= limit: await callback.answer(f"Достигнут лимит дополнительных административных рангов: {limit}.", show_alert=True); return
         await state.set_state(AdminRoleState.waiting_name); await state.update_data(chat_id=chat_id)
-        if callback.message:
-            prompt = await callback.message.answer("Отправьте название нового дополнительного административного ранга (1–128 символов)."); await state.update_data(prompt_message_id=prompt.message_id)
+        if callback.message: prompt = await callback.message.answer("Отправьте название нового дополнительного административного ранга (1–128 символов)."); await state.update_data(prompt_message_id=prompt.message_id)
         await callback.answer()
 
     @router.message(AdminRoleState.waiting_name, F.chat.type == "private")
@@ -321,8 +309,7 @@ def create_group_control_router(session_factory: async_sessionmaker[AsyncSession
         permissions = {key: False for key, _ in KNOWN_PERMISSIONS}; await state.clear(); await state.update_data(permission_draft_chat_id=chat_id, permission_draft_role_id=role_id, permission_draft=permissions)
         try: await message.delete()
         except Exception: pass
-        text = f"👑 <b>Настройка админ-ранга</b>\n\nНазвание: <b>{name}</b>\nСтатус: ✅ включён\nНазначено пользователей: <b>0</b>\n\n✅ Ранг создан. Выберите нужные разрешения и нажмите <b>💾 Сохранить</b>."
-        keyboard = _role_keyboard(chat_id, role, permissions)
+        text = f"👑 <b>Настройка админ-ранга</b>\n\nНазвание: <b>{name}</b>\nСтатус: ✅ включён\nНазначено пользователей: <b>0</b>\n\n✅ Ранг создан. Выберите нужные разрешения и нажмите <b>💾 Сохранить</b>."; keyboard = _role_keyboard(chat_id, role, permissions)
         if prompt_message_id is not None:
             try: await message.bot.edit_message_text(chat_id=message.chat.id, message_id=int(prompt_message_id), text=text, parse_mode="HTML", reply_markup=keyboard); return
             except Exception: pass
@@ -343,12 +330,12 @@ def create_group_control_router(session_factory: async_sessionmaker[AsyncSession
     @router.callback_query(F.data.startswith("gctl:perm:"))
     async def toggle_permission(callback: CallbackQuery) -> None:
         _, _, chat_raw, role_raw, permission = (callback.data or "").split(":", 4); chat_id, role_id = int(chat_raw), int(role_raw)
-        if permission not in {key for key, _ in KNOWN_PERMISSIONS}: return
         async with session_factory() as session:
             async with session.begin():
                 if not await _owner_access(session, chat_id, callback.from_user.id): return
                 role = (await session.execute(select(AdminRole).where(AdminRole.id == role_id, AdminRole.chat_id == chat_id).with_for_update())).scalar_one_or_none()
                 if role is None: return
+                if permission not in {key for key, _ in _role_permissions(role)}: await callback.answer("Это разрешение недоступно для данного ранга.", show_alert=True); return
                 row = (await session.execute(select(AdminPermission).where(AdminPermission.role_id == role_id, AdminPermission.permission == permission).with_for_update())).scalar_one_or_none()
                 if row is None: row = AdminPermission(role_id=role_id, permission=permission, allowed=True); session.add(row)
                 else: row.allowed = not row.allowed
