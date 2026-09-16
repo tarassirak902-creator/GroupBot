@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router
 from aiogram.types import ChatMemberUpdated
 from sqlalchemy import and_, func, or_, select
@@ -13,6 +15,8 @@ from groupbot.services.helper_role_policy import HELPER_ROLE, detach_helpers_fro
 from groupbot.services.special_statuses import remove_special_statuses_for_user
 from groupbot.services.users import upsert_user
 from groupbot.telegram_admin_models import TelegramAdminPromotion
+
+logger = logging.getLogger(__name__)
 
 
 def _status_value(member) -> str:
@@ -44,8 +48,8 @@ async def _store_member_status(session: AsyncSession, *, chat_id: int, user, sta
 
 
 async def _credit_manual_op_join(session: AsyncSession, *, chat_id: int, user_id: int, invite_url: str | None) -> None:
-    """Credit a real join/rejoin made through the exact active OP invite."""
     if not invite_url:
+        logger.info("MANUAL_OP_CREDIT_SKIP chat_id=%s user_id=%s reason=no_invite_url", chat_id, user_id)
         return
     ops = list((await session.execute(select(AdvertisingManualOp).where(
         AdvertisingManualOp.target_chat_id == chat_id,
@@ -53,6 +57,7 @@ async def _credit_manual_op_join(session: AsyncSession, *, chat_id: int, user_id
         AdvertisingManualOp.status == "active",
         or_(AdvertisingManualOp.mode == "unlimited", AdvertisingManualOp.mode == "days", and_(AdvertisingManualOp.mode == "subscribers", AdvertisingManualOp.progress_count < AdvertisingManualOp.quantity)),
     ).with_for_update())).scalars().all())
+    logger.info("MANUAL_OP_CREDIT_LOOKUP chat_id=%s user_id=%s invite_url=%r matched_ops=%s", chat_id, user_id, invite_url, [op.id for op in ops])
     for op in ops:
         credit = (await session.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id == op.id, AdvertisingManualOpCredit.user_id == user_id).with_for_update())).scalar_one_or_none()
         if credit is None:
@@ -60,33 +65,33 @@ async def _credit_manual_op_join(session: AsyncSession, *, chat_id: int, user_id
             session.add(AdvertisingManualOpCredit(op_id=op.id, user_id=user_id, satisfied=True, counted=counted, reason="invite_link_join"))
             if counted:
                 op.progress_count = min(op.progress_count + 1, op.quantity)
+            logger.info("MANUAL_OP_CREDIT_ADD op_id=%s chat_id=%s user_id=%s counted=%s progress=%s quantity=%s", op.id, chat_id, user_id, counted, op.progress_count, op.quantity)
         else:
             credit.satisfied = True
             credit.reason = "invite_link_rejoin"
+            added = False
             if op.mode == "subscribers" and not credit.counted and op.progress_count < op.quantity:
                 credit.counted = True
                 op.progress_count += 1
+                added = True
+            logger.info("MANUAL_OP_CREDIT_REJOIN op_id=%s chat_id=%s user_id=%s added=%s progress=%s quantity=%s", op.id, chat_id, user_id, added, op.progress_count, op.quantity)
 
 
 async def _uncount_manual_op_leave(session: AsyncSession, *, chat_id: int, user_id: int) -> None:
-    """Immediately remove campaign credit when a counted subscriber leaves target B."""
     rows = list((await session.execute(
         select(AdvertisingManualOpCredit, AdvertisingManualOp)
         .join(AdvertisingManualOp, AdvertisingManualOp.id == AdvertisingManualOpCredit.op_id)
-        .where(
-            AdvertisingManualOp.target_chat_id == chat_id,
-            AdvertisingManualOp.status == "active",
-            AdvertisingManualOpCredit.user_id == user_id,
-            AdvertisingManualOpCredit.counted.is_(True),
-        )
+        .where(AdvertisingManualOp.target_chat_id == chat_id, AdvertisingManualOp.status == "active", AdvertisingManualOpCredit.user_id == user_id, AdvertisingManualOpCredit.counted.is_(True))
         .with_for_update()
     )).all())
+    logger.info("MANUAL_OP_LEAVE_LOOKUP chat_id=%s user_id=%s matched_ops=%s", chat_id, user_id, [op.id for _, op in rows])
     for credit, op in rows:
         if op.mode == "subscribers":
             op.progress_count = max(op.progress_count - 1, 0)
         credit.counted = False
         credit.satisfied = False
         credit.reason = "left"
+        logger.info("MANUAL_OP_CREDIT_REMOVE op_id=%s chat_id=%s user_id=%s progress=%s", op.id, chat_id, user_id, op.progress_count)
 
 
 async def _drop_stale_assignment(session: AsyncSession, *, chat_id: int, user_id: int, status: str) -> None:
@@ -139,15 +144,17 @@ def create_member_status_sync_router(session_factory: async_sessionmaker[AsyncSe
         new_status = _member_status(event.new_chat_member)
         raw_old = _status_value(event.old_chat_member)
         raw_new = _status_value(event.new_chat_member)
-        if old_status == new_status and raw_old == raw_new:
-            return
+        invite_url = getattr(getattr(event, "invite_link", None), "invite_link", None)
         rejoined = old_status != MemberStatus.member.value and new_status == MemberStatus.member.value
         left = old_status == MemberStatus.member.value and new_status in {MemberStatus.left.value, MemberStatus.banned.value}
-        invite_url = getattr(getattr(event, "invite_link", None), "invite_link", None)
+        logger.info("MANUAL_OP_MEMBER_EVENT chat_id=%s user_id=%s raw_old=%s raw_new=%s old=%s new=%s rejoined=%s left=%s invite_present=%s invite_url=%r", event.chat.id, user.id, raw_old, raw_new, old_status, new_status, rejoined, left, bool(invite_url), invite_url)
+        if old_status == new_status and raw_old == raw_new:
+            return
         async with session_factory() as session:
             async with session.begin():
                 known_group = (await session.execute(select(Group.chat_id).where(Group.chat_id == event.chat.id))).scalar_one_or_none()
                 if known_group is None:
+                    logger.info("MANUAL_OP_MEMBER_SKIP chat_id=%s user_id=%s reason=unknown_group", event.chat.id, user.id)
                     return
                 await upsert_user(session, user)
                 actor_id = None
@@ -155,8 +162,11 @@ def create_member_status_sync_router(session_factory: async_sessionmaker[AsyncSe
                     await upsert_user(session, event.from_user)
                     actor_id = event.from_user.id
                 await _store_member_status(session, chat_id=event.chat.id, user=user, status=new_status, rejoined=rejoined)
-                if rejoined and invite_url:
-                    await _credit_manual_op_join(session, chat_id=event.chat.id, user_id=user.id, invite_url=invite_url)
+                if rejoined:
+                    if invite_url:
+                        await _credit_manual_op_join(session, chat_id=event.chat.id, user_id=user.id, invite_url=invite_url)
+                    else:
+                        logger.info("MANUAL_OP_CREDIT_SKIP chat_id=%s user_id=%s reason=rejoin_without_invite", event.chat.id, user.id)
                 if left:
                     await _uncount_manual_op_leave(session, chat_id=event.chat.id, user_id=user.id)
                 removed_special_statuses: list[str] = []
