@@ -13,6 +13,12 @@ _CMD_RE=re.compile(r"(?i)^\s*подключить\s+рекламу\s+(\S+)(?:\s+
 def _mode(q,u):return "unlimited" if q is None else ("days" if (u or "").lower().startswith("д") else "subscribers")
 def _condition(mode,q):return "бессрочно" if mode=="unlimited" else (f"{q} дней" if mode=="days" else f"{q:,} участников".replace(","," "))
 def _is_tg(v):return bool(re.match(r"(?i)^https?://t\.me/(?:\+[A-Za-z0-9_-]+|[A-Za-z0-9_]{5,})/?$",v)) or v.startswith("@")
+def _invite_name(source_title:str|None=None)->str:
+ base="Mimorus OP"
+ if not source_title:return base
+ title=" ".join(source_title.split())
+ # Telegram invite-link names are limited; keep the stable prefix and source identity.
+ return f"{base} • {title}"[:32]
 async def _owner(s,chat_id,user_id):return (await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==chat_id,GroupOwner.user_id==user_id,GroupOwner.is_current.is_(True)).limit(1))).scalar_one_or_none() is not None
 async def _source_allowed(s,chat_id,user_id):return await _owner(s,chat_id,user_id) and (await s.execute(select(Group.status).where(Group.chat_id==chat_id))).scalar_one_or_none()==GroupStatus.active.value and await active_subscription_for_group(s,chat_id) is not None
 async def _bot_admin(bot,chat_id):
@@ -41,7 +47,7 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
    if not await _owner(s,m.chat.id,m.from_user.id):await m.reply("Создать рекламную ссылку может только владелец этой группы.");return
    if (await s.execute(select(Group.status).where(Group.chat_id==m.chat.id))).scalar_one_or_none()!=GroupStatus.active.value:await m.reply("⛔ Эта группа сейчас недоступна для рекламы.");return
   if not await _bot_admin(bot,m.chat.id):await m.reply("⛔ Mimorus должен быть администратором этой группы.");return
-  try:inv=await bot.create_chat_invite_link(m.chat.id,name="Mimorus advertising")
+  try:inv=await bot.create_chat_invite_link(m.chat.id,name=_invite_name(),expire_date=None,member_limit=None)
   except Exception:await m.reply("⛔ Не удалось создать ссылку. Дайте Mimorus право создавать пригласительные ссылки.");return
   mode=_mode(q,u);title=m.chat.title or str(m.chat.id)
   async with sf() as s:
@@ -75,11 +81,15 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
    if not await _source_allowed(s,m.chat.id,m.from_user.id):await m.reply("Подключать ОП может владелец активной группы с действующей подпиской Mimorus.");return
   if target_id==m.chat.id:await m.reply("Нельзя подключить рекламу группы на саму себя.");return
   if not await _bot_admin(bot,target_id):await m.reply("⛔ ОП не включена: Mimorus должен быть администратором рекламной группы Б.");return
+  # The invite is created in B as "Mimorus OP" and, once A activates it, renamed to identify A.
+  if link:
+   try:await bot.edit_chat_invite_link(target_id,target,name=_invite_name(m.chat.title or str(m.chat.id)),expire_date=None,member_limit=None)
+   except Exception:await m.reply("⛔ ОП не включена: Mimorus не смог подготовить рекламную ссылку. Проверьте право бота управлять пригласительными ссылками.");return
   now=datetime.now(timezone.utc)
   async with sf() as s:
    async with s.begin():s.add(AdvertisingManualOp(source_chat_id=m.chat.id,owner_user_id=m.from_user.id,target_chat_id=target_id,target_url=target,target_title=title,mode=requested_mode,quantity=q or 0,ends_at=now+timedelta(days=q) if requested_mode=="days" and q else None))
   warning="\n⚠️ Реклама бессрочная: срок или количество участников не указаны." if requested_mode=="unlimited" else ""
-  await m.reply(f"✅ <b>ОП подключена</b>\n🏠 {escape(title)}\n📍 Условие: {_condition(requested_mode,q or 0)}{warning}",parse_mode="HTML",disable_web_page_preview=True)
+  await m.reply(f"✅ <b>ОП подключена</b>\n🏠 {escape(title)}\n🔗 Ссылка: <code>{escape(target)}</code>\n📍 Условие: {_condition(requested_mode,q or 0)}{warning}",parse_mode="HTML",disable_web_page_preview=True)
  async def render(chat_id):
   now=datetime.now(timezone.utc)
   async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity),AdvertisingManualOp.mode=="unlimited")).order_by(AdvertisingManualOp.id))).scalars().all())
