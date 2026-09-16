@@ -20,9 +20,18 @@ async def _revoke(bot,op):
  try:await bot.revoke_chat_invite_link(op.target_chat_id,op.target_url)
  except Exception:pass
 async def _delete_registered_link(s:AsyncSession,op:AdvertisingManualOp)->None:
- # Every /ссылка is campaign-specific. Once that OP is finished/stopped,
- # remove the registration as well as revoking the Telegram invite.
  await s.execute(delete(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))
+async def _cleanup_finished_links(s:AsyncSession)->int:
+ # Manual stop callbacks revoke the Telegram invite immediately. The lifecycle
+ # also removes its DB registration, while preserving links that were created
+ # but have never yet been used in an OP.
+ links=list((await s.execute(select(AdvertisingManualLink))).scalars().all());removed=0
+ for link in links:
+  active=(await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url==link.invite_url,AdvertisingManualOp.status=="active").limit(1))).scalar_one_or_none()
+  if active is not None:continue
+  finished=(await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url==link.invite_url,AdvertisingManualOp.status.in_(("completed","stopped"))).limit(1))).scalar_one_or_none()
+  if finished is not None:await s.delete(link);removed+=1
+ return removed
 async def _bot_admin(bot,chat_id):
  try:m=await bot.get_chat_member(chat_id,(await bot.get_me()).id);return m.status in {"administrator","creator"}
  except Exception:return False
@@ -54,6 +63,8 @@ async def run_advertising_manual_lifecycle_once(bot:Bot,session_factory:async_se
     locked=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==op.id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none()
     if locked is not None:locked.status="stopped";locked.completed_at=now;await _delete_registered_link(s,locked);changed+=1
   await _revoke(bot,op)
+ async with session_factory() as s:
+  async with s.begin():changed+=await _cleanup_finished_links(s)
  return changed
 async def advertising_manual_lifecycle_worker(bot:Bot,session_factory:async_sessionmaker[AsyncSession],*,interval_seconds:int=30)->None:
  while True:
