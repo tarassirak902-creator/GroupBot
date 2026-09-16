@@ -17,7 +17,6 @@ def _invite_name(source_title:str|None=None)->str:
  base="Mimorus OP"
  if not source_title:return base
  title=" ".join(source_title.split())
- # Telegram invite-link names are limited; keep the stable prefix and source identity.
  return f"{base} • {title}"[:32]
 async def _owner(s,chat_id,user_id):return (await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==chat_id,GroupOwner.user_id==user_id,GroupOwner.is_current.is_(True)).limit(1))).scalar_one_or_none() is not None
 async def _source_allowed(s,chat_id,user_id):return await _owner(s,chat_id,user_id) and (await s.execute(select(Group.status).where(Group.chat_id==chat_id))).scalar_one_or_none()==GroupStatus.active.value and await active_subscription_for_group(s,chat_id) is not None
@@ -25,7 +24,6 @@ async def _bot_admin(bot,chat_id):
  try:m=await bot.get_chat_member(chat_id,(await bot.get_me()).id);return m.status in {"administrator","creator"}
  except Exception:return False
 async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:int,target_title:str,user_id:int,reason:str)->None:
- """Credit subscriber campaigns only when Telegram identifies this OP's invite."""
  if not invite_url:return
  ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.target_chat_id==target_chat_id,AdvertisingManualOp.target_url==invite_url,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",AdvertisingManualOp.mode=="days",and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).with_for_update())).scalars().all())
  for op in ops:
@@ -36,6 +34,7 @@ async def _bind_and_credit(s:AsyncSession,*,invite_url:str|None,target_chat_id:i
   else:
    credit.satisfied=True;credit.reason=reason
    if op.mode=="subscribers" and not credit.counted and op.progress_count<op.quantity:credit.counted=True;op.progress_count+=1
+
 def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Router:
  r=Router(name="advertising_manual_op")
  @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(_LINK_RE))
@@ -54,6 +53,7 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
    async with s.begin():s.add(AdvertisingManualLink(target_chat_id=m.chat.id,owner_user_id=m.from_user.id,invite_url=inv.invite_link,target_title=title,mode=mode,quantity=q or 0))
   suffix="" if mode=="unlimited" else (f" {q} дней" if mode=="days" else f" {q} уч")
   await m.reply(f"🔗 <b>Рекламная ссылка создана</b>\n\n<code>Подключить рекламу {escape(inv.invite_link)}{suffix}</code>\n\n{'♾️' if mode=='unlimited' else ('📅' if mode=='days' else '👥')} Условие: <b>{_condition(mode,q or 0)}</b>\n\nПередайте этот текст владельцу группы, где хотите включить ОП.",parse_mode="HTML",disable_web_page_preview=True)
+
  @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(_PREFIX_RE))
  async def connect(m:Message,bot:Bot):
   if not m.from_user:return
@@ -81,7 +81,6 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
    if not await _source_allowed(s,m.chat.id,m.from_user.id):await m.reply("Подключать ОП может владелец активной группы с действующей подпиской Mimorus.");return
   if target_id==m.chat.id:await m.reply("Нельзя подключить рекламу группы на саму себя.");return
   if not await _bot_admin(bot,target_id):await m.reply("⛔ ОП не включена: Mimorus должен быть администратором рекламной группы Б.");return
-  # The invite is created in B as "Mimorus OP" and, once A activates it, renamed to identify A.
   if link:
    try:await bot.edit_chat_invite_link(target_id,target,name=_invite_name(m.chat.title or str(m.chat.id)),expire_date=None,member_limit=None)
    except Exception:await m.reply("⛔ ОП не включена: Mimorus не смог подготовить рекламную ссылку. Проверьте право бота управлять пригласительными ссылками.");return
@@ -90,19 +89,75 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
    async with s.begin():s.add(AdvertisingManualOp(source_chat_id=m.chat.id,owner_user_id=m.from_user.id,target_chat_id=target_id,target_url=target,target_title=title,mode=requested_mode,quantity=q or 0,ends_at=now+timedelta(days=q) if requested_mode=="days" and q else None))
   warning="\n⚠️ Реклама бессрочная: срок или количество участников не указаны." if requested_mode=="unlimited" else ""
   await m.reply(f"✅ <b>ОП подключена</b>\n🏠 {escape(title)}\n🔗 Ссылка: <code>{escape(target)}</code>\n📍 Условие: {_condition(requested_mode,q or 0)}{warning}",parse_mode="HTML",disable_web_page_preview=True)
- async def render(chat_id):
+
+ def menu_kb():
+  return InlineKeyboardMarkup(inline_keyboard=[
+   [InlineKeyboardButton(text="📤 Мы рекламируем",callback_data="ads:menu:out")],
+   [InlineKeyboardButton(text="📥 Нас рекламируют",callback_data="ads:menu:in")],
+   [InlineKeyboardButton(text="🔗 Мои ссылки",callback_data="ads:menu:links")],
+  ])
+ async def menu_text(chat_id:int)->str:
   now=datetime.now(timezone.utc)
-  async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity),AdvertisingManualOp.mode=="unlimited")).order_by(AdvertisingManualOp.id))).scalars().all())
-  if not ops:return "📭 Активных ОП сейчас нет.",None
-  lines=[f"✅ <b>Ваши активные ОП: {len(ops)}</b>",""];buttons=[]
-  for i,op in enumerate(ops,1):lines += [f"{i}️⃣ {escape(op.target_url)}",f"┣ 🆔 {op.target_chat_id}",f"┣ 🅰️ {escape(op.target_title)}",(f"┗ 📍 Цель: {op.progress_count:,}/{op.quantity:,} подписчиков".replace(","," ") if op.mode=="subscribers" else f"┗ 🕐 Активна до: {op.ends_at.strftime('%d.%m.%Y %H:%M') if op.ends_at else '♾️'}"),""];buttons.append(InlineKeyboardButton(text=f"❌ ОТКЛ №{i}",callback_data=f"ads:manual:off:{op.id}"))
-  return "\n".join(lines).rstrip(),InlineKeyboardMarkup(inline_keyboard=[buttons[i:i+2] for i in range(0,len(buttons),2)])
+  async with sf() as s:
+   outgoing=len(list((await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))))).scalars().all()))
+   incoming=len(list((await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))))).scalars().all()))
+   links=len(list((await s.execute(select(AdvertisingManualLink.id).where(AdvertisingManualLink.target_chat_id==chat_id))).scalars().all()))
+  return f"📢 <b>Реклама группы</b>\n\n📤 Мы рекламируем: <b>{outgoing}</b>\n📥 Нас рекламируют: <b>{incoming}</b>\n🔗 Создано ссылок: <b>{links}</b>\n\nВыберите раздел:"
+ async def render_out(chat_id:int):
+  now=datetime.now(timezone.utc)
+  async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
+  lines=["📤 <b>Мы рекламируем</b>",""]
+  rows=[]
+  if not ops:lines.append("📭 Активных ОП сейчас нет.")
+  for i,op in enumerate(ops,1):
+   state=(f"{op.progress_count:,}/{op.quantity:,} подписчиков".replace(","," ") if op.mode=="subscribers" else (f"до {op.ends_at.strftime('%d.%m.%Y %H:%M')}" if op.mode=="days" and op.ends_at else "бессрочно"))
+   lines += [f"{i}️⃣ <b>{escape(op.target_title)}</b>",f"┣ 🆔 {op.target_chat_id}",f"┣ 📍 {state}",f"┗ 🔗 <code>{escape(op.target_url)}</code>",""]
+   rows.append([InlineKeyboardButton(text=f"⛔ Отключить №{i}",callback_data=f"ads:manual:off:{op.id}")])
+  rows.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="ads:menu:back")])
+  return "\n".join(lines).rstrip(),InlineKeyboardMarkup(inline_keyboard=rows)
+ async def render_in(chat_id:int):
+  now=datetime.now(timezone.utc)
+  async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.target_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
+  lines=["📥 <b>Нас рекламируют</b>",""]
+  rows=[]
+  if not ops:lines.append("📭 Сейчас вашу группу никто не рекламирует.")
+  for i,op in enumerate(ops,1):
+   state=(f"{op.progress_count:,}/{op.quantity:,} подписчиков".replace(","," ") if op.mode=="subscribers" else (f"до {op.ends_at.strftime('%d.%m.%Y %H:%M')}" if op.mode=="days" and op.ends_at else "бессрочно"))
+   lines += [f"{i}️⃣ <b>ОП из группы {op.source_chat_id}</b>",f"┣ 📍 {state}",f"┗ 🔗 <code>{escape(op.target_url)}</code>",""]
+   rows.append([InlineKeyboardButton(text=f"⛔ Завершить №{i}",callback_data=f"ads:target:off:{op.id}")])
+  rows.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="ads:menu:back")])
+  return "\n".join(lines).rstrip(),InlineKeyboardMarkup(inline_keyboard=rows)
+ async def render_links(chat_id:int):
+  async with sf() as s:
+   links=list((await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.target_chat_id==chat_id).order_by(AdvertisingManualLink.id.desc()).limit(30))).scalars().all())
+   active_urls=set((await s.execute(select(AdvertisingManualOp.target_url).where(AdvertisingManualOp.target_chat_id==chat_id,AdvertisingManualOp.status=="active"))).scalars().all())
+  lines=["🔗 <b>Мои рекламные ссылки</b>",""]
+  if not links:lines.append("📭 Рекламных ссылок ещё нет.\nСоздайте первую командой <code>/ссылка</code>.")
+  for i,link in enumerate(links,1):
+   used=link.invite_url in active_urls
+   lines += [f"{i}️⃣ <code>{escape(link.invite_url)}</code>",f"┣ 🎯 {_condition(link.mode,link.quantity)}",f"┗ {'🟢 Используется в активной ОП' if used else '⚪ Сейчас не используется'}",""]
+  kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад",callback_data="ads:menu:back")]])
+  return "\n".join(lines).rstrip(),kb
+
  @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(r"(?i)^\s*реклама\s*$"))
  async def show(m:Message):
   if not m.from_user:return
   async with sf() as s:
-   if not await _source_allowed(s,m.chat.id,m.from_user.id):return
-  text,kb=await render(m.chat.id);await m.answer(text,parse_mode="HTML",disable_web_page_preview=True,reply_markup=kb)
+   if not await _owner(s,m.chat.id,m.from_user.id):return
+  await m.answer(await menu_text(m.chat.id),parse_mode="HTML",reply_markup=menu_kb())
+
+ @r.callback_query(F.data.in_({"ads:menu:out","ads:menu:in","ads:menu:links","ads:menu:back"}))
+ async def navigate(c:CallbackQuery):
+  if not c.message:return
+  chat_id=c.message.chat.id
+  async with sf() as s:
+   if not await _owner(s,chat_id,c.from_user.id):await c.answer("Доступно только владельцу группы.",show_alert=True);return
+  if c.data=="ads:menu:back":text,kb=await menu_text(chat_id),menu_kb()
+  elif c.data=="ads:menu:out":text,kb=await render_out(chat_id)
+  elif c.data=="ads:menu:in":text,kb=await render_in(chat_id)
+  else:text,kb=await render_links(chat_id)
+  await c.message.edit_text(text,parse_mode="HTML",disable_web_page_preview=True,reply_markup=kb);await c.answer()
+
  @r.callback_query(F.data.regexp(r"^ads:manual:off:\d+$"))
  async def stop(c:CallbackQuery):
   oid=int((c.data or "").rsplit(":",1)[1]);now=datetime.now(timezone.utc)
@@ -113,6 +168,19 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
     op.status="stopped";op.completed_at=now;cid=op.source_chat_id;target_id=op.target_chat_id;url=op.target_url
   try:await c.bot.revoke_chat_invite_link(target_id,url)
   except Exception:pass
-  if c.message:text,kb=await render(cid);await c.message.edit_text(text,parse_mode="HTML",disable_web_page_preview=True,reply_markup=kb)
+  if c.message:text,kb=await render_out(cid);await c.message.edit_text(text,parse_mode="HTML",disable_web_page_preview=True,reply_markup=kb)
   await c.answer("ОП отключена")
+
+ @r.callback_query(F.data.regexp(r"^ads:target:off:\d+$"))
+ async def target_stop(c:CallbackQuery):
+  oid=int((c.data or "").rsplit(":",1)[1]);now=datetime.now(timezone.utc)
+  async with sf() as s:
+   async with s.begin():
+    op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==oid).with_for_update())).scalar_one_or_none()
+    if op is None or op.status!="active" or not await _owner(s,op.target_chat_id,c.from_user.id):await c.answer("ОП недоступна.",show_alert=True);return
+    op.status="stopped";op.completed_at=now;target_id=op.target_chat_id;url=op.target_url
+  try:await c.bot.revoke_chat_invite_link(target_id,url)
+  except Exception:pass
+  if c.message:text,kb=await render_in(target_id);await c.message.edit_text(text,parse_mode="HTML",disable_web_page_preview=True,reply_markup=kb)
+  await c.answer("ОП завершена")
  return r
