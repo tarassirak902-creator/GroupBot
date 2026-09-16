@@ -18,21 +18,11 @@ def _is_member(status: str, member) -> bool:
     )
 
 
-async def _track_manual_leave(
-    session: AsyncSession,
-    *,
-    target_chat_id: int,
-    user_id: int,
-    new_status: str,
-) -> None:
+async def _track_manual_leave(session: AsyncSession, *, target_chat_id: int, user_id: int, new_status: str) -> None:
     credits = list((await session.execute(
         select(AdvertisingManualOpCredit, AdvertisingManualOp)
         .join(AdvertisingManualOp, AdvertisingManualOp.id == AdvertisingManualOpCredit.op_id)
-        .where(
-            AdvertisingManualOp.target_chat_id == target_chat_id,
-            AdvertisingManualOp.status == "active",
-            AdvertisingManualOpCredit.user_id == user_id,
-        )
+        .where(AdvertisingManualOp.target_chat_id == target_chat_id, AdvertisingManualOp.status == "active", AdvertisingManualOpCredit.user_id == user_id)
         .with_for_update()
     )).all())
     for credit, op in credits:
@@ -40,7 +30,7 @@ async def _track_manual_leave(
             credit.satisfied = True
             credit.reason = "restricted"
             continue
-        if new_status != "left" or credit.reason != "joined":
+        if new_status != "left" or credit.reason not in {"joined", "join_request"}:
             continue
         if credit.counted and op.mode == "subscribers":
             op.progress_count = max(op.progress_count - 1, 0)
@@ -56,8 +46,7 @@ def create_advertising_mutual_tracking_router(session_factory: async_sessionmake
     async def manual_private_entry(callback: CallbackQuery) -> None:
         async with session_factory() as session:
             rows = (await session.execute(
-                select(Group.chat_id, Group.title)
-                .join(GroupOwner, GroupOwner.chat_id == Group.chat_id)
+                select(Group.chat_id, Group.title).join(GroupOwner, GroupOwner.chat_id == Group.chat_id)
                 .where(GroupOwner.user_id == callback.from_user.id, GroupOwner.is_current.is_(True), Group.status == GroupStatus.active.value)
                 .order_by(Group.title, Group.chat_id)
             )).all()
@@ -68,7 +57,6 @@ def create_advertising_mutual_tracking_router(session_factory: async_sessionmake
 
     @router.chat_join_request()
     async def track_join_request(event: ChatJoinRequest) -> None:
-        """A request counts only when Telegram says it came through this campaign link."""
         if event.from_user.is_bot or event.invite_link is None:
             return
         invite = event.invite_link.invite_link
@@ -76,14 +64,7 @@ def create_advertising_mutual_tracking_router(session_factory: async_sessionmake
             async with session.begin():
                 await upsert_user(session, event.from_user)
                 from groupbot.routers.advertising_manual_op import _bind_and_credit
-                await _bind_and_credit(
-                    session,
-                    invite_url=invite,
-                    target_chat_id=event.chat.id,
-                    target_title=event.chat.title or "Рекламная группа",
-                    user_id=event.from_user.id,
-                    reason="join_request",
-                )
+                await _bind_and_credit(session, invite_url=invite, target_chat_id=event.chat.id, target_title=event.chat.title or "Рекламная группа", user_id=event.from_user.id, reason="join_request")
 
     @router.chat_member()
     async def track(event: ChatMemberUpdated) -> None:
@@ -107,7 +88,8 @@ def create_advertising_mutual_tracking_router(session_factory: async_sessionmake
                     )).scalars().all())
                     if previous:
                         for member in previous:
-                            member.is_active = True; member.left_at = None
+                            member.is_active = True
+                            member.left_at = None
                         return
                     if not invite:
                         return
@@ -122,7 +104,8 @@ def create_advertising_mutual_tracking_router(session_factory: async_sessionmake
                         .where(AdvertisingMutualOpDirection.target_chat_id == event.chat.id, AdvertisingMutualOpDirection.status == "active", AdvertisingMutualOpMember.user_id == user.id, AdvertisingMutualOpMember.is_active.is_(True)).with_for_update()
                     )).scalars().all())
                     for member in rows:
-                        member.is_active = False; member.left_at = event.date
+                        member.is_active = False
+                        member.left_at = event.date
 
     from groupbot.routers.advertising_manual_op import create_advertising_manual_op_router
     router.include_router(create_advertising_manual_op_router(session_factory))
