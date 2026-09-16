@@ -9,17 +9,18 @@ from groupbot.advertising_manual_models import AdvertisingManualLink,Advertising
 from groupbot.models import Group,GroupOwner,GroupStatus
 from groupbot.services.subscriptions import active_subscription_for_group
 logger=logging.getLogger(__name__)
+NAVIGATION_LINK_MODE="navigation"
 
-def _group_link(chat_id:int,title:str)->str:
- return f'<a href="https://t.me/MimorusBot?startgroup=manage_{abs(chat_id)}">{escape(title)}</a>'
+def _group_link(title:str,url:str|None)->str:
+ return f'<a href="{escape(url,quote=True)}">{escape(title)}</a>' if url else escape(title)
 
 def _result_text(op):
  if op.mode=="subscribers":return f"🎯 Цель достигнута: <b>{op.progress_count:,}/{op.quantity:,} подписчиков</b>".replace(","," ")
  if op.mode=="days":return f"⏱ Срок рекламы завершён: <b>{op.quantity} дней</b>"
  return "✅ Реклама завершена."
 
-def _completion_text(op,source_title,target_title,recipient_kind):
- source=_group_link(op.source_chat_id,source_title);target=_group_link(op.target_chat_id,target_title) if op.target_chat_id is not None else escape(target_title);result=_result_text(op)
+def _completion_text(op,source_title,target_title,source_url,target_url,recipient_kind):
+ source=_group_link(source_title,source_url);target=_group_link(target_title,target_url);result=_result_text(op)
  if recipient_kind=="both":
   body=f"📢 Реклама между вашими группами завершена.\n\n📤 Рекламировала: {source}\n📥 Рекламировалась: {target}\n\n{result}\n\n🔗 Индивидуальная рекламная ссылка удалена."
  elif recipient_kind=="source":
@@ -28,15 +29,14 @@ def _completion_text(op,source_title,target_title,recipient_kind):
   body=f"📢 {source} завершила рекламу вашей группы.\n\n📤 Рекламировала: {source}\n📥 Рекламировалась: {target}\n\n{result}\n\n🔗 Индивидуальная рекламная ссылка удалена."
  return f"✅ <b>Реклама завершена</b>\n\n{body}"
 
-async def _notify(bot,op,source_title,target_title,source_owner_id,target_owner_id):
- if source_owner_id is not None and source_owner_id==target_owner_id:
-  recipients=[(source_owner_id,"both")]
+async def _notify(bot,op,source_title,target_title,source_url,target_url,source_owner_id,target_owner_id):
+ if source_owner_id is not None and source_owner_id==target_owner_id:recipients=[(source_owner_id,"both")]
  else:
   recipients=[]
   if source_owner_id is not None:recipients.append((source_owner_id,"source"))
   if target_owner_id is not None:recipients.append((target_owner_id,"target"))
  for uid,kind in recipients:
-  try:await bot.send_message(uid,_completion_text(op,source_title,target_title,kind),parse_mode="HTML",disable_web_page_preview=True)
+  try:await bot.send_message(uid,_completion_text(op,source_title,target_title,source_url,target_url,kind),parse_mode="HTML",disable_web_page_preview=True)
   except Exception:logger.exception("Could not notify manual advertising completion op=%s user=%s",op.id,uid)
 async def _revoke(bot,op):
  if op.target_chat_id is None:return
@@ -44,9 +44,13 @@ async def _revoke(bot,op):
  except Exception:pass
 async def _delete_registered_link(s:AsyncSession,op:AdvertisingManualOp)->None:
  await s.execute(delete(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))
+async def _navigation_url(s:AsyncSession,chat_id:int|None)->str|None:
+ if chat_id is None:return None
+ return (await s.execute(select(AdvertisingManualLink.invite_url).where(AdvertisingManualLink.target_chat_id==chat_id,AdvertisingManualLink.mode==NAVIGATION_LINK_MODE).order_by(AdvertisingManualLink.id).limit(1))).scalar_one_or_none()
 async def _cleanup_finished_links(s:AsyncSession)->int:
  links=list((await s.execute(select(AdvertisingManualLink))).scalars().all());removed=0
  for link in links:
+  if link.mode==NAVIGATION_LINK_MODE:continue
   active=(await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url==link.invite_url,AdvertisingManualOp.status=="active").limit(1))).scalar_one_or_none()
   if active is not None:continue
   finished=(await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url==link.invite_url,AdvertisingManualOp.status.in_(("completed","stopped"))).limit(1))).scalar_one_or_none()
@@ -67,11 +71,11 @@ async def run_advertising_manual_lifecycle_once(bot:Bot,session_factory:async_se
     if op.target_chat_id is not None:
      target_status=(await s.execute(select(Group.status).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none();target_owner=(await s.execute(select(GroupOwner.user_id).where(GroupOwner.chat_id==op.target_chat_id,GroupOwner.is_current.is_(True)))).scalar_one_or_none();link=(await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.invite_url==op.target_url))).scalar_one_or_none();target_ok=target_status==GroupStatus.active.value and target_owner is not None and (link is None or link.owner_user_id==target_owner)
     if completed:
-     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id);target_title=(await s.execute(select(Group.title).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none() if op.target_chat_id is not None else None;target_title=target_title or op.target_title;op.status="completed";op.completed_at=now;await _delete_registered_link(s,op);notifications.append((op,source_title,target_title,source_owner,target_owner));revoke.append(op);changed+=1;continue
+     source_title=(await s.execute(select(Group.title).where(Group.chat_id==op.source_chat_id))).scalar_one_or_none() or str(op.source_chat_id);target_title=(await s.execute(select(Group.title).where(Group.chat_id==op.target_chat_id))).scalar_one_or_none() if op.target_chat_id is not None else None;target_title=target_title or op.target_title;source_url=await _navigation_url(s,op.source_chat_id);target_url=await _navigation_url(s,op.target_chat_id);op.status="completed";op.completed_at=now;await _delete_registered_link(s,op);notifications.append((op,source_title,target_title,source_url,target_url,source_owner,target_owner));revoke.append(op);changed+=1;continue
     if not source_ok or not target_ok:
      op.status="stopped";op.completed_at=now;await _delete_registered_link(s,op);revoke.append(op);changed+=1
  for op in revoke:await _revoke(bot,op)
- for op,source_title,target_title,source_owner,target_owner in notifications:await _notify(bot,op,source_title,target_title,source_owner,target_owner)
+ for op,source_title,target_title,source_url,target_url,source_owner,target_owner in notifications:await _notify(bot,op,source_title,target_title,source_url,target_url,source_owner,target_owner)
  async with session_factory() as s:
   active=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.status=="active",AdvertisingManualOp.target_chat_id.is_not(None)))).scalars().all())
  for op in active:
