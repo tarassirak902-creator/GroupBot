@@ -93,11 +93,14 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
     try:c=await bot.get_chat(target if target.startswith("@") else "@"+target.rstrip("/").rsplit("/",1)[-1]);target_id,title=c.id,c.title or target
     except Exception:await m.reply("Не удалось определить Telegram-группу или канал.");return
   if target_id==m.chat.id:await m.reply("Нельзя подключить рекламу группы на саму себя.");return
+  now=datetime.now(timezone.utc)
+  async with sf() as s:
+   duplicate=(await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.source_chat_id==m.chat.id,AdvertisingManualOp.target_chat_id==target_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).limit(1))).scalar_one_or_none()
+  if duplicate is not None:await m.reply("⚠️ Данная группа/канал уже подключена в вашей группе!");return
   if not await _bot_admin(bot,target_id):await m.reply("⛔ ОП не включена: Mimorus должен быть администратором рекламной группы Б.");return
   if link:
    try:await bot.edit_chat_invite_link(target_id,target,name=_invite_name(m.chat.title or str(m.chat.id)),expire_date=None,member_limit=None)
    except Exception:await m.reply("⛔ ОП не включена: Mimorus не смог подготовить рекламную ссылку. Проверьте право бота управлять пригласительными ссылками.");return
-  now=datetime.now(timezone.utc)
   async with sf() as s:
    async with s.begin():s.add(AdvertisingManualOp(source_chat_id=m.chat.id,owner_user_id=owner_id or m.from_user.id,target_chat_id=target_id,target_url=target,target_title=title,mode=requested_mode,quantity=q or 0,ends_at=now+timedelta(days=q) if requested_mode=="days" and q else None))
   warning="\n⚠️ Реклама бессрочная: срок или количество участников не указаны." if requested_mode=="unlimited" else ""
