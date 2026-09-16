@@ -106,7 +106,7 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
  async def render_out(chat_id:int):
   now=datetime.now(timezone.utc)
   async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
-  lines=["📤 <b>Мы рекламируем</b>",""]
+  lines=["📤 <b>Мы рекламируем</b>,""]
   rows=[]
   if not ops:lines.append("📭 Активных ОП сейчас нет.")
   for i,op in enumerate(ops,1):
@@ -131,13 +131,16 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
   async with sf() as s:
    links=list((await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.target_chat_id==chat_id).order_by(AdvertisingManualLink.id.desc()).limit(30))).scalars().all())
    active_urls=set((await s.execute(select(AdvertisingManualOp.target_url).where(AdvertisingManualOp.target_chat_id==chat_id,AdvertisingManualOp.status=="active"))).scalars().all())
-  lines=["🔗 <b>Мои рекламные ссылки</b>",""]
+  lines=["🔗 <b>Мои рекламные ссылки</b>,""]
+  rows=[]
   if not links:lines.append("📭 Рекламных ссылок ещё нет.\nСоздайте первую командой <code>/ссылка</code>.")
   for i,link in enumerate(links,1):
    used=link.invite_url in active_urls
    lines += [f"{i}️⃣ <code>{escape(link.invite_url)}</code>",f"┣ 🎯 {_condition(link.mode,link.quantity)}",f"┗ {'🟢 Используется в активной ОП' if used else '⚪ Сейчас не используется'}",""]
-  kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад",callback_data="ads:menu:back")]])
-  return "\n".join(lines).rstrip(),kb
+   if not used:rows.append(InlineKeyboardButton(text=f"🗑 Удалить №{i}",callback_data=f"ads:link:delete:{link.id}"))
+  button_rows=[rows[i:i+2] for i in range(0,len(rows),2)]
+  button_rows.append([InlineKeyboardButton(text="⬅️ Назад",callback_data="ads:menu:back")])
+  return "\n".join(lines).rstrip(),InlineKeyboardMarkup(inline_keyboard=button_rows)
 
  @r.message(F.chat.type.in_({"group","supergroup"}),F.text.regexp(r"(?i)^\s*реклама\s*$"))
  async def show(m:Message):
@@ -157,6 +160,22 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
   elif c.data=="ads:menu:in":text,kb=await render_in(chat_id)
   else:text,kb=await render_links(chat_id)
   await c.message.edit_text(text,parse_mode="HTML",disable_web_page_preview=True,reply_markup=kb);await c.answer()
+
+ @r.callback_query(F.data.regexp(r"^ads:link:delete:\d+$"))
+ async def delete_link(c:CallbackQuery):
+  if not c.message:return
+  link_id=int((c.data or "").rsplit(":",1)[1]);chat_id=c.message.chat.id
+  async with sf() as s:
+   async with s.begin():
+    link=(await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.id==link_id).with_for_update())).scalar_one_or_none()
+    if link is None or link.target_chat_id!=chat_id or not await _owner(s,chat_id,c.from_user.id):await c.answer("Ссылка недоступна.",show_alert=True);return
+    active=(await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_chat_id==chat_id,AdvertisingManualOp.target_url==link.invite_url,AdvertisingManualOp.status=="active").limit(1))).scalar_one_or_none()
+    if active is not None:await c.answer("Эта ссылка используется в активной ОП и не может быть удалена.",show_alert=True);return
+    url=link.invite_url
+    await s.delete(link)
+  try:await c.bot.revoke_chat_invite_link(chat_id,url)
+  except Exception:pass
+  text,kb=await render_links(chat_id);await c.message.edit_text(text,parse_mode="HTML",disable_web_page_preview=True,reply_markup=kb);await c.answer("Ссылка удалена")
 
  @r.callback_query(F.data.regexp(r"^ads:manual:off:\d+$"))
  async def stop(c:CallbackQuery):
