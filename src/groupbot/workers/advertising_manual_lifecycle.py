@@ -54,24 +54,24 @@ async def _notify(bot, op, source_title, target_title, source_url, target_url, s
     for uid, kind in recipients:
         try:
             await bot.send_message(uid, _completion_text(op, source_title, target_title, source_url, target_url, kind), parse_mode="HTML", disable_web_page_preview=True)
+            logger.info("MANUAL_OP_COMPLETION_NOTIFIED op_id=%s user_id=%s recipient=%s", op.id, uid, kind)
         except Exception:
             logger.exception("Could not notify manual advertising completion op=%s user=%s", op.id, uid)
 
 
-async def _revoke_url(bot: Bot, chat_id: int | None, url: str) -> bool:
-    """Revoke a Mimorus-created invite. Return True only when Telegram confirms it.
-
-    Public @username/t.me links are not invite links and therefore do not need revocation.
-    """
+async def _revoke_url(bot: Bot, chat_id: int | None, url: str, *, op_id: int | None = None) -> bool:
     if chat_id is None:
+        logger.warning("MANUAL_OP_INVITE_REVOKE_SKIPPED op_id=%s reason=no_target_chat", op_id)
         return False
     if not url.startswith("https://t.me/+"):
+        logger.info("MANUAL_OP_INVITE_REVOKE_NOT_REQUIRED op_id=%s target_chat=%s", op_id, chat_id)
         return True
     try:
         await bot.revoke_chat_invite_link(chat_id, url)
+        logger.info("MANUAL_OP_INVITE_REVOKED op_id=%s target_chat=%s", op_id, chat_id)
         return True
     except Exception:
-        logger.exception("Could not revoke manual advertising invite chat=%s url=%s", chat_id, url)
+        logger.exception("Could not revoke manual advertising invite op=%s chat=%s", op_id, chat_id)
         return False
 
 
@@ -81,7 +81,7 @@ async def _navigation_url(s: AsyncSession, chat_id: int | None) -> str | None:
     return (await s.execute(select(AdvertisingManualLink.invite_url).where(AdvertisingManualLink.target_chat_id == chat_id, AdvertisingManualLink.mode == NAVIGATION_LINK_MODE).order_by(AdvertisingManualLink.id).limit(1))).scalar_one_or_none()
 
 
-async def _delete_link_after_revoke(session_factory: async_sessionmaker[AsyncSession], *, url: str) -> bool:
+async def _delete_link_after_revoke(session_factory: async_sessionmaker[AsyncSession], *, url: str, op_id: int | None = None) -> bool:
     async with session_factory() as s:
         async with s.begin():
             link = (await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.invite_url == url, AdvertisingManualLink.mode != NAVIGATION_LINK_MODE).with_for_update())).scalar_one_or_none()
@@ -91,28 +91,23 @@ async def _delete_link_after_revoke(session_factory: async_sessionmaker[AsyncSes
             if active is not None:
                 return False
             await s.delete(link)
+            logger.info("MANUAL_OP_LINK_CLEANED op_id=%s link_id=%s target_chat=%s", op_id, link.id, link.target_chat_id)
             return True
 
 
 async def _retry_finished_link_cleanup(bot: Bot, session_factory: async_sessionmaker[AsyncSession]) -> int:
-    """Retry Telegram revocation for finished campaigns before forgetting their links.
-
-    This deliberately keeps a failed invite in advertising_manual_links so the next
-    lifecycle pass can retry instead of leaving a live, untracked OP invite behind.
-    Navigation links are permanent UI links and are never touched here.
-    """
     async with session_factory() as s:
         links = list((await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.mode != NAVIGATION_LINK_MODE).order_by(AdvertisingManualLink.id))).scalars().all())
     removed = 0
     for link in links:
         async with session_factory() as s:
             active = (await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url == link.invite_url, AdvertisingManualOp.status == "active").limit(1))).scalar_one_or_none()
-            finished = (await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url == link.invite_url, AdvertisingManualOp.status.in_(("completed", "stopped"))).limit(1))).scalar_one_or_none()
+            finished = (await s.execute(select(AdvertisingManualOp.id).where(AdvertisingManualOp.target_url == link.invite_url, AdvertisingManualOp.status.in_(("completed", "stopped")).order_by(AdvertisingManualOp.id.desc()).limit(1))).scalar_one_or_none()
         if active is not None or finished is None:
             continue
-        if not await _revoke_url(bot, link.target_chat_id, link.invite_url):
+        if not await _revoke_url(bot, link.target_chat_id, link.invite_url, op_id=finished):
             continue
-        if await _delete_link_after_revoke(session_factory, url=link.invite_url):
+        if await _delete_link_after_revoke(session_factory, url=link.invite_url, op_id=finished):
             removed += 1
     return removed
 
@@ -156,28 +151,26 @@ async def run_advertising_manual_lifecycle_once(bot: Bot, session_factory: async
                     op.completed_at = now
                     notifications.append((op, source_title, target_title, source_url, target_url, source_owner, target_owner))
                     finished_ops.append((op.id, op.target_chat_id, op.target_url))
+                    logger.info("MANUAL_OP_COMPLETED op_id=%s source_chat=%s target_chat=%s mode=%s progress=%s quantity=%s", op.id, op.source_chat_id, op.target_chat_id, op.mode, op.progress_count, op.quantity)
                     changed += 1
                     continue
                 if not source_ok or not target_ok:
                     op.status = "stopped"
                     op.completed_at = now
                     finished_ops.append((op.id, op.target_chat_id, op.target_url))
+                    logger.info("MANUAL_OP_STOPPED op_id=%s source_chat=%s target_chat=%s source_ok=%s target_ok=%s", op.id, op.source_chat_id, op.target_chat_id, source_ok, target_ok)
                     changed += 1
 
-    # Telegram/network calls happen outside DB transactions. A failed revoke leaves
-    # the registered link in DB and will be retried by _retry_finished_link_cleanup.
     for op_id, target_chat_id, target_url in finished_ops:
-        if await _revoke_url(bot, target_chat_id, target_url):
-            if await _delete_link_after_revoke(session_factory, url=target_url):
+        if await _revoke_url(bot, target_chat_id, target_url, op_id=op_id):
+            if await _delete_link_after_revoke(session_factory, url=target_url, op_id=op_id):
                 changed += 1
         else:
-            logger.warning("Manual advertising link retained for retry op=%s", op_id)
+            logger.warning("MANUAL_OP_LINK_RETAINED_FOR_RETRY op_id=%s", op_id)
 
     for op, source_title, target_title, source_url, target_url, source_owner, target_owner in notifications:
         await _notify(bot, op, source_title, target_title, source_url, target_url, source_owner, target_owner)
 
-    # If Mimorus lost admin rights in the target, stop the campaign. We still retain
-    # its registered invite until Telegram lets us revoke it successfully.
     async with session_factory() as s:
         active = list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.status == "active", AdvertisingManualOp.target_chat_id.is_not(None)))).scalars().all())
     for op in active:
@@ -192,8 +185,9 @@ async def run_advertising_manual_lifecycle_once(bot: Bot, session_factory: async
                     locked.completed_at = now
                     stopped = True
                     changed += 1
-        if stopped and await _revoke_url(bot, op.target_chat_id, op.target_url):
-            if await _delete_link_after_revoke(session_factory, url=op.target_url):
+                    logger.info("MANUAL_OP_STOPPED op_id=%s source_chat=%s target_chat=%s reason=bot_not_admin", locked.id, locked.source_chat_id, locked.target_chat_id)
+        if stopped and await _revoke_url(bot, op.target_chat_id, op.target_url, op_id=op.id):
+            if await _delete_link_after_revoke(session_factory, url=op.target_url, op_id=op.id):
                 changed += 1
 
     changed += await _retry_finished_link_cleanup(bot, session_factory)
