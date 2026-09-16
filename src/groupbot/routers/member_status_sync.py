@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from aiogram import Router
 from aiogram.types import ChatMemberUpdated
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from groupbot.advertising_manual_models import AdvertisingManualOp, AdvertisingManualOpCredit
 from groupbot.models import AdminAssignment, AdminRole, Group, GroupMember, MemberStatus
 from groupbot.services.audit import write_audit
 from groupbot.services.helper_role_policy import HELPER_ROLE, detach_helpers_from_mentor
@@ -66,6 +67,60 @@ async def _store_member_status(
     )
 
 
+async def _credit_manual_op_join(
+    session: AsyncSession,
+    *,
+    chat_id: int,
+    user_id: int,
+    invite_url: str | None,
+) -> None:
+    """Credit only a real join/rejoin made through the exact active OP invite."""
+    if not invite_url:
+        return
+
+    ops = list((await session.execute(
+        select(AdvertisingManualOp).where(
+            AdvertisingManualOp.target_chat_id == chat_id,
+            AdvertisingManualOp.target_url == invite_url,
+            AdvertisingManualOp.status == "active",
+            or_(
+                AdvertisingManualOp.mode == "unlimited",
+                AdvertisingManualOp.mode == "days",
+                and_(
+                    AdvertisingManualOp.mode == "subscribers",
+                    AdvertisingManualOp.progress_count < AdvertisingManualOp.quantity,
+                ),
+            ),
+        ).with_for_update()
+    )).scalars().all())
+
+    for op in ops:
+        credit = (await session.execute(
+            select(AdvertisingManualOpCredit).where(
+                AdvertisingManualOpCredit.op_id == op.id,
+                AdvertisingManualOpCredit.user_id == user_id,
+            ).with_for_update()
+        )).scalar_one_or_none()
+
+        if credit is None:
+            counted = op.mode == "subscribers"
+            session.add(AdvertisingManualOpCredit(
+                op_id=op.id,
+                user_id=user_id,
+                satisfied=True,
+                counted=counted,
+                reason="invite_link_join",
+            ))
+            if counted:
+                op.progress_count = min(op.progress_count + 1, op.quantity)
+        else:
+            credit.satisfied = True
+            credit.reason = "invite_link_rejoin"
+            if op.mode == "subscribers" and not credit.counted and op.progress_count < op.quantity:
+                credit.counted = True
+                op.progress_count += 1
+
+
 async def _drop_stale_assignment(
     session: AsyncSession,
     *,
@@ -102,10 +157,6 @@ async def _drop_stale_assignment(
                 reason=f"mentor_{status}",
             )
 
-        # Reserve administrator is valid only while the user is a real active
-        # Telegram administrator. Leaving/banning therefore removes both the
-        # Mimorus rank and the independent reserve flag instead of preserving a
-        # ghost reserve assignment.
         await session.delete(assignment)
 
     promotion = (
@@ -220,6 +271,9 @@ def create_member_status_sync_router(
         if old_status == new_status and raw_old == raw_new:
             return
 
+        rejoined = old_status != MemberStatus.member.value and new_status == MemberStatus.member.value
+        invite_url = getattr(getattr(event, "invite_link", None), "invite_link", None)
+
         async with session_factory() as session:
             async with session.begin():
                 known_group = (
@@ -239,8 +293,19 @@ def create_member_status_sync_router(
                     chat_id=event.chat.id,
                     user=user,
                     status=new_status,
-                    rejoined=(old_status != MemberStatus.member.value and new_status == MemberStatus.member.value),
+                    rejoined=rejoined,
                 )
+
+                # This is the authoritative OP counter path. Merely already being
+                # a member never gives credit: Telegram must report a real
+                # left/restricted -> member transition with the exact invite link.
+                if rejoined and invite_url:
+                    await _credit_manual_op_join(
+                        session,
+                        chat_id=event.chat.id,
+                        user_id=user.id,
+                        invite_url=invite_url,
+                    )
 
                 removed_special_statuses: list[str] = []
                 reserve_cleared = False
@@ -292,6 +357,7 @@ def create_member_status_sync_router(
                         "new_telegram_status": raw_new,
                         "old_member_status": old_status,
                         "new_member_status": new_status,
+                        "invite_link_present": bool(invite_url),
                         "special_statuses_removed": removed_special_statuses,
                         "reserve_cleared": reserve_cleared,
                         "telegram_promotion_tracking_released": promotion_tracking_released,
