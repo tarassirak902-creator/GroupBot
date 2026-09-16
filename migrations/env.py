@@ -14,6 +14,7 @@ from groupbot import advertising_mutual_models  # noqa: F401
 from groupbot import entry_models  # noqa: F401
 from groupbot import network_models  # noqa: F401
 from groupbot import payment_models  # noqa: F401
+from groupbot import support_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
