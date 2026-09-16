@@ -6,7 +6,7 @@ from html import escape
 from typing import Any
 from aiogram import BaseMiddleware,Bot
 from aiogram.types import InlineKeyboardButton,InlineKeyboardMarkup,Message,TelegramObject
-from sqlalchemy import and_,or_,select
+from sqlalchemy import and_,func,or_,select
 from sqlalchemy.ext.asyncio import AsyncSession,async_sessionmaker
 from groupbot.advertising_manual_models import AdvertisingManualOp,AdvertisingManualOpCredit
 from groupbot.advertising_models import AdvertisingDeal,AdvertisingListing,AdvertisingPlacement
@@ -67,15 +67,24 @@ class AdvertisingMandatoryMiddleware(BaseMiddleware):
     async with self.session_factory() as s:
      async with s.begin():
       op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==manual_id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none();credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
-      if op is not None and credit is not None and credit.reason=="joined":
-       if credit.counted and op.mode=="subscribers":op.progress_count=max(op.progress_count-1,0)
+      if op is not None and credit is not None and credit.counted:
+       if op.mode=="subscribers":op.progress_count=max(op.progress_count-1,0)
        credit.counted=False;credit.satisfied=False;credit.reason="left"
-   # Being an old/existing member of B satisfies mandatory access, but NEVER
-   # creates campaign progress. A +1 is created only by chat_member/join-request
-   # tracking carrying this exact campaign invite link.
    if joined:continue
    missing=req;break
   if missing is None:return await handler(event,data)
+  manual_id=missing.get("manual_op_id")
+  if manual_id:
+   async with self.session_factory() as s:
+    async with s.begin():
+     await upsert_user(s,event.from_user)
+     op=(await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.id==manual_id,AdvertisingManualOp.status=="active").with_for_update())).scalar_one_or_none()
+     if op is not None:
+      credit=(await s.execute(select(AdvertisingManualOpCredit).where(AdvertisingManualOpCredit.op_id==manual_id,AdvertisingManualOpCredit.user_id==event.from_user.id).with_for_update())).scalar_one_or_none()
+      if credit is None:s.add(AdvertisingManualOpCredit(op_id=manual_id,user_id=event.from_user.id,satisfied=False,counted=False,reason="pending_op"))
+      elif not credit.counted:
+       credit.satisfied=False;credit.reason="pending_op";credit.credited_at=func.now()
+      logger.info("MANUAL_OP_PENDING op_id=%s source_chat=%s target_chat=%s user_id=%s",manual_id,event.chat.id,missing.get("target_chat_id"),event.from_user.id)
   try:await bot.delete_message(event.chat.id,event.message_id)
   except Exception:logger.info("Could not delete OP-blocked message chat=%s message=%s",event.chat.id,event.message_id)
   name=event.from_user.full_name or event.from_user.username or "Пользователь";link=f'<a href="tg://user?id={event.from_user.id}">{escape(name)}</a>';title=str(missing["title"]).strip() or "Группа";title=title if len(title)<=48 else title[:47].rstrip()+"…"
