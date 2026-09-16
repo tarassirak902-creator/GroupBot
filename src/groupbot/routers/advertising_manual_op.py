@@ -115,7 +115,7 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
  async def render_out(chat_id:int):
   now=datetime.now(timezone.utc)
   async with sf() as s:ops=list((await s.execute(select(AdvertisingManualOp).where(AdvertisingManualOp.source_chat_id==chat_id,AdvertisingManualOp.status=="active",or_(AdvertisingManualOp.mode=="unlimited",and_(AdvertisingManualOp.mode=="days",AdvertisingManualOp.ends_at>now),and_(AdvertisingManualOp.mode=="subscribers",AdvertisingManualOp.progress_count<AdvertisingManualOp.quantity))).order_by(AdvertisingManualOp.id))).scalars().all())
-  lines=["📤 <b>Мы рекламируем</b>,""];rows=[]
+  lines=["📤 <b>Мы рекламируем</b>",""];rows=[]
   if not ops:lines.append("📭 Активных ОП сейчас нет.")
   for i,op in enumerate(ops,1):
    state=(f"{op.progress_count:,}/{op.quantity:,} подписчиков".replace(","," ") if op.mode=="subscribers" else (f"до {op.ends_at.strftime('%d.%m.%Y %H:%M')}" if op.mode=="days" and op.ends_at else "бессрочно"));lines += [f"{i}️⃣ <b>{escape(op.target_title)}</b>",f"┣ 🆔 {op.target_chat_id}",f"┣ 📍 {state}",f"┗ 🔗 <code>{escape(op.target_url)}</code>",""];rows.append([InlineKeyboardButton(text=f"⛔ Отключить №{i}",callback_data=f"ads:manual:off:{op.id}")])
@@ -131,7 +131,7 @@ def create_advertising_manual_op_router(sf:async_sessionmaker[AsyncSession])->Ro
  async def render_links(chat_id:int):
   async with sf() as s:
    links=list((await s.execute(select(AdvertisingManualLink).where(AdvertisingManualLink.target_chat_id==chat_id).order_by(AdvertisingManualLink.id.desc()).limit(30))).scalars().all());active_urls=set((await s.execute(select(AdvertisingManualOp.target_url).where(AdvertisingManualOp.target_chat_id==chat_id,AdvertisingManualOp.status=="active"))).scalars().all())
-  lines=["🔗 <b>Мои рекламные ссылки</b>,""];rows=[]
+  lines=["🔗 <b>Мои рекламные ссылки</b>",""];rows=[]
   if not links:lines.append("📭 Рекламных ссылок ещё нет.\nСоздайте первую командой <code>/ссылка</code>.")
   for i,link in enumerate(links,1):
    used=link.invite_url in active_urls;lines += [f"{i}️⃣ <code>{escape(link.invite_url)}</code>",f"┣ 🎯 {_condition(link.mode,link.quantity)}",f"┗ {'🟢 Используется в активной ОП' if used else '⚪ Сейчас не используется'}",""]
