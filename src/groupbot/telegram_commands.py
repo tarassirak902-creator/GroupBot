@@ -1,13 +1,9 @@
 from aiogram.types import BotCommand
 
 
+# The Telegram slash menu in groups intentionally exposes only one public entry.
+# Other command handlers may still exist for backwards compatibility, but they are
+# not advertised in the '/' menu.
 GROUP_COMMANDS = [
-    BotCommand(command="help", description="❓ Помощь"),
-    BotCommand(command="guide", description="📖 Как пользоваться ботом"),
-    BotCommand(command="commands", description="📋 Все команды"),
-    BotCommand(command="games", description="🎮 Игры"),
-    BotCommand(command="profile", description="👤 Мой профиль"),
-    BotCommand(command="stats", description="📊 Моя активность"),
-    BotCommand(command="rules", description="📜 Правила группы"),
-    BotCommand(command="support", description="🛠 Помощь и поддержка"),
+    BotCommand(command="support", description="🛠 Связаться с создателем Mimorus"),
 ]
