@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -145,18 +145,6 @@ def create_group_sections_nav_router(
                 reply_markup=_back_keyboard(chat_id),
             )
         await callback.answer()
-
-    @router.message(
-        F.chat.type == "private",
-        F.text.in_({"🛠 Поддержка", "🛠 Поддержка (скоро)"}),
-    )
-    async def support_stub(message: Message) -> None:
-        await message.answer(
-            "🛠 <b>Поддержка — скоро</b>\n\n"
-            "Встроенная система обращений в поддержку пока не подключена. "
-            "Кнопка информационная: тикет не создаётся и сообщение никуда автоматически не отправляется.",
-            parse_mode="HTML",
-        )
 
     @router.callback_query(F.data.startswith("tariff:card:"))
     async def truthful_tariff_card(callback: CallbackQuery) -> None:
